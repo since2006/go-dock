@@ -54,6 +54,17 @@ func TestStateTransitions(t *testing.T) {
 	}
 }
 
+func TestSessionKeepsStartDirectory(t *testing.T) {
+	now := t0
+	h := newTestHub(&now)
+	h.Observe(model.Observation{Provider: model.ProviderClaude, SessionID: "a", Cwd: "/work/go-dock", State: model.StateRunning, At: t0})
+	// Claude Code hooks report the directory the shell has cd'ed into.
+	h.Observe(model.Observation{Provider: model.ProviderClaude, SessionID: "a", Cwd: "/work/go-dock/host", State: model.StateRunning, At: t0.Add(time.Second)})
+	if s := h.Snapshot().Sessions[0]; s.Project != "go-dock" || s.Cwd != "/work/go-dock" {
+		t.Fatalf("project followed cd: %+v", s)
+	}
+}
+
 func TestOrdering(t *testing.T) {
 	now := t0
 	h := newTestHub(&now)

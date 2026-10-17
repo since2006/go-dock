@@ -120,7 +120,9 @@ func (h *Hub) observe(o model.Observation) bool {
 	}
 	before := e.clone()
 	s := &e.s
-	if o.Cwd != "" {
+	// A session belongs to the directory it started in. Claude Code hooks
+	// report the shell's current directory, which follows every cd.
+	if o.Cwd != "" && s.Cwd == "" {
 		s.Cwd = o.Cwd
 		s.Project = projectName(o.Cwd)
 	}

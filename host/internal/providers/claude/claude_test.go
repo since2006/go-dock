@@ -230,6 +230,30 @@ func TestTranscripts(t *testing.T) {
 	}
 }
 
+func TestTranscriptsPreferRenamedTitle(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "-work-demo")
+	os.MkdirAll(dir, 0o755)
+	path := filepath.Join(dir, "s1.jsonl")
+	write := func(lines ...string) {
+		f, _ := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		f.WriteString(strings.Join(lines, "\n") + "\n")
+		f.Close()
+	}
+	tr := newTranscripts(filepath.Dir(dir), pricing.New(nil))
+	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+
+	write(`{"type":"ai-title","aiTitle":"go-dock-v1-host-plan","sessionId":"s1"}`,
+		`{"type":"custom-title","customTitle":"detail","sessionId":"s1"}`)
+	if got := tr.poll(true, now).titles["s1"]; got != "detail" {
+		t.Fatalf("title = %q, want the /rename one", got)
+	}
+	// Claude Code keeps writing generated titles after a rename.
+	write(`{"type":"ai-title","aiTitle":"another generated title","sessionId":"s1"}`)
+	if got := tr.poll(false, now).titles["s1"]; got != "detail" {
+		t.Fatalf("title after new ai-title = %q", got)
+	}
+}
+
 func TestInstallRoundTrip(t *testing.T) {
 	home := t.TempDir()
 	orig, _ := os.ReadFile(filepath.Join("testdata", "settings.json"))

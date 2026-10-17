@@ -16,9 +16,10 @@ import (
 // window is how far back token statistics reach.
 const window = 8 * 24 * time.Hour
 
-// transcripts tails ~/.claude/projects/**/*.jsonl for token usage and AI
-// titles. One API response is written as several lines sharing a message
-// id, so usage is kept per message id and each field takes its maximum.
+// transcripts tails ~/.claude/projects/**/*.jsonl for token usage and
+// session titles. One API response is written as several lines sharing a
+// message id, so usage is kept per message id and each field takes its
+// maximum.
 type transcripts struct {
 	root   string
 	tailer *jsonl.Tailer
@@ -29,6 +30,18 @@ type transcripts struct {
 
 	agents map[string]*agentTrack // by transcript path; poll goroutine only
 	live   func(sessionID string) bool
+	names  map[string]*sessionNames // by session id; poll goroutine only
+}
+
+// sessionNames are the two titles Claude Code keeps for a session: the
+// one it generates and the one set with /rename, which wins.
+type sessionNames struct{ ai, custom string }
+
+func (n *sessionNames) title() string {
+	if n.custom != "" {
+		return n.custom
+	}
+	return n.ai
 }
 
 type messageUsage struct {
@@ -39,12 +52,12 @@ type messageUsage struct {
 
 type pollResult struct {
 	changed bool
-	titles  map[string]string // sessionID -> latest AI title
+	titles  map[string]string // sessionID -> title, for sessions whose title lines were read
 	agents  []model.Observation
 }
 
 func newTranscripts(root string, prices *pricing.Table) *transcripts {
-	return &transcripts{root: root, tailer: jsonl.NewTailer(), prices: prices, messages: map[string]*messageUsage{}, agents: map[string]*agentTrack{}}
+	return &transcripts{root: root, tailer: jsonl.NewTailer(), prices: prices, messages: map[string]*messageUsage{}, agents: map[string]*agentTrack{}, names: map[string]*sessionNames{}}
 }
 
 func (t *transcripts) setPrices(p *pricing.Table) {
@@ -76,11 +89,12 @@ func (t *transcripts) poll(rescan bool, now time.Time) pollResult {
 }
 
 type transcriptLine struct {
-	Type      string    `json:"type"`
-	Timestamp time.Time `json:"timestamp"`
-	SessionID string    `json:"sessionId"`
-	AITitle   string    `json:"aiTitle"`
-	Message   struct {
+	Type        string    `json:"type"`
+	Timestamp   time.Time `json:"timestamp"`
+	SessionID   string    `json:"sessionId"`
+	AITitle     string    `json:"aiTitle"`
+	CustomTitle string    `json:"customTitle"`
+	Message     struct {
 		ID      string          `json:"id"`
 		Model   string          `json:"model"`
 		Content json.RawMessage `json:"content"`
@@ -98,8 +112,9 @@ type transcriptLine struct {
 }
 
 var (
-	markAssistant = []byte(`"type":"assistant"`)
-	markTitle     = []byte(`"type":"ai-title"`)
+	markAssistant   = []byte(`"type":"assistant"`)
+	markTitle       = []byte(`"type":"ai-title"`)
+	markCustomTitle = []byte(`"type":"custom-title"`)
 )
 
 // line handles one transcript line and reports whether token totals
@@ -107,7 +122,7 @@ var (
 func (t *transcripts) line(b []byte, titles map[string]string, agent *agentTrack) bool {
 	// Most lines are large tool results; skip them without decoding.
 	isAssistant := bytes.Contains(b, markAssistant)
-	if !isAssistant && !bytes.Contains(b, markTitle) {
+	if !isAssistant && !bytes.Contains(b, markTitle) && !bytes.Contains(b, markCustomTitle) {
 		return false
 	}
 	var l transcriptLine
@@ -115,9 +130,23 @@ func (t *transcripts) line(b []byte, titles map[string]string, agent *agentTrack
 		return false
 	}
 	switch l.Type {
-	case "ai-title":
-		if l.SessionID != "" && l.AITitle != "" {
-			titles[l.SessionID] = model.Truncate(l.AITitle, providers.TitleLen)
+	case "ai-title", "custom-title":
+		if l.SessionID == "" {
+			return false
+		}
+		n := t.names[l.SessionID]
+		if n == nil {
+			n = &sessionNames{}
+			t.names[l.SessionID] = n
+		}
+		if l.Type == "ai-title" && l.AITitle != "" {
+			n.ai = model.Truncate(l.AITitle, providers.TitleLen)
+		}
+		if l.Type == "custom-title" && l.CustomTitle != "" {
+			n.custom = model.Truncate(l.CustomTitle, providers.TitleLen)
+		}
+		if title := n.title(); title != "" {
+			titles[l.SessionID] = title
 		}
 		return false
 	case "assistant":
