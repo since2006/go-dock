@@ -42,7 +42,9 @@ type rollouts struct {
 type thread struct {
 	id     string
 	cwd    string
-	hidden bool // sub-agent or internal thread
+	hidden bool   // internal thread (guardian review, memory, ...)
+	parent string // for a spawned subagent: the root session it works for
+	role   string // subagent role, e.g. "explorer"
 
 	state   model.State // empty until the first turn event
 	detail  string
@@ -168,7 +170,11 @@ func (r *rollouts) reconcile(now time.Time) []model.Observation {
 		}
 		if !open {
 			if th.open {
-				out = append(out, model.Observation{Provider: P, SessionID: th.id, End: true, Source: "rollout"})
+				end := model.Observation{Provider: P, SessionID: th.id, End: true, Source: "rollout"}
+				if th.parent != "" {
+					end.SessionID, end.AgentID = th.parent, th.id
+				}
+				out = append(out, end)
 				th.open, th.sentState, th.sentAt, th.sentTitle = false, "", time.Time{}, ""
 			}
 			continue
@@ -176,6 +182,12 @@ func (r *rollouts) reconcile(now time.Time) []model.Observation {
 		st, at := th.state, th.stateAt
 		if st == "" {
 			st, at = model.StateIdle, th.metaAt
+		}
+		if th.parent != "" {
+			if o, ok := th.agentObservation(st, at); ok {
+				out = append(out, o)
+			}
+			continue
 		}
 		switch {
 		case !th.open || st != th.sentState || !at.Equal(th.sentAt):
@@ -192,6 +204,30 @@ func (r *rollouts) reconcile(now time.Time) []model.Observation {
 	return out
 }
 
+// agentObservation reports a subagent thread as an agent of its session.
+// An agent that has not started a turn yet counts as running.
+func (th *thread) agentObservation(st model.State, at time.Time) (model.Observation, bool) {
+	switch st {
+	case model.StateIdle:
+		if th.state == "" {
+			st = model.StateRunning
+		} else {
+			st = model.StateDone // interrupted
+		}
+	case model.StateDone, model.StateRunning:
+	default:
+		st = model.StateRunning
+	}
+	if th.open && st == th.sentState && at.Equal(th.sentAt) && th.title == th.sentTitle {
+		return model.Observation{}, false
+	}
+	th.open, th.sentState, th.sentAt, th.sentTitle = true, st, at, th.title
+	return model.Observation{
+		Provider: P, SessionID: th.parent, Cwd: th.cwd, At: at, Source: "rollout",
+		AgentID: th.id, AgentType: th.role, AgentDesc: th.title, State: st,
+	}, true
+}
+
 type rolloutLine struct {
 	Timestamp time.Time       `json:"timestamp"`
 	Type      string          `json:"type"`
@@ -206,6 +242,7 @@ type sessionMeta struct {
 	Source       json.RawMessage `json:"source"`
 	ThreadSource string          `json:"thread_source"`
 	ParentThread *string         `json:"parent_thread_id"`
+	AgentRole    string          `json:"agent_role"`
 }
 
 type eventMsg struct {
@@ -266,7 +303,14 @@ func (r *rollouts) line(th *thread, b []byte) bool {
 			if th.metaAt.IsZero() {
 				th.metaAt = l.Timestamp
 			}
-			th.hidden = hiddenThread(m)
+			th.hidden = internalThread(m)
+			if !th.hidden {
+				th.parent = subagentParent(m)
+				th.role = m.AgentRole
+				if th.role == "" && th.parent != "" {
+					th.role = "subagent"
+				}
+			}
 		}
 		if m.Cwd != "" {
 			th.cwd = m.Cwd
@@ -288,21 +332,40 @@ func (r *rollouts) line(th *thread, b []byte) bool {
 	return false
 }
 
-func hiddenThread(m sessionMeta) bool {
-	if m.ParentThread != nil && *m.ParentThread != "" {
-		return true
-	}
+// internalThread reports Codex's own helper threads, which go-dock hides.
+func internalThread(m sessionMeta) bool {
 	switch m.ThreadSource {
-	case "subagent", "guardian_review", "memory_consolidation":
+	case "guardian_review", "memory_consolidation":
 		return true
 	}
 	var src map[string]json.RawMessage
 	if json.Unmarshal(m.Source, &src) == nil {
-		_, sub := src["subagent"]
 		_, internal := src["internal"]
-		return sub || internal
+		return internal
 	}
 	return false
+}
+
+// subagentParent returns the session a spawned subagent thread belongs to,
+// or "" for a top-level thread. All threads of one session share its
+// session_id; older versions only link the direct parent.
+func subagentParent(m sessionMeta) string {
+	sub := m.ThreadSource == "subagent" || (m.ParentThread != nil && *m.ParentThread != "")
+	var src map[string]json.RawMessage
+	if json.Unmarshal(m.Source, &src) == nil {
+		_, ok := src["subagent"]
+		sub = sub || ok
+	}
+	if !sub {
+		return ""
+	}
+	if m.SessionID != "" && m.SessionID != m.ID {
+		return m.SessionID
+	}
+	if m.ParentThread != nil {
+		return *m.ParentThread
+	}
+	return ""
 }
 
 func (r *rollouts) event(th *thread, ts time.Time, e eventMsg) bool {

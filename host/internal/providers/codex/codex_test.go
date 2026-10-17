@@ -61,10 +61,16 @@ func setLock(t *testing.T, home, id string, on bool) {
 	}
 }
 
+// byID keys session observations by session id and agent observations by
+// "agent:" + agent id.
 func byID(obs []model.Observation) map[string]model.Observation {
 	m := map[string]model.Observation{}
 	for _, o := range obs {
-		m[o.SessionID] = o
+		if o.AgentID != "" {
+			m["agent:"+o.AgentID] = o
+		} else {
+			m[o.SessionID] = o
+		}
 	}
 	return m
 }
@@ -75,8 +81,14 @@ func TestRolloutParsing(t *testing.T) {
 	res := r.poll(true, testNow)
 
 	got := byID(res.obs)
-	if len(got) != 1 {
-		t.Fatalf("observations = %+v, want only the locked legacy thread", res.obs)
+	if len(got) != 2 {
+		t.Fatalf("observations = %+v, want the locked legacy thread and its subagent", res.obs)
+	}
+	// The spawned subagent is an agent of the session it works for.
+	a := got["agent:"+idSubagent]
+	if a.SessionID != idLegacy || a.AgentType != "explorer" || a.AgentDesc != "列出所有 API 路由" ||
+		a.State != model.StateRunning || !a.At.Equal(time.Date(2026, 10, 17, 2, 0, 1, 0, time.UTC)) {
+		t.Fatalf("subagent observation = %+v", a)
 	}
 	o := got[idLegacy]
 	if o.State != model.StateIdle || o.Detail != "已中断" || o.Title != "Fix the flaky test" ||
@@ -129,6 +141,13 @@ func TestRolloutParsing(t *testing.T) {
 		t.Fatalf("paginated = %+v", res.obs)
 	}
 
+	// Closing the subagent's thread ends the agent, not the session.
+	setLock(t, home, idSubagent, false)
+	res = r.poll(false, testNow)
+	if len(res.obs) != 1 || !res.obs[0].End || res.obs[0].SessionID != idLegacy || res.obs[0].AgentID != idSubagent {
+		t.Fatalf("subagent close = %+v", res.obs)
+	}
+
 	// Closing the legacy thread ends it; reopening reports the new turn.
 	setLock(t, home, idLegacy, false)
 	res = r.poll(false, testNow)
@@ -157,7 +176,7 @@ func TestRolloutWithoutLocks(t *testing.T) {
 
 	r := newRollouts(home, time.UTC)
 	got := byID(r.poll(true, time.Now()).obs)
-	if len(got) != 1 || got[idLegacy].State != model.StateIdle {
+	if len(got) != 2 || got[idLegacy].State != model.StateIdle || got["agent:"+idSubagent].SessionID != idLegacy {
 		t.Fatalf("mtime mode = %+v", got)
 	}
 }
@@ -424,5 +443,44 @@ func TestFirstField(t *testing.T) {
 	}
 	if isOurHook(map[string]any{"command": "say done"}) || isOurHook(map[string]any{"command": "/bin/go-dock hook claude"}) {
 		t.Error("foreign hook matched")
+	}
+}
+
+func TestSubagentHooks(t *testing.T) {
+	now := time.Unix(1792200000, 0)
+	o, ok, err := hookObservation([]byte(`{"hook_event_name":"SubagentStart","session_id":"root","agent_id":"t2","agent_type":"explorer","turn_id":"x"}`), now)
+	if err != nil || !ok || o.SessionID != "root" || o.AgentID != "t2" || o.AgentType != "explorer" || o.State != model.StateRunning {
+		t.Fatalf("start = %+v %v %v", o, ok, err)
+	}
+	o, _, _ = hookObservation([]byte(`{"hook_event_name":"PreToolUse","session_id":"root","agent_id":"t2","agent_type":"explorer","tool_name":"Bash","tool_input":{"command":"rg TODO"}}`), now)
+	if o.AgentID != "t2" || o.Detail != "Bash: rg TODO" || o.ToolDone != "" {
+		t.Fatalf("agent tool = %+v", o)
+	}
+	o, _, _ = hookObservation([]byte(`{"hook_event_name":"SubagentStop","session_id":"root","agent_id":"t2","agent_type":"explorer"}`), now)
+	if o.AgentID != "t2" || o.State != model.StateDone {
+		t.Fatalf("stop = %+v", o)
+	}
+	o, _, _ = hookObservation([]byte(`{"hook_event_name":"PostToolUse","session_id":"root","tool_name":"Bash","tool_input":{"command":"ls"}}`), now)
+	if o.AgentID != "" || o.ToolDone != "Bash" {
+		t.Fatalf("main tool = %+v", o)
+	}
+	o, _, _ = hookObservation([]byte(`{"hook_event_name":"UserPromptSubmit","session_id":"root","prompt":"hi"}`), now)
+	if !o.NewTurn || o.AgentID != "" {
+		t.Fatalf("prompt = %+v", o)
+	}
+}
+
+func TestHooksStaleWithoutSubagentEvents(t *testing.T) {
+	home := t.TempDir()
+	tg := providers.Target{Exe: "/opt/go-dock/go-dock", Addr: "127.0.0.1:47321"}
+	if err := InstallHooks(home, tg); err != nil {
+		t.Fatal(err)
+	}
+	f, _ := providers.ReadJSONFile(hooksPath(home))
+	f.Delete("hooks.SubagentStart")
+	f.Delete("hooks.SubagentStop")
+	f.Save()
+	if st := HooksStatus(home, tg); !st.Installed || !st.Stale {
+		t.Fatalf("old install not reported as needing an update: %+v", st)
 	}
 }

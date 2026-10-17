@@ -11,38 +11,90 @@ import (
 
 // HandleHook maps one Claude Code hook payload to the hub.
 func (p *Provider) HandleHook(body []byte) error {
-	o, ok, err := hookObservation(body, time.Now())
+	obs, err := hookObservations(body, time.Now())
 	if err != nil {
 		return err
 	}
-	if ok {
-		p.mu.Lock()
-		if o.Title == "" {
-			o.Title = p.titles[o.SessionID]
+	for _, o := range obs {
+		if o.AgentID == "" && o.State != "" {
+			p.mu.Lock()
+			if o.Title == "" {
+				o.Title = p.titles[o.SessionID]
+			}
+			p.mu.Unlock()
 		}
-		p.mu.Unlock()
 		p.sink.Observe(o)
 	}
 	return nil
 }
 
-func hookObservation(body []byte, now time.Time) (model.Observation, bool, error) {
+func hookObservations(body []byte, now time.Time) ([]model.Observation, error) {
 	var h providers.HookPayload
 	if err := json.Unmarshal(body, &h); err != nil {
-		return model.Observation{}, false, fmt.Errorf("hook payload: %w", err)
+		return nil, fmt.Errorf("hook payload: %w", err)
 	}
 	if h.SessionID == "" {
-		return model.Observation{}, false, fmt.Errorf("hook payload without session_id")
+		return nil, fmt.Errorf("hook payload without session_id")
 	}
 	o := model.Observation{Provider: P, SessionID: h.SessionID, Cwd: h.Cwd, At: now, Source: "hook"}
+	if h.AgentID != "" {
+		// Inside a subagent: the event is about that agent, not the session.
+		o.AgentID, o.AgentType = h.AgentID, h.AgentType
+		switch h.Event {
+		case "SubagentStart":
+			o.State = model.StateRunning
+		case "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionDenied":
+			o.State = model.StateRunning
+			o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+		case "PermissionRequest":
+			o.State = model.StateApproval
+			o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+		case "Notification":
+			if h.NotificationType != "permission_prompt" {
+				return nil, nil
+			}
+			o.State = model.StateApproval
+		case "SubagentStop":
+			o.State = model.StateDone
+		case "StopFailure":
+			o.State = model.StateError
+			o.Detail = model.Truncate(h.ErrorText(), providers.DetailLen)
+		default:
+			return nil, nil
+		}
+		return []model.Observation{o}, nil
+	}
+
 	switch h.Event {
 	case "SessionStart":
 		o.State = model.StateIdle
 	case "UserPromptSubmit":
 		o.State = model.StateRunning
-	case "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionDenied":
+		o.NewTurn = true
+	case "PreToolUse", "PermissionDenied":
 		o.State = model.StateRunning
 		o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+		if h.Event == "PreToolUse" && providers.AgentTool(h.ToolName) {
+			o.AgentLaunch = true
+			o.AgentType, o.AgentDesc = providers.AgentLaunch(h.ToolInput)
+		}
+	case "PostToolUse", "PostToolUseFailure":
+		o.State = model.StateRunning
+		o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+		o.ToolDone = h.ToolName
+		if providers.AgentTool(h.ToolName) {
+			// The response names the agent the call started.
+			var resp struct {
+				AgentID string `json:"agentId"`
+			}
+			if json.Unmarshal(h.ToolResponse, &resp) == nil && resp.AgentID != "" {
+				typ, desc := providers.AgentLaunch(h.ToolInput)
+				return []model.Observation{o, {
+					Provider: P, SessionID: h.SessionID, At: now, Source: "hook",
+					AgentID: resp.AgentID, AgentType: typ, AgentDesc: desc,
+				}}, nil
+			}
+		}
 	case "PermissionRequest":
 		o.State = model.StateApproval
 		o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
@@ -54,7 +106,7 @@ func hookObservation(body []byte, now time.Time) (model.Observation, bool, error
 			o.State = model.StateInput
 			o.Detail = model.Truncate(h.Message, providers.DetailLen)
 		default:
-			return o, false, nil
+			return nil, nil
 		}
 	case "Stop":
 		o.State = model.StateDone
@@ -64,9 +116,9 @@ func hookObservation(body []byte, now time.Time) (model.Observation, bool, error
 	case "SessionEnd":
 		o.End = true
 	default:
-		return o, false, nil
+		return nil, nil
 	}
-	return o, true, nil
+	return []model.Observation{o}, nil
 }
 
 // statuslinePayload is the part of the statusLine stdin JSON go-dock uses.

@@ -150,3 +150,135 @@ func TestMetadataOnly(t *testing.T) {
 		}
 	}
 }
+
+func agentObs(session, agent string, st model.State, at time.Time, detail string) model.Observation {
+	return model.Observation{Provider: model.ProviderClaude, SessionID: session, AgentID: agent, AgentType: "Explore", State: st, At: at, Detail: detail, Source: "hook"}
+}
+
+func TestAgentsDoNotOverwriteSession(t *testing.T) {
+	now := t0
+	h := newTestHub(&now)
+	h.Observe(obs("s", model.StateRunning, t0, "Agent: 查找接口"))
+	h.Observe(agentObs("s", "a1", model.StateRunning, t0.Add(time.Second), "Read: main.go"))
+	s := h.Snapshot().Sessions[0]
+	if s.Detail != "Agent: 查找接口" || s.State != model.StateRunning {
+		t.Fatalf("session overwritten by agent: %+v", s)
+	}
+	if len(s.Agents) != 1 || s.Agents[0].Detail != "Read: main.go" || s.Agents[0].Type != "Explore" {
+		t.Fatalf("agents = %+v", s.Agents)
+	}
+	if !s.Updated.Equal(t0.Add(time.Second)) {
+		t.Fatal("agent activity did not keep the session fresh")
+	}
+
+	// A session state change older than the agent's news still applies:
+	// ordering is per session state, not per agent activity.
+	h.Observe(obs("s", model.StateDone, t0.Add(500*time.Millisecond), ""))
+	if got := h.Snapshot().Sessions[0].State; got != model.StateDone {
+		t.Fatalf("session state = %s", got)
+	}
+}
+
+func TestAgentLaunchDescriptions(t *testing.T) {
+	now := t0
+	h := newTestHub(&now)
+	launch := func(desc string) model.Observation {
+		return model.Observation{Provider: model.ProviderClaude, SessionID: "s", State: model.StateRunning, At: t0,
+			AgentLaunch: true, AgentType: "Explore", AgentDesc: desc}
+	}
+	h.Observe(launch("看工具栏"))
+	h.Observe(launch("看对话框"))
+	h.Observe(agentObs("s", "a1", model.StateRunning, t0.Add(time.Second), ""))
+	h.Observe(agentObs("s", "a2", model.StateRunning, t0.Add(2*time.Second), ""))
+	agents := h.Snapshot().Sessions[0].Agents
+	if agents[0].Desc != "看工具栏" || agents[1].Desc != "看对话框" {
+		t.Fatalf("descriptions not claimed in launch order: %+v", agents)
+	}
+	// The exact id-to-description mapping from the tool response wins.
+	h.Observe(model.Observation{Provider: model.ProviderClaude, SessionID: "s", AgentID: "a1", AgentDesc: "看对话框"})
+	h.Observe(model.Observation{Provider: model.ProviderClaude, SessionID: "s", AgentID: "a2", AgentDesc: "看工具栏"})
+	agents = h.Snapshot().Sessions[0].Agents
+	if agents[0].Desc != "看对话框" || agents[1].Desc != "看工具栏" {
+		t.Fatalf("descriptions = %+v", agents)
+	}
+}
+
+func TestAgentLifecycle(t *testing.T) {
+	now := t0
+	h := newTestHub(&now)
+
+	// The stop of an agent nobody saw start (Claude's internal agents) is
+	// ignored and creates nothing.
+	h.Observe(agentObs("ghost", "x", model.StateDone, t0, ""))
+	if n := len(h.Snapshot().Sessions); n != 0 {
+		t.Fatalf("stop created a session")
+	}
+
+	h.Observe(obs("s", model.StateDone, t0, ""))
+	h.Observe(agentObs("s", "a1", model.StateRunning, t0, ""))
+	h.Observe(agentObs("s", "a2", model.StateApproval, t0, "Bash: rm -rf dist"))
+	snap := h.Snapshot()
+	s := snap.Sessions[0]
+	if st, from := s.Effective(); st != model.StateApproval || from == nil || from.ID != "a2" {
+		t.Fatalf("effective = %s %+v", st, from)
+	}
+	if snap.Counts[model.StateApproval] != 1 || snap.Counts[model.StateDone] != 0 {
+		t.Fatalf("counts = %v", snap.Counts)
+	}
+	if s.Agents[0].ID != "a2" {
+		t.Fatalf("agents not ordered by urgency: %+v", s.Agents)
+	}
+
+	now = t0.Add(time.Minute)
+	h.Observe(agentObs("s", "a2", model.StateDone, now, ""))
+	h.Observe(model.Observation{Provider: model.ProviderClaude, SessionID: "s", AgentID: "a1", End: true, At: now})
+	for _, a := range h.Snapshot().Sessions[0].Agents {
+		if a.State != model.StateDone || a.Detail != "" {
+			t.Fatalf("agent not done: %+v", a)
+		}
+	}
+	now = now.Add(agentLinger + time.Second)
+	h.Tick()
+	if n := len(h.Snapshot().Sessions[0].Agents); n != 0 {
+		t.Fatalf("finished agents kept: %d", n)
+	}
+
+	h.Observe(agentObs("s", "a3", model.StateRunning, now, ""))
+	h.Observe(model.Observation{Provider: model.ProviderClaude, SessionID: "s", End: true})
+	if n := len(h.Snapshot().Sessions); n != 0 {
+		t.Fatal("session end kept the session")
+	}
+}
+
+func TestToolTally(t *testing.T) {
+	now := t0
+	h := newTestHub(&now)
+	tool := func(name string) model.Observation {
+		return model.Observation{Provider: model.ProviderClaude, SessionID: "s", State: model.StateRunning, ToolDone: name}
+	}
+	h.Observe(tool("Read"))
+	h.Observe(tool("Bash"))
+	h.Observe(tool("Read"))
+	tools := h.Snapshot().Sessions[0].Tools
+	if len(tools) != 2 || tools[0] != (model.ToolCount{Name: "Read", Count: 2}) || tools[1].Count != 1 {
+		t.Fatalf("tools = %+v", tools)
+	}
+	h.Observe(model.Observation{Provider: model.ProviderClaude, SessionID: "s", State: model.StateRunning, NewTurn: true})
+	if tools := h.Snapshot().Sessions[0].Tools; len(tools) != 0 {
+		t.Fatalf("new turn kept tally: %+v", tools)
+	}
+}
+
+func TestPendingLaunchesExpire(t *testing.T) {
+	now := t0
+	h := newTestHub(&now)
+	h.Observe(model.Observation{Provider: model.ProviderClaude, SessionID: "s", State: model.StateRunning, At: t0,
+		AgentLaunch: true, AgentType: "Explore", AgentDesc: "old"})
+	now = t0.Add(pendingTTL + time.Second)
+	h.Observe(obs("s", model.StateRunning, now, "")) // keep the session fresh
+	h.Tick()
+	h.Observe(agentObs("s", "a1", model.StateRunning, now, ""))
+	if d := h.Snapshot().Sessions[0].Agents[0].Desc; d != "" {
+		t.Fatalf("expired launch claimed: %q", d)
+	}
+}

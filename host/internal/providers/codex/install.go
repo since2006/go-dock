@@ -13,6 +13,7 @@ import (
 var hookEvents = []string{
 	"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest",
 	"PostToolUse", "Stop", "Interrupt", "SessionEnd",
+	"SubagentStart", "SubagentStop",
 }
 
 const trustNote = "安装后需在 Codex 中运行 /hooks 信任这些 hooks 才会生效"

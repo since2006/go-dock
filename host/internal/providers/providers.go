@@ -37,6 +37,25 @@ type HookPayload struct {
 	LastMessage      string          `json:"last_assistant_message"`
 	Source           string          `json:"source"`
 	Reason           string          `json:"reason"`
+	// Set when the hook fires inside a subagent (and on SubagentStart/Stop).
+	AgentID      string          `json:"agent_id"`
+	AgentType    string          `json:"agent_type"`
+	ToolResponse json.RawMessage `json:"tool_response"`
+}
+
+// AgentTool is the name of the tool that starts a subagent; older Claude
+// Code versions called it Task.
+func AgentTool(name string) bool { return name == "Agent" || name == "Task" }
+
+// AgentLaunch reads the subagent type and task description from an Agent
+// tool call.
+func AgentLaunch(input json.RawMessage) (typ, desc string) {
+	var in struct {
+		Description  string `json:"description"`
+		SubagentType string `json:"subagent_type"`
+	}
+	_ = json.Unmarshal(input, &in)
+	return in.SubagentType, model.Truncate(in.Description, DetailLen)
 }
 
 // ErrorText renders the error field, which may be a string or an object.

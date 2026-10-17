@@ -30,15 +30,43 @@ func hookObservation(body []byte, now time.Time) (model.Observation, bool, error
 		return model.Observation{}, false, fmt.Errorf("hook payload without session_id")
 	}
 	o := model.Observation{Provider: P, SessionID: h.SessionID, Cwd: h.Cwd, At: now, Source: "hook"}
+	if h.AgentID != "" {
+		// A spawned subagent thread: session_id is the root session and
+		// agent_id the subagent's thread.
+		o.AgentID, o.AgentType = h.AgentID, h.AgentType
+		switch h.Event {
+		case "SubagentStart":
+			o.State = model.StateRunning
+		case "UserPromptSubmit":
+			o.State = model.StateRunning
+			o.AgentDesc = model.Truncate(h.Prompt, providers.DetailLen)
+		case "PreToolUse", "PostToolUse":
+			o.State = model.StateRunning
+			o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+		case "PermissionRequest":
+			o.State = model.StateApproval
+			o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+		case "SubagentStop", "Stop", "Interrupt":
+			o.State = model.StateDone
+		default:
+			return o, false, nil
+		}
+		return o, true, nil
+	}
 	switch h.Event {
 	case "SessionStart":
 		o.State = model.StateIdle
 	case "UserPromptSubmit":
 		o.State = model.StateRunning
 		o.Title = model.Truncate(h.Prompt, providers.TitleLen)
-	case "PreToolUse", "PostToolUse":
+		o.NewTurn = true
+	case "PreToolUse":
 		o.State = model.StateRunning
 		o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+	case "PostToolUse":
+		o.State = model.StateRunning
+		o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+		o.ToolDone = h.ToolName
 	case "PermissionRequest":
 		o.State = model.StateApproval
 		o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)

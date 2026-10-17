@@ -44,6 +44,7 @@ func New(home string, sink providers.Sink, prices *pricing.Table, log *slog.Logg
 	}
 	p.sessions = newSessionsWatcher(filepath.Join(home, "sessions"))
 	p.transcripts = newTranscripts(filepath.Join(home, "projects"), prices)
+	p.transcripts.live = p.sessions.live
 	return p
 }
 
@@ -106,6 +107,9 @@ func (p *Provider) pollTranscripts(rescan bool) {
 	// A rescan also republishes so totals roll over at midnight.
 	if res.changed || rescan {
 		p.publishTokens()
+	}
+	for _, o := range res.agents {
+		p.sink.Observe(o)
 	}
 }
 

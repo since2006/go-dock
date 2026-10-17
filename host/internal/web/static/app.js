@@ -145,19 +145,41 @@ function renderSessions(snap) {
     .map((s) => el("span", { class: `badge ${s}` }, `${STATE_LABEL[s]} ${snap.counts[s]}`)));
 
   const list = $("#sessions");
-  const rows = (snap.sessions || []).filter((s) => showIdle || s.state !== "idle");
+  const rows = (snap.sessions || []).filter((s) => showIdle || effectiveState(s) !== "idle");
   if (!rows.length) {
     list.replaceChildren(el("div", { class: "empty" },
       snap.sessions && snap.sessions.length ? "没有活跃任务（勾选「显示空闲会话」查看全部）" : "暂无会话。启动 Claude Code 或 Codex 后会出现在这里。"));
     return;
   }
-  list.replaceChildren(...rows.map((s) => el("div", { class: `session ${s.state}`, title: s.cwd || "" },
-    el("span", {}, el("span", { class: `badge ${s.state}` }, STATE_LABEL[s.state] || s.state)),
-    el("span", { class: `prov ${s.provider}` }, PROVIDER_NAME[s.provider] || s.provider),
-    el("span", { class: "project" }, s.project || s.session_id.slice(0, 8)),
-    el("span", { class: "text" }, s.detail || s.title || ""),
-    el("span", { class: "time", title: `来源：${s.source || "—"}` }, ago(s.since, now)),
+  list.replaceChildren(...rows.map((s) => el("div", { class: "group" },
+    el("div", { class: `session ${s.state}`, title: s.cwd || "" },
+      el("span", {}, el("span", { class: `badge ${s.state}` }, STATE_LABEL[s.state] || s.state)),
+      el("span", { class: `prov ${s.provider}` }, PROVIDER_NAME[s.provider] || s.provider),
+      el("span", { class: "project" }, s.project || s.session_id.slice(0, 8)),
+      el("span", { class: "text" },
+        el("span", { class: "line" }, s.detail || s.title || ""),
+        s.tools && s.tools.length ? el("span", { class: "tally" }, s.tools.map((t) => `${t.name} ×${t.count}`).join(" · ")) : null),
+      el("span", { class: "time", title: `来源：${s.source || "—"}` }, ago(s.since, now)),
+    ),
+    ...(s.agents || []).map((a) => el("div", { class: `session sub ${a.state}` },
+      el("span", { class: "branch", "aria-hidden": "true" }, "└"),
+      el("span", {}, el("span", { class: `badge small ${a.state}` }, STATE_LABEL[a.state] || a.state)),
+      el("span", { class: "agent-type" }, a.type || "agent"),
+      el("span", { class: "text" }, [a.desc, a.detail].filter(Boolean).join(" · ")),
+      el("span", { class: "time" }, ACTIVE.includes(a.state) ? fmtDuration((now - toDate(a.since)) / 1000) : ago(a.updated, now)),
+    )),
   )));
+}
+
+const ACTIVE = ["approval", "input", "error", "running"];
+
+// The most urgent of a session's own state and its agents' states.
+function effectiveState(s) {
+  let st = s.state;
+  for (const a of s.agents || []) {
+    if (ACTIVE.includes(a.state) && STATE_ORDER.indexOf(a.state) < STATE_ORDER.indexOf(st)) st = a.state;
+  }
+  return st;
 }
 
 function renderDevicePill(dev) {
@@ -283,7 +305,8 @@ function renderScreen(frame) {
     ? shown.map((s) => el("div", { class: `scr-row ${s.state}` },
       el("span", { class: "chip" }, scrIcon(SCR_ICONS[s.state] ? s.state : "idle", 22, s.state === "running" || s.state === "done" ? 2.4 : 2.2)),
       el("div", { class: "mid" },
-        el("div", { class: "l1" }, el("span", { class: "project" }, s.project || "—"), el("span", { class: `prov ${s.p}` }, PROVIDER_NAME[s.p] || s.p)),
+        el("div", { class: "l1" }, el("span", { class: "project" }, s.project || "—"), el("span", { class: `prov ${s.p}` }, PROVIDER_NAME[s.p] || s.p),
+          s.agents_total ? el("span", { class: "subs" }, `子任务 ${s.agents_active || s.agents_total}`) : null),
         el("span", { class: "detail" }, s.text || "\u00a0")),
       el("div", { class: "end" },
         el("span", { class: "label" }, s.label),

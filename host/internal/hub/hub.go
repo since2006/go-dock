@@ -5,6 +5,7 @@ package hub
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -18,21 +19,55 @@ type Options struct {
 	StaleAfter time.Duration // drop sessions with no news for this long
 }
 
+// agentLinger keeps a finished subagent listed for a short while.
+const agentLinger = 3 * time.Minute
+
+// pendingTTL drops subagent launches no agent ever claimed.
+const pendingTTL = 10 * time.Minute
+
 type Hub struct {
 	now func() time.Time
 
 	mu       sync.Mutex
 	opts     Options
-	sessions map[string]*model.Session
+	sessions map[string]*entry
 	usage    map[model.Provider]model.Usage
 	subs     map[chan struct{}]struct{}
+}
+
+// entry is one session plus what the hub tracks about it. Session.Agents
+// and Session.Tools are only filled in by Snapshot.
+type entry struct {
+	s       model.Session
+	stateAt time.Time // last observation of the session's own state
+	agents  map[string]*model.Agent
+	pending []launch
+	tools   []model.ToolCount
+}
+
+// launch is a subagent the session started whose id is not known yet.
+type launch struct {
+	typ, desc string
+	at        time.Time
+}
+
+func (e *entry) clone() entry {
+	c := *e
+	c.agents = make(map[string]*model.Agent, len(e.agents))
+	for k, a := range e.agents {
+		cp := *a
+		c.agents[k] = &cp
+	}
+	c.pending = append([]launch(nil), e.pending...)
+	c.tools = append([]model.ToolCount(nil), e.tools...)
+	return c
 }
 
 func New(opts Options) *Hub {
 	return &Hub{
 		now:      time.Now,
 		opts:     opts,
-		sessions: map[string]*model.Session{},
+		sessions: map[string]*entry{},
 		usage:    map[model.Provider]model.Usage{},
 		subs:     map[chan struct{}]struct{}{},
 	}
@@ -45,15 +80,15 @@ func (h *Hub) SetOptions(o Options) {
 	h.Tick()
 }
 
-// Observe applies one observation. Observations older than the session's
-// last update do not change its state, so a slow poller cannot undo a
-// fresher hook event. An observation without State only updates metadata
-// of a known session and does not count as activity.
+// Observe applies one observation. Observations older than the last state
+// change do not change state again, so a slow poller cannot undo a fresher
+// hook event. An observation without State only updates metadata of a
+// known session or agent and does not count as activity.
 func (h *Hub) Observe(o model.Observation) {
 	if o.SessionID == "" {
 		return
 	}
-	if o.At.IsZero() && (o.State != "" || o.End) {
+	if o.At.IsZero() {
 		o.At = h.now()
 	}
 	h.mu.Lock()
@@ -66,46 +101,136 @@ func (h *Hub) Observe(o model.Observation) {
 
 func (h *Hub) observe(o model.Observation) bool {
 	key := o.Key()
-	s, ok := h.sessions[key]
-	if o.End {
+	e, ok := h.sessions[key]
+	if o.End && o.AgentID == "" {
 		if ok {
 			delete(h.sessions, key)
 		}
 		return ok
 	}
 	if !ok {
-		if o.State == "" {
-			return false // metadata alone does not create a session
+		if o.State == "" || (o.AgentID != "" && !o.State.Active()) {
+			return false // metadata, or the end of an agent we never saw
 		}
-		s = &model.Session{ID: key, Provider: o.Provider, SessionID: o.SessionID, State: model.StateIdle, Since: o.At}
-		h.sessions[key] = s
+		e = &entry{
+			s:      model.Session{ID: key, Provider: o.Provider, SessionID: o.SessionID, State: model.StateIdle, Since: o.At},
+			agents: map[string]*model.Agent{},
+		}
+		h.sessions[key] = e
 	}
-	before := *s
+	before := e.clone()
+	s := &e.s
 	if o.Cwd != "" {
 		s.Cwd = o.Cwd
 		s.Project = projectName(o.Cwd)
 	}
-	if o.Title != "" {
-		s.Title = o.Title
+	if o.AgentLaunch {
+		e.pending = append(e.pending, launch{typ: o.AgentType, desc: o.AgentDesc, at: o.At})
 	}
-	if o.State != "" && !o.At.Before(s.Updated) {
-		if o.State != s.State {
-			s.State = o.State
-			s.Since = o.At
-			s.Source = o.Source
-			s.Detail = o.Detail
-		} else if o.Detail != "" {
-			s.Detail = o.Detail
+	if o.NewTurn {
+		e.tools = nil
+	}
+	if o.ToolDone != "" {
+		e.countTool(o.ToolDone)
+	}
+
+	if o.AgentID != "" {
+		h.observeAgent(e, o)
+	} else {
+		if o.Title != "" {
+			s.Title = o.Title
+		}
+		if o.State != "" && !o.At.Before(e.stateAt) {
+			if o.State != s.State {
+				s.State = o.State
+				s.Since = o.At
+				s.Source = o.Source
+				s.Detail = o.Detail
+			} else if o.Detail != "" {
+				s.Detail = o.Detail
+			}
+			e.stateAt = o.At
 		}
 	}
-	if o.At.After(s.Updated) {
+	// Any state news, the session's or an agent's, shows the session lives.
+	if (o.State != "" || o.End) && o.At.After(s.Updated) {
 		s.Updated = o.At
 	}
 	if s.State == model.StateDone && h.now().Sub(s.Since) > h.opts.DoneTTL {
 		s.State = model.StateIdle
 		s.Detail = ""
 	}
-	return !ok || *s != before
+	return !ok || !reflect.DeepEqual(before, *e)
+}
+
+func (h *Hub) observeAgent(e *entry, o model.Observation) {
+	a := e.agents[o.AgentID]
+	if a == nil {
+		if !o.State.Active() {
+			return // e.g. Claude's internal agents only report their stop
+		}
+		a = &model.Agent{ID: o.AgentID, Type: o.AgentType, State: o.State, Detail: o.Detail, Since: o.At, Updated: o.At}
+		e.agents[o.AgentID] = a
+		if o.AgentDesc == "" {
+			a.Desc = e.claim(o.AgentType)
+		}
+	}
+	if o.AgentType != "" {
+		a.Type = o.AgentType
+	}
+	if o.AgentDesc != "" {
+		a.Desc = o.AgentDesc
+		e.drop(o.AgentDesc)
+	}
+	switch {
+	case o.End:
+		if a.State.Active() {
+			a.State, a.Detail = model.StateDone, ""
+		}
+	case o.State != "" && !o.At.Before(a.Updated):
+		if o.State != a.State {
+			a.State, a.Detail = o.State, o.Detail
+		} else if o.Detail != "" {
+			a.Detail = o.Detail
+		}
+		if !a.State.Active() {
+			a.Detail = ""
+		}
+	}
+	if (o.State != "" || o.End) && o.At.After(a.Updated) {
+		a.Updated = o.At
+	}
+}
+
+// claim takes the oldest pending launch of an agent type for a new agent.
+func (e *entry) claim(typ string) string {
+	for i, l := range e.pending {
+		if l.typ == typ || l.typ == "" || typ == "" {
+			e.pending = append(e.pending[:i], e.pending[i+1:]...)
+			return l.desc
+		}
+	}
+	return ""
+}
+
+// drop forgets a pending launch once its agent is known by id.
+func (e *entry) drop(desc string) {
+	for i, l := range e.pending {
+		if l.desc == desc {
+			e.pending = append(e.pending[:i], e.pending[i+1:]...)
+			return
+		}
+	}
+}
+
+func (e *entry) countTool(name string) {
+	for i := range e.tools {
+		if e.tools[i].Name == name {
+			e.tools[i].Count++
+			return
+		}
+	}
+	e.tools = append(e.tools, model.ToolCount{Name: name, Count: 1})
 }
 
 func projectName(cwd string) string {
@@ -121,9 +246,9 @@ func (h *Hub) Sessions(p model.Provider) []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var ids []string
-	for _, s := range h.sessions {
-		if s.Provider == p {
-			ids = append(ids, s.SessionID)
+	for _, e := range h.sessions {
+		if e.s.Provider == p {
+			ids = append(ids, e.s.SessionID)
 		}
 	}
 	return ids
@@ -155,21 +280,37 @@ func usageEqual(a, b model.Usage) bool {
 		a.Today == b.Today && a.Week == b.Week
 }
 
-// Tick ages done sessions to idle and drops stale ones.
+// Tick ages done sessions to idle and drops stale sessions, finished
+// agents and unclaimed launches.
 func (h *Hub) Tick() {
 	now := h.now()
 	changed := false
 	h.mu.Lock()
-	for k, s := range h.sessions {
-		switch {
-		case now.Sub(s.Updated) > h.opts.StaleAfter:
+	for k, e := range h.sessions {
+		s := &e.s
+		if now.Sub(s.Updated) > h.opts.StaleAfter {
 			delete(h.sessions, k)
 			changed = true
-		case s.State == model.StateDone && now.Sub(s.Since) > h.opts.DoneTTL:
+			continue
+		}
+		if s.State == model.StateDone && now.Sub(s.Since) > h.opts.DoneTTL {
 			s.State = model.StateIdle
 			s.Detail = ""
 			changed = true
 		}
+		for id, a := range e.agents {
+			if (!a.State.Active() && now.Sub(a.Updated) > agentLinger) || now.Sub(a.Updated) > h.opts.StaleAfter {
+				delete(e.agents, id)
+				changed = true
+			}
+		}
+		kept := e.pending[:0]
+		for _, l := range e.pending {
+			if now.Sub(l.at) <= pendingTTL {
+				kept = append(kept, l)
+			}
+		}
+		e.pending = kept
 	}
 	h.mu.Unlock()
 	if changed {
@@ -192,7 +333,8 @@ func (h *Hub) Run(ctx context.Context) {
 }
 
 // Snapshot returns a copy of the current state with sessions ordered by
-// urgency, then most recently updated first.
+// urgency (their own or an agent's), then most recently updated first.
+// Counts are by that effective state.
 func (h *Hub) Snapshot() model.Snapshot {
 	now := h.now()
 	h.mu.Lock()
@@ -202,9 +344,25 @@ func (h *Hub) Snapshot() model.Snapshot {
 		Usage:    make(map[model.Provider]model.Usage, len(h.usage)),
 		Counts:   map[model.State]int{},
 	}
-	for _, s := range h.sessions {
-		snap.Sessions = append(snap.Sessions, *s)
-		snap.Counts[s.State]++
+	for _, e := range h.sessions {
+		s := e.s
+		s.Tools = append([]model.ToolCount(nil), e.tools...)
+		for _, a := range e.agents {
+			s.Agents = append(s.Agents, *a)
+		}
+		sort.Slice(s.Agents, func(i, j int) bool {
+			a, b := s.Agents[i], s.Agents[j]
+			if pa, pb := a.State.Priority(), b.State.Priority(); pa != pb {
+				return pa < pb
+			}
+			if !a.Since.Equal(b.Since) {
+				return a.Since.Before(b.Since)
+			}
+			return a.ID < b.ID
+		})
+		snap.Sessions = append(snap.Sessions, s)
+		st, _ := s.Effective()
+		snap.Counts[st]++
 	}
 	for p, u := range h.usage {
 		u.FiveHour = expire(u.FiveHour, now)
@@ -215,7 +373,9 @@ func (h *Hub) Snapshot() model.Snapshot {
 
 	sort.Slice(snap.Sessions, func(i, j int) bool {
 		a, b := snap.Sessions[i], snap.Sessions[j]
-		if pa, pb := a.State.Priority(), b.State.Priority(); pa != pb {
+		sa, _ := a.Effective()
+		sb, _ := b.Effective()
+		if pa, pb := sa.Priority(), sb.Priority(); pa != pb {
 			return pa < pb
 		}
 		if !a.Updated.Equal(b.Updated) {
@@ -269,8 +429,8 @@ func (h *Hub) notify() {
 // user disabled that provider.
 func (h *Hub) RemoveProvider(p model.Provider) {
 	h.mu.Lock()
-	for k, s := range h.sessions {
-		if s.Provider == p {
+	for k, e := range h.sessions {
+		if e.s.Provider == p {
 			delete(h.sessions, k)
 		}
 	}

@@ -2,7 +2,8 @@ name: release
 
 # Push a tag like v0.2.0 to publish a release. go-dock's online update
 # downloads the assets built here: one raw binary per platform named
-# go-dock_<os>_<arch>[.exe], plus SHA256SUMS.
+# go-dock_<os>_<arch>[.exe], plus SHA256SUMS. The screen firmware is
+# attached as go-dock-firmware-v2.bin.
 on:
   push:
     tags: ["v*"]
@@ -63,8 +64,25 @@ jobs:
           name: go-dock_${{ matrix.goos }}_${{ matrix.goarch }}
           path: host/dist/*
 
+  firmware:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: espressif/esp-idf-ci-action@v1.2.0
+        with:
+          esp_idf_version: v5.5.4
+          target: esp32s3
+          path: firmware
+          # One image from address 0x0: bootloader, partition table, app.
+          command: idf.py build && idf.py merge-bin -o go-dock-firmware-v2.bin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: go-dock-firmware-v2
+          path: firmware/build/go-dock-firmware-v2.bin
+
   release:
-    needs: build
+    needs: [build, firmware]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -75,10 +93,14 @@ jobs:
           merge-multiple: true
       - name: checksums
         working-directory: dist
-        run: sha256sum go-dock_* > SHA256SUMS && cat SHA256SUMS
+        run: sha256sum go-dock_* go-dock-firmware-* > SHA256SUMS && cat SHA256SUMS
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
+        # Tags like v0.2.0-beta.1 become pre-releases. GitHub's "latest
+        # release", which online update follows, never points at one.
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
+          flags=""
+          case "$GITHUB_REF_NAME" in *-*) flags="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* $flags \
             --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

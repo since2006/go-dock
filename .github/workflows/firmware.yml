@@ -1,0 +1,27 @@
+name: firmware
+
+on:
+  push:
+    branches: [main]
+    paths: ["firmware/**", ".github/workflows/firmware.yml"]
+  pull_request:
+    paths: ["firmware/**", ".github/workflows/firmware.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: espressif/esp-idf-ci-action@v1.2.0
+        with:
+          esp_idf_version: v5.5.4
+          target: esp32s3
+          path: firmware
+          command: idf.py build && idf.py merge-bin -o go-dock-firmware-v2.bin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: go-dock-firmware-v2
+          path: firmware/build/go-dock-firmware-v2.bin

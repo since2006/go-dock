@@ -14,6 +14,7 @@ import (
 var hookEvents = []string{
 	"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
 	"PermissionRequest", "Notification", "Stop", "StopFailure", "SessionEnd",
+	"SubagentStart", "SubagentStop",
 }
 
 func settingsPath(home string) string { return filepath.Join(home, "settings.json") }

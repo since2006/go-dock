@@ -97,6 +97,16 @@ func (w *sessionsWatcher) poll(now time.Time) []model.Observation {
 	return out
 }
 
+// live reports whether a running Claude Code process has this session.
+func (w *sessionsWatcher) live(sessionID string) bool {
+	for _, t := range w.known {
+		if t.sessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
 // mapStatus turns a status file into a state. wasActive tells whether we
 // saw this session busy or waiting before, which turns idle into done.
 func mapStatus(f sessionFile, wasActive bool) (model.State, string) {

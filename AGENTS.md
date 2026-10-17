@@ -15,7 +15,7 @@ Guidance for AI coding agents working in this repository.
   - `internal/autostart/` — login item per OS (LaunchAgent / systemd user unit or XDG / HKCU Run).
   - `internal/update/` — checks GitHub Releases, verifies and replaces the executable; `cmd/go-dock/restart_*.go` restarts it.
   - `internal/config/`, `internal/logx/`, `internal/ingest/`, `internal/procutil/`, `internal/selfexe/` — support packages.
-- `firmware/` — ESP32 firmware (placeholder for now).
+- `firmware/` — ESP-IDF 5.5 + LVGL 9 firmware for the **V2** board only (pins differ from V1). `main/display.c` is the board bring-up, `link.c` the protocol, `ui.c` the Agent screen. `sim/` renders `ui.c` on the desktop to PNG-able PPM files for layout checks without hardware.
 - `docs/protocol-v1.md` — host ↔ device protocol. `docs/plans/` — implementation plans.
 
 ## Commands
@@ -26,11 +26,15 @@ gofmt -l .                 # must print nothing
 go vet ./...
 go test -race ./...
 CGO_ENABLED=0 GOOS=windows go build ./cmd/go-dock   # also linux, darwin
+
+# firmware (ESP-IDF v5.5.4 in ~/esp/esp-idf)
+. ~/esp/esp-idf/export.sh && cd firmware && idf.py build
+cmake -B build-sim -S sim && cmake --build build-sim && build-sim/dock_sim out   # UI screenshots
 ```
 
 ## Rules
 
-- **Protocol changes**: update `docs/protocol-v1.md` and `host/internal/device/protocol.go` together; keep the 4096-byte line cap; only add optional fields unless bumping `proto`.
+- **Protocol changes**: update `docs/protocol-v1.md`, `host/internal/device/protocol.go` and `firmware/main/link.c` (+ `model.h`) together; keep the 4096-byte line cap; only add optional fields unless bumping `proto`.
 - **Privacy**: never read or send credentials (`~/.claude/.credentials.json`, Keychain, `~/.codex/auth.json`). Never log hook/statusline payloads (they contain prompts and tool input) above debug level.
 - **Editing user config files** (`~/.claude/settings.json`, `~/.codex/hooks.json`): go through `providers.ReadJSONFile` / `Save`, which keep unrelated content and key order, back up the original, and write atomically. `~/.codex/hooks.json` may only contain the top-level keys `description` and `hooks`. Replace our hook entries in place rather than reordering (Codex trust keys include array indices).
 - **Hook subcommands** must stay silent and exit 0, even when the daemon is down.

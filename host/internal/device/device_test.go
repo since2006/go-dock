@@ -378,3 +378,100 @@ func TestPickPort(t *testing.T) {
 		t.Fatalf("picked non-candidate %s", got)
 	}
 }
+
+func TestFrameCarriesTimezone(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	f := BuildFrame(model.Snapshot{Now: time.Date(2026, 10, 17, 9, 0, 0, 0, loc)}, Options{MaxSessions: 12}, 1)
+	if f.TZ != 8*3600 {
+		t.Fatalf("tz = %d", f.TZ)
+	}
+}
+
+func agentSession(id string, main model.State, agents ...model.Agent) model.Session {
+	t0 := time.Unix(1792200000, 0)
+	return model.Session{ID: "claude:" + id, Provider: model.ProviderClaude, SessionID: id, Project: id,
+		State: main, Detail: "Read: main.go", Since: t0, Updated: t0, Agents: agents}
+}
+
+func TestFrameAgents(t *testing.T) {
+	t0 := time.Unix(1792200000, 0)
+	explore := func(id string, st model.State, desc, detail string) model.Agent {
+		return model.Agent{ID: id, Type: "Explore", Desc: desc, Detail: detail, State: st, Since: t0.Add(time.Minute)}
+	}
+	snap := model.Snapshot{Now: t0, Sessions: []model.Session{
+		// A subagent asking for approval puts the row in approval.
+		agentSession("a", model.StateRunning,
+			explore("1", model.StateApproval, "清理构建目录", "Bash: rm -rf dist"),
+			explore("2", model.StateRunning, "查找接口", "Grep: route"),
+			explore("3", model.StateRunning, "读文档", ""),
+			explore("4", model.StateDone, "看配置", "")),
+		// The session waits for its next prompt while agents still work.
+		agentSession("b", model.StateIdle, explore("5", model.StateRunning, "Explore host tree", "Read: x.go")),
+		agentSession("c", model.StateIdle),
+	}}
+	f := BuildFrame(snap, Options{MaxSessions: 12}, 1)
+	if len(f.Sessions) != 2 {
+		t.Fatalf("sessions = %+v", f.Sessions)
+	}
+	a := f.Sessions[0]
+	if a.State != "approval" || a.Label != "需授权" || a.Text != "Explore · Bash: rm -rf dist" || a.Since != t0.Add(time.Minute).Unix() {
+		t.Fatalf("row a = %+v", a)
+	}
+	if len(a.Agents) != 3 || a.AgentsTotal != 4 || a.AgentsActive != 3 || a.Agents[0].Text != "清理构建目录" || a.Agents[0].State != "approval" {
+		t.Fatalf("agents a = %+v", a)
+	}
+	b := f.Sessions[1]
+	if b.State != "running" || b.Text != "Explore · Explore host tree" || b.AgentsActive != 1 {
+		t.Fatalf("row b = %+v", b)
+	}
+
+	line, err := EncodeSnapshot(f)
+	if err != nil || !strings.Contains(string(line), `"agents_total":4`) {
+		t.Fatalf("encode = %s %v", line, err)
+	}
+	// Sessions without agents carry none of the agent fields.
+	plain, _ := EncodeSnapshot(BuildFrame(model.Snapshot{Now: t0, Sessions: []model.Session{agentSession("d", model.StateRunning)}}, Options{MaxSessions: 12}, 1))
+	if strings.Contains(string(plain), "agents") {
+		t.Fatalf("empty agent fields sent: %s", plain)
+	}
+}
+
+func TestEncodeTrimsAgentsBeforeSessions(t *testing.T) {
+	t0 := time.Unix(1792200000, 0)
+	long := strings.Repeat("很长的子任务描述", 8)
+	var ss []model.Session
+	for i := 0; i < 8; i++ {
+		var agents []model.Agent
+		for k := 0; k < 3; k++ {
+			agents = append(agents, model.Agent{ID: fmt.Sprint(k), Type: "general-purpose", Desc: long, State: model.StateRunning, Since: t0})
+		}
+		s := agentSession(fmt.Sprint("s", i), model.StateRunning, agents...)
+		s.Detail = long
+		ss = append(ss, s)
+	}
+	f := BuildFrame(model.Snapshot{Now: t0, Sessions: ss}, Options{MaxSessions: 12}, 1)
+	line, err := EncodeSnapshot(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(line) > MaxLine {
+		t.Fatalf("line is %d bytes", len(line))
+	}
+	var got Snapshot
+	if err := json.Unmarshal(line, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sessions) != 8 {
+		t.Fatalf("sessions dropped while agents could go: %d", len(got.Sessions))
+	}
+	if got.Sessions[0].AgentsTotal != 3 || len(got.Sessions[0].Agents) == 0 {
+		t.Fatalf("urgent session lost its agents first: %+v", got.Sessions[0])
+	}
+	if last := got.Sessions[7]; len(last.Agents) != 0 || last.AgentsTotal != 3 {
+		t.Fatalf("tail session = %+v", last)
+	}
+	// The caller's frame is untouched.
+	if len(f.Sessions[7].Agents) != 3 {
+		t.Fatal("EncodeSnapshot modified its input")
+	}
+}

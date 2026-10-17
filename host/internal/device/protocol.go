@@ -20,6 +20,10 @@ const (
 
 	projectLen = 24
 	textLen    = 48
+	// maxAgents bounds the subagents listed per session.
+	maxAgents    = 3
+	agentTypeLen = 16
+	agentTextLen = 32
 )
 
 // Hello is the host's handshake message.
@@ -32,9 +36,12 @@ type Hello struct {
 
 // Snapshot is the full state pushed to the device.
 type Snapshot struct {
-	T        string         `json:"t"`
-	Seq      uint64         `json:"seq"`
-	Now      int64          `json:"now"`
+	T   string `json:"t"`
+	Seq uint64 `json:"seq"`
+	Now int64  `json:"now"`
+	// TZ is the host's UTC offset in seconds, so the device clock shows
+	// local time.
+	TZ       int            `json:"tz"`
 	Usage    UsageFrames    `json:"usage"`
 	Sessions []SessionFrame `json:"sessions"`
 	Counts   Counts         `json:"counts"`
@@ -62,6 +69,9 @@ type WindowFrame struct {
 	WindowMin int     `json:"window_min"`
 }
 
+// SessionFrame is one task row. State, Label, Text and Since describe the
+// most urgent of the session and its subagents, so a subagent waiting for
+// approval puts the whole row in "approval".
 type SessionFrame struct {
 	ID      string `json:"id"`
 	P       string `json:"p"`
@@ -70,6 +80,19 @@ type SessionFrame struct {
 	Label   string `json:"label"`
 	Text    string `json:"text"`
 	Since   int64  `json:"since"`
+	// Agents lists up to three subagents, most urgent first. AgentsTotal
+	// and AgentsActive count all of them; all three are omitted when the
+	// session has none.
+	Agents       []AgentFrame `json:"agents,omitempty"`
+	AgentsTotal  int          `json:"agents_total,omitempty"`
+	AgentsActive int          `json:"agents_active,omitempty"`
+}
+
+type AgentFrame struct {
+	Type  string `json:"type"`  // Explore, general-purpose, ...
+	Text  string `json:"text"`  // its task, else what it is doing
+	State string `json:"state"` // running, approval, input, error, done
+	Since int64  `json:"since"`
 }
 
 type Counts struct {
@@ -89,6 +112,7 @@ func BuildFrame(s model.Snapshot, o Options, seq uint64) Snapshot {
 		T:   "snapshot",
 		Seq: seq,
 		Now: s.Now.Unix(),
+		TZ:  tzOffset(s.Now),
 		Usage: UsageFrames{
 			Claude: usageFrame(s.Usage[model.ProviderClaude]),
 			Codex:  usageFrame(s.Usage[model.ProviderCodex]),
@@ -108,28 +132,63 @@ func BuildFrame(s model.Snapshot, o Options, seq uint64) Snapshot {
 		limit = 12
 	}
 	for _, ss := range s.Sessions {
-		if ss.State == model.StateIdle && !o.ShowIdle {
+		st, from := ss.Effective()
+		if st == model.StateIdle && !o.ShowIdle {
 			continue
 		}
 		f.Total++
 		if len(f.Sessions) >= limit {
 			continue
 		}
-		text := ss.Detail
-		if text == "" {
-			text = ss.Title
-		}
-		f.Sessions = append(f.Sessions, SessionFrame{
-			ID:      ss.ID,
-			P:       string(ss.Provider),
-			Project: model.Truncate(ss.Project, projectLen),
-			State:   string(ss.State),
-			Label:   ss.State.Label(),
-			Text:    model.Truncate(text, textLen),
-			Since:   unix(ss.Since),
-		})
+		f.Sessions = append(f.Sessions, sessionFrame(ss, st, from))
 	}
 	return f
+}
+
+func sessionFrame(ss model.Session, st model.State, from *model.Agent) SessionFrame {
+	text, since := ss.Detail, ss.Since
+	if text == "" {
+		text = ss.Title
+	}
+	if from != nil {
+		// The row's state comes from a subagent: say which one and why.
+		what := from.Desc
+		if from.State != model.StateRunning || what == "" {
+			what = from.Detail
+		}
+		text, since = from.Type, from.Since
+		if what != "" {
+			text += " · " + what
+		}
+	}
+	sf := SessionFrame{
+		ID:      ss.ID,
+		P:       string(ss.Provider),
+		Project: model.Truncate(ss.Project, projectLen),
+		State:   string(st),
+		Label:   st.Label(),
+		Text:    model.Truncate(text, textLen),
+		Since:   unix(since),
+	}
+	for _, a := range ss.Agents {
+		sf.AgentsTotal++
+		if a.State.Active() {
+			sf.AgentsActive++
+		}
+		if len(sf.Agents) < maxAgents {
+			t := a.Desc
+			if t == "" {
+				t = a.Detail
+			}
+			sf.Agents = append(sf.Agents, AgentFrame{
+				Type:  model.Truncate(a.Type, agentTypeLen),
+				Text:  model.Truncate(t, agentTextLen),
+				State: string(a.State),
+				Since: unix(a.Since),
+			})
+		}
+	}
+	return sf
 }
 
 func usageFrame(u model.Usage) UsageFrame {
@@ -171,9 +230,11 @@ func encodeLine(v any) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// EncodeSnapshot encodes f as one line of at most MaxLine bytes, dropping
-// sessions from the tail (the least urgent) until it fits.
+// EncodeSnapshot encodes f as one line of at most MaxLine bytes. When it
+// is too long it first drops listed subagents, starting with the least
+// urgent session (counts stay), then sessions from the tail.
 func EncodeSnapshot(f Snapshot) ([]byte, error) {
+	f.Sessions = append([]SessionFrame(nil), f.Sessions...) // trimmed below
 	for {
 		line, err := encodeLine(f)
 		if err != nil {
@@ -182,11 +243,26 @@ func EncodeSnapshot(f Snapshot) ([]byte, error) {
 		if len(line) <= MaxLine {
 			return line, nil
 		}
+		if dropAgent(f.Sessions) {
+			continue
+		}
 		if len(f.Sessions) == 0 {
 			return nil, fmt.Errorf("snapshot 超过 %d 字节", MaxLine)
 		}
 		f.Sessions = f.Sessions[:len(f.Sessions)-1]
 	}
+}
+
+// dropAgent removes the last listed subagent of the last session that has
+// one, and reports whether there was any.
+func dropAgent(ss []SessionFrame) bool {
+	for i := len(ss) - 1; i >= 0; i-- {
+		if n := len(ss[i].Agents); n > 0 {
+			ss[i].Agents = ss[i].Agents[: n-1 : n-1]
+			return true
+		}
+	}
+	return false
 }
 
 // EncodeHello encodes the host handshake.
@@ -225,4 +301,9 @@ func DecodeDeviceLine(line []byte) (DeviceMsg, error) {
 		return DeviceMsg{}, errNotMessage
 	}
 	return m, nil
+}
+
+func tzOffset(t time.Time) int {
+	_, off := t.Zone()
+	return off
 }

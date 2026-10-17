@@ -2,13 +2,13 @@
 
 把 **Claude Code** 和 **Codex** 的套餐额度、token 用量和任务状态（进行中、需授权、已完成……）显示在一块 USB 小屏上，同时提供本地网页管理台。
 
-- 屏幕：微雪 [ESP32-S3-Touch-AMOLED-2.41-B](https://www.waveshare.net/shop/ESP32-S3-Touch-AMOLED-2.41-B.htm)（600×450 AMOLED，触摸）
+- 屏幕：微雪 [ESP32-S3-Touch-AMOLED-2.41-B](https://www.waveshare.net/shop/ESP32-S3-Touch-AMOLED-2.41-B.htm)（600×450 AMOLED，触摸），**需要 V2 版硬件**
 - 电脑端：Go 编写的单个可执行文件，支持 macOS / Windows / Linux，网页通过 `go:embed` 内嵌
 
 ```
 go-dock/
 ├── host/        Go 电脑端：采集、状态汇总、USB 通信、网页管理台
-├── firmware/    ESP32 固件（尚未开始，见 firmware/README.md）
+├── firmware/    屏幕固件：ESP-IDF + LVGL，适用于 V2 板
 └── docs/
     ├── protocol-v1.md   电脑端与屏幕之间的通信协议
     └── plans/           实现计划
@@ -22,6 +22,7 @@ go-dock/
 | Codex 5 小时 / 7 天额度 | Codex 会话日志中的 `rate_limits`，以及定期调用 `codex app-server` |
 | 今日 / 近 7 天 token、API 等价费用 | 本地会话记录（Claude 按官方价格估算费用；Codex 只统计 token） |
 | 每个会话的状态 | hooks 实时上报；没装 hooks 时读取 Claude 的会话状态文件和 Codex 的会话日志兜底 |
+| 子代理（子任务） | Claude Code 用 Agent 工具派出的子代理、Codex 派生的子线程，分组显示在所属会话下面：类型、任务描述、当前动作、状态、已运行时间；子代理等待授权时整个会话显示「需授权」 |
 
 同时运行多个任务时，屏幕和网页按 **需授权 > 等待输入 > 出错 > 进行中 > 已完成** 排序；屏幕每页 4 条，滑动翻页。
 
@@ -97,18 +98,31 @@ go-dock 每天检查一次 GitHub Releases（可在设置里关掉），有新�
 
 升级不会改变程序路径，所以已安装的 hooks 和开机自启不受影响。如果程序所在目录没有写权限（例如放在 `/usr/local/bin` 且属于 root），会提示手动替换。
 
+## 屏幕固件
+
+固件在 [firmware/](firmware/README.md)，**只支持 V2 版硬件**（V1、V2 引脚不同，固件不通用）。板子丝印有「Rev2.0」，或外壳贴有「V2」标签的就是 V2。
+
+最简单的烧录方式是从 [Releases](https://github.com/since2006/go-dock/releases) 下载 `go-dock-firmware-v2.bin`，然后：
+
+```sh
+pip install esptool
+esptool.py --chip esp32s3 write_flash 0x0 go-dock-firmware-v2.bin
+```
+
+烧录前先退出 go-dock（或在设置里取消「启用 USB 屏幕」），否则串口被占用会烧录失败。从源码编译、硬件说明见 [firmware/README.md](firmware/README.md)。
+
 ## 集成
 
 在网页「集成」页安装。每次修改前，原文件都会备份为 `<文件>.go-dock-<时间>.bak`；卸载会精确移除 go-dock 自己的条目，其他配置原样保留。
 
 | 集成 | 修改的文件 | 作用 |
 |---|---|---|
-| Claude Code hooks | `~/.claude/settings.json` 的 `hooks` | 会话开始、提问、工具调用、授权请求、完成、出错时立即上报。「需授权」能立刻显示，并带出工具名和命令 |
+| Claude Code hooks | `~/.claude/settings.json` 的 `hooks` | 会话开始、提问、工具调用、授权请求、完成、出错、子代理开始与结束时立即上报。「需授权」能立刻显示，并带出工具名和命令 |
 | Claude Code 状态栏 | `~/.claude/settings.json` 的 `statusLine` | 读取官方 5h / 7d 额度。原有状态栏命令（例如 claude-hud）会被包装起来继续调用，显示效果不变 |
 | Codex hooks | `~/.codex/hooks.json` | 提问、工具调用、授权请求、完成、中断时立即上报。**安装后需在 Codex 里运行 `/hooks`，信任这些 hooks 才会生效** |
 
 - 新安装的集成从**新开的会话**开始生效。
-- 如果移动了 go-dock 程序或修改了监听端口，「集成」页会提示「需更新」，点「重新安装」即可。
+- 如果移动了 go-dock 程序、修改了监听端口，或者新版本增加了要监听的事件（例如子代理开始与结束），「集成」页会提示「需更新」，点「重新安装」即可。
 - 遵守 `CLAUDE_CONFIG_DIR` 和 `CODEX_HOME` 环境变量，也可以在设置页里手动指定目录。
 
 ## 安全
@@ -130,4 +144,13 @@ go test -race ./...
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-修改通信协议时，必须同时修改 `docs/protocol-v1.md` 和 `host/internal/device/protocol.go`。更多约定见 [AGENTS.md](AGENTS.md)。
+标签带后缀（如 `v0.3.0-beta.1`）时发布为预发布版本：Release 页面可以下载，但在线升级不会推送给其他用户。
+
+固件：
+
+```sh
+. ~/esp/esp-idf/export.sh
+cd firmware && idf.py build
+```
+
+修改通信协议时，必须同时修改 `docs/protocol-v1.md`、`host/internal/device/protocol.go` 和固件的 `firmware/main/link.c`。更多约定见 [AGENTS.md](AGENTS.md)。

@@ -1,0 +1,259 @@
+#include "link.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "cJSON.h"
+#include "driver/usb_serial_jtag.h"
+#include "esp_app_desc.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+
+#define MAX_LINE 4096
+
+static const char *TAG = "link";
+
+static SemaphoreHandle_t s_lock;     // guards s_shared, s_version, s_received_us
+static SemaphoreHandle_t s_tx_lock;  // keeps lines from different tasks whole
+static dock_snapshot_t *s_shared;    // newest complete snapshot
+static dock_snapshot_t *s_scratch;   // parse target, owned by the reader task
+static uint32_t s_version;
+static int64_t s_received_us;
+static volatile int64_t s_last_rx_us;
+static volatile bool s_incompatible;
+
+static void send_line(const char *json)
+{
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+    // Short timeouts: with no host attached the write would only block.
+    usb_serial_jtag_write_bytes(json, strlen(json), pdMS_TO_TICKS(50));
+    usb_serial_jtag_write_bytes("\n", 1, pdMS_TO_TICKS(50));
+    xSemaphoreGive(s_tx_lock);
+}
+
+static void send_hello(void)
+{
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "{\"t\":\"hello\",\"proto\":%d,\"fw\":\"%s\",\"w\":600,\"h\":450,\"max_line\":%d}",
+             DOCK_PROTO, esp_app_get_description()->version, MAX_LINE);
+    send_line(buf);
+}
+
+void link_log(const char *level, const char *fmt, ...)
+{
+    char msg[200];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    ESP_LOGI(TAG, "%s", msg);
+
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "t", "log");
+    cJSON_AddStringToObject(o, "level", level);
+    cJSON_AddStringToObject(o, "msg", msg);
+    char *line = cJSON_PrintUnformatted(o);
+    if (line) {
+        send_line(line);
+        cJSON_free(line);
+    }
+    cJSON_Delete(o);
+}
+
+static void copy_str(char *dst, size_t n, const cJSON *v)
+{
+    const char *s = cJSON_IsString(v) ? v->valuestring : "";
+    snprintf(dst, n, "%s", s);
+}
+
+static int64_t num(const cJSON *v)
+{
+    return cJSON_IsNumber(v) ? (int64_t)v->valuedouble : 0;
+}
+
+static dock_state_t parse_state(const char *s)
+{
+    static const char *names[] = {"approval", "input", "error", "running", "done", "idle"};
+    for (int i = 0; i < DOCK_STATE_COUNT; i++) {
+        if (s && strcmp(s, names[i]) == 0) {
+            return (dock_state_t)i;
+        }
+    }
+    return DOCK_IDLE;
+}
+
+static void parse_window(const cJSON *w, dock_window_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!cJSON_IsObject(w)) {
+        return; // null: no data for this window
+    }
+    out->present = true;
+    const cJSON *pct = cJSON_GetObjectItem(w, "pct");
+    if (cJSON_IsNumber(pct)) {
+        out->pct = (float)pct->valuedouble;
+    }
+    out->resets_at = num(cJSON_GetObjectItem(w, "resets_at"));
+}
+
+static void parse_usage(const cJSON *u, dock_usage_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    parse_window(cJSON_GetObjectItem(u, "five_hour"), &out->five_hour);
+    parse_window(cJSON_GetObjectItem(u, "seven_day"), &out->seven_day);
+    out->today_tokens = num(cJSON_GetObjectItem(u, "today_tokens"));
+}
+
+static void parse_snapshot(const cJSON *root, dock_snapshot_t *s)
+{
+    memset(s, 0, sizeof(*s));
+    s->seq = (uint32_t)num(cJSON_GetObjectItem(root, "seq"));
+    s->now = num(cJSON_GetObjectItem(root, "now"));
+    s->tz_offset = (int32_t)num(cJSON_GetObjectItem(root, "tz"));
+    const cJSON *usage = cJSON_GetObjectItem(root, "usage");
+    parse_usage(cJSON_GetObjectItem(usage, "claude"), &s->usage[DOCK_CLAUDE]);
+    parse_usage(cJSON_GetObjectItem(usage, "codex"), &s->usage[DOCK_CODEX]);
+
+    const cJSON *item;
+    cJSON_ArrayForEach(item, cJSON_GetObjectItem(root, "sessions"))
+    {
+        if (s->count >= DOCK_MAX_SESSIONS) {
+            break;
+        }
+        dock_session_t *d = &s->sessions[s->count++];
+        copy_str(d->id, sizeof(d->id), cJSON_GetObjectItem(item, "id"));
+        const cJSON *p = cJSON_GetObjectItem(item, "p");
+        d->provider = (cJSON_IsString(p) && strcmp(p->valuestring, "codex") == 0) ? DOCK_CODEX : DOCK_CLAUDE;
+        const cJSON *st = cJSON_GetObjectItem(item, "state");
+        d->state = parse_state(cJSON_IsString(st) ? st->valuestring : NULL);
+        copy_str(d->project, sizeof(d->project), cJSON_GetObjectItem(item, "project"));
+        copy_str(d->label, sizeof(d->label), cJSON_GetObjectItem(item, "label"));
+        copy_str(d->text, sizeof(d->text), cJSON_GetObjectItem(item, "text"));
+        d->since = num(cJSON_GetObjectItem(item, "since"));
+        d->agents_total = (int)num(cJSON_GetObjectItem(item, "agents_total"));
+        d->agents_active = (int)num(cJSON_GetObjectItem(item, "agents_active"));
+    }
+
+    const cJSON *counts = cJSON_GetObjectItem(root, "counts");
+    static const char *names[] = {"approval", "input", "error", "running", "done", "idle"};
+    for (int i = 0; i < DOCK_STATE_COUNT; i++) {
+        s->counts[i] = (int)num(cJSON_GetObjectItem(counts, names[i]));
+    }
+}
+
+static void handle_line(char *line)
+{
+    cJSON *root = cJSON_Parse(line);
+    if (!root) {
+        return; // not a protocol message
+    }
+    const cJSON *t = cJSON_GetObjectItem(root, "t");
+    if (!cJSON_IsString(t)) {
+        cJSON_Delete(root);
+        return;
+    }
+    s_last_rx_us = esp_timer_get_time();
+
+    if (strcmp(t->valuestring, "hello") == 0) {
+        int proto = (int)num(cJSON_GetObjectItem(root, "proto"));
+        s_incompatible = proto != DOCK_PROTO;
+        send_hello();
+        if (s_incompatible) {
+            link_log("warn", "host speaks protocol %d, firmware speaks %d", proto, DOCK_PROTO);
+        }
+    } else if (strcmp(t->valuestring, "snapshot") == 0) {
+        parse_snapshot(root, s_scratch);
+        uint32_t seq = s_scratch->seq;
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        dock_snapshot_t *tmp = s_shared;
+        s_shared = s_scratch;
+        s_scratch = tmp;
+        s_version++;
+        s_received_us = s_last_rx_us;
+        xSemaphoreGive(s_lock);
+
+        char ack[48];
+        snprintf(ack, sizeof(ack), "{\"t\":\"ack\",\"seq\":%lu}", (unsigned long)seq);
+        send_line(ack);
+    }
+    cJSON_Delete(root);
+}
+
+static void reader_task(void *arg)
+{
+    char *line = heap_caps_malloc(MAX_LINE + 1, MALLOC_CAP_SPIRAM);
+    uint8_t chunk[256];
+    size_t len = 0;
+    bool skipping = false; // inside a line longer than MAX_LINE
+
+    send_hello();
+    for (;;) {
+        int n = usb_serial_jtag_read_bytes(chunk, sizeof(chunk), pdMS_TO_TICKS(100));
+        for (int i = 0; i < n; i++) {
+            char c = (char)chunk[i];
+            if (c == '\n') {
+                if (!skipping && len > 0) {
+                    if (line[len - 1] == '\r') {
+                        len--;
+                    }
+                    line[len] = '\0';
+                    handle_line(line);
+                }
+                len = 0;
+                skipping = false;
+            } else if (!skipping) {
+                if (len < MAX_LINE) {
+                    line[len++] = c;
+                } else {
+                    skipping = true;
+                    len = 0;
+                }
+            }
+        }
+    }
+}
+
+void link_start(void)
+{
+    s_lock = xSemaphoreCreateMutex();
+    s_tx_lock = xSemaphoreCreateMutex();
+    s_shared = heap_caps_calloc(1, sizeof(dock_snapshot_t), MALLOC_CAP_SPIRAM);
+    s_scratch = heap_caps_calloc(1, sizeof(dock_snapshot_t), MALLOC_CAP_SPIRAM);
+
+    usb_serial_jtag_driver_config_t cfg = {
+        .rx_buffer_size = 8192,
+        .tx_buffer_size = 4096,
+    };
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&cfg));
+    xTaskCreatePinnedToCore(reader_task, "link", 6144, NULL, 5, NULL, 0);
+}
+
+bool link_take_snapshot(dock_snapshot_t *out, uint32_t *version, int64_t *received_us)
+{
+    bool fresh = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_version != *version) {
+        memcpy(out, s_shared, sizeof(*out));
+        *version = s_version;
+        *received_us = s_received_us;
+        fresh = true;
+    }
+    xSemaphoreGive(s_lock);
+    return fresh;
+}
+
+int64_t link_last_rx_us(void)
+{
+    return s_last_rx_us;
+}
+
+bool link_incompatible(void)
+{
+    return s_incompatible;
+}

@@ -26,6 +26,9 @@ type transcripts struct {
 	mu       sync.Mutex
 	prices   *pricing.Table
 	messages map[string]*messageUsage
+
+	agents map[string]*agentTrack // by transcript path; poll goroutine only
+	live   func(sessionID string) bool
 }
 
 type messageUsage struct {
@@ -37,10 +40,11 @@ type messageUsage struct {
 type pollResult struct {
 	changed bool
 	titles  map[string]string // sessionID -> latest AI title
+	agents  []model.Observation
 }
 
 func newTranscripts(root string, prices *pricing.Table) *transcripts {
-	return &transcripts{root: root, tailer: jsonl.NewTailer(), prices: prices, messages: map[string]*messageUsage{}}
+	return &transcripts{root: root, tailer: jsonl.NewTailer(), prices: prices, messages: map[string]*messageUsage{}, agents: map[string]*agentTrack{}}
 }
 
 func (t *transcripts) setPrices(p *pricing.Table) {
@@ -57,12 +61,14 @@ func (t *transcripts) poll(rescan bool, now time.Time) pollResult {
 		paths = jsonl.Walk(t.root, window, func(p string) bool { return strings.HasSuffix(p, ".jsonl") })
 	}
 	for _, path := range paths {
+		agent := t.agentFor(path)
 		_ = t.tailer.Read(path, func(line []byte) {
-			if t.line(line, res.titles) {
+			if t.line(line, res.titles, agent) {
 				res.changed = true
 			}
 		})
 	}
+	res.agents = t.agentObservations(now, rescan)
 	if rescan {
 		t.prune(now)
 	}
@@ -75,9 +81,10 @@ type transcriptLine struct {
 	SessionID string    `json:"sessionId"`
 	AITitle   string    `json:"aiTitle"`
 	Message   struct {
-		ID    string `json:"id"`
-		Model string `json:"model"`
-		Usage *struct {
+		ID      string          `json:"id"`
+		Model   string          `json:"model"`
+		Content json.RawMessage `json:"content"`
+		Usage   *struct {
 			Input         int64 `json:"input_tokens"`
 			Output        int64 `json:"output_tokens"`
 			CacheRead     int64 `json:"cache_read_input_tokens"`
@@ -95,8 +102,9 @@ var (
 	markTitle     = []byte(`"type":"ai-title"`)
 )
 
-// line handles one transcript line and reports whether token totals changed.
-func (t *transcripts) line(b []byte, titles map[string]string) bool {
+// line handles one transcript line and reports whether token totals
+// changed. agent is set for a subagent's transcript.
+func (t *transcripts) line(b []byte, titles map[string]string, agent *agentTrack) bool {
 	// Most lines are large tool results; skip them without decoding.
 	isAssistant := bytes.Contains(b, markAssistant)
 	if !isAssistant && !bytes.Contains(b, markTitle) {
@@ -115,6 +123,9 @@ func (t *transcripts) line(b []byte, titles map[string]string) bool {
 	case "assistant":
 	default:
 		return false
+	}
+	if agent != nil {
+		agent.toolUse(l.Timestamp, l.Message.Content)
 	}
 	us := l.Message.Usage
 	if us == nil || l.Message.ID == "" || l.Timestamp.IsZero() {

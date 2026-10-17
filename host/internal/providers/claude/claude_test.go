@@ -35,22 +35,75 @@ func TestHookObservation(t *testing.T) {
 		{body: `{"hook_event_name":"FileChanged","session_id":"s"}`, skip: true},
 	}
 	for _, c := range cases {
-		o, ok, err := hookObservation([]byte(c.body), now)
+		obs, err := hookObservations([]byte(c.body), now)
 		if err != nil {
 			t.Fatalf("%s: %v", c.body, err)
 		}
-		if ok == c.skip {
-			t.Fatalf("%s: ok=%v", c.body, ok)
+		if (len(obs) == 0) != c.skip {
+			t.Fatalf("%s: got %d observations", c.body, len(obs))
 		}
 		if c.skip {
 			continue
 		}
-		if o.State != c.state || o.Detail != c.detail || o.End != c.end || o.SessionID != "s" {
+		o := obs[0]
+		if o.State != c.state || o.Detail != c.detail || o.End != c.end || o.SessionID != "s" || o.AgentID != "" {
 			t.Errorf("%s: got %+v", c.body, o)
 		}
 	}
-	if _, _, err := hookObservation([]byte(`{"hook_event_name":"Stop"}`), now); err == nil {
+	if _, err := hookObservations([]byte(`{"hook_event_name":"Stop"}`), now); err == nil {
 		t.Error("missing session_id accepted")
+	}
+}
+
+func TestSubagentHooks(t *testing.T) {
+	now := time.Unix(1792200000, 0)
+	one := func(body string) model.Observation {
+		t.Helper()
+		obs, err := hookObservations([]byte(body), now)
+		if err != nil || len(obs) != 1 {
+			t.Fatalf("%s: %v %+v", body, err, obs)
+		}
+		return obs[0]
+	}
+
+	// The parent starts an agent: its description waits for the agent.
+	o := one(`{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Agent","tool_input":{"description":"查找 API 入口","subagent_type":"Explore","prompt":"long"}}`)
+	if !o.AgentLaunch || o.AgentType != "Explore" || o.AgentDesc != "查找 API 入口" || o.AgentID != "" || o.State != model.StateRunning {
+		t.Fatalf("launch = %+v", o)
+	}
+
+	o = one(`{"hook_event_name":"SubagentStart","session_id":"s","agent_id":"a1","agent_type":"Explore"}`)
+	if o.AgentID != "a1" || o.AgentType != "Explore" || o.State != model.StateRunning {
+		t.Fatalf("start = %+v", o)
+	}
+
+	// Tool events inside the agent go to the agent, never the session.
+	o = one(`{"hook_event_name":"PreToolUse","session_id":"s","agent_id":"a1","agent_type":"Explore","tool_name":"Read","tool_input":{"file_path":"/w/p/server.go"}}`)
+	if o.AgentID != "a1" || o.Detail != "Read: server.go" || o.ToolDone != "" {
+		t.Fatalf("agent tool = %+v", o)
+	}
+	o = one(`{"hook_event_name":"PermissionRequest","session_id":"s","agent_id":"a1","tool_name":"Bash","tool_input":{"command":"make"}}`)
+	if o.AgentID != "a1" || o.State != model.StateApproval {
+		t.Fatalf("agent permission = %+v", o)
+	}
+	o = one(`{"hook_event_name":"SubagentStop","session_id":"s","agent_id":"a1","agent_type":"Explore","last_assistant_message":"done"}`)
+	if o.AgentID != "a1" || o.State != model.StateDone {
+		t.Fatalf("stop = %+v", o)
+	}
+
+	// The Agent call's response maps the id to its description.
+	obs, _ := hookObservations([]byte(`{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"Agent","tool_input":{"description":"查找 API 入口","subagent_type":"Explore"},"tool_response":{"status":"async_launched","agentId":"a1"}}`), now)
+	if len(obs) != 2 || obs[0].ToolDone != "Agent" || obs[1].AgentID != "a1" || obs[1].AgentDesc != "查找 API 入口" || obs[1].State != "" {
+		t.Fatalf("post agent = %+v", obs)
+	}
+
+	// The main session's own tools are tallied; a new prompt resets.
+	o = one(`{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"Read","tool_input":{"file_path":"a.go"}}`)
+	if o.ToolDone != "Read" || o.AgentID != "" {
+		t.Fatalf("tally = %+v", o)
+	}
+	if o = one(`{"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"x"}`); !o.NewTurn {
+		t.Fatal("prompt does not start a new turn")
 	}
 }
 
@@ -293,5 +346,66 @@ func TestStatuslineWithoutExisting(t *testing.T) {
 				t.Fatalf("after uninstall = %s, want %s", f.Data, want)
 			}
 		})
+	}
+}
+
+func TestSubagentTranscripts(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "-work-demo", "s9", "subagents")
+	os.MkdirAll(dir, 0o755)
+	now := time.Now()
+	ts := now.Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	jsonlPath := filepath.Join(dir, "agent-a7.jsonl")
+	os.WriteFile(jsonlPath, []byte(`{"type":"user","agentId":"a7","message":{"role":"user","content":"go"}}
+{"type":"assistant","timestamp":"`+ts+`","message":{"id":"m1","model":"claude-haiku-5-5","content":[{"type":"text","text":"x"},{"type":"tool_use","name":"Grep","input":{"pattern":"TODO"}}],"usage":{"input_tokens":1,"output_tokens":1}}}
+`), 0o644)
+	meta := filepath.Join(dir, "agent-a7.meta.json")
+	os.WriteFile(meta, []byte(`{"agentType":"Explore","description":"找出所有 TODO"}`), 0o644)
+
+	tr := newTranscripts(root, pricing.New(nil))
+	live := false
+	tr.live = func(id string) bool { return live && id == "s9" }
+
+	if res := tr.poll(true, now); len(res.agents) != 0 {
+		t.Fatalf("agents of a session that is not running: %+v", res.agents)
+	}
+	live = true
+	res := tr.poll(true, now)
+	if len(res.agents) != 1 {
+		t.Fatalf("agents = %+v", res.agents)
+	}
+	o := res.agents[0]
+	if o.SessionID != "s9" || o.AgentID != "a7" || o.AgentType != "Explore" || o.AgentDesc != "找出所有 TODO" ||
+		o.State != model.StateRunning || o.Detail != "Grep: TODO" {
+		t.Fatalf("agent = %+v", o)
+	}
+	if res := tr.poll(true, now); len(res.agents) != 0 {
+		t.Fatalf("unchanged agent reported again: %+v", res.agents)
+	}
+
+	os.WriteFile(meta, []byte(`{"agentType":"Explore","description":"找出所有 TODO","finished":true}`), 0o644)
+	res = tr.poll(true, now)
+	if len(res.agents) != 1 || res.agents[0].State != model.StateDone {
+		t.Fatalf("finished agent = %+v", res.agents)
+	}
+}
+
+func TestHooksStaleWithoutNewEvents(t *testing.T) {
+	home := t.TempDir()
+	tg := providers.Target{Exe: "/opt/go-dock/go-dock", Addr: "127.0.0.1:47321"}
+	if err := InstallHooks(home, tg); err != nil {
+		t.Fatal(err)
+	}
+	// An install from before SubagentStart/SubagentStop existed.
+	f, _ := providers.ReadJSONFile(settingsPath(home))
+	f.Delete("hooks.SubagentStart")
+	f.Delete("hooks.SubagentStop")
+	f.Save()
+	if st := HooksStatus(home, tg); !st.Installed || !st.Stale {
+		t.Fatalf("old install not reported as needing an update: %+v", st)
+	}
+	InstallHooks(home, tg)
+	if st := HooksStatus(home, tg); st.Stale {
+		t.Fatalf("reinstall still stale: %+v", st)
 	}
 }

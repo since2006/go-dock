@@ -76,6 +76,47 @@ type Session struct {
 	Since     time.Time `json:"since"`   // when State was entered
 	Updated   time.Time `json:"updated"` // last observation of any kind
 	Source    string    `json:"source"`  // source of the last state change
+	// Agents are the session's subagents, most urgent first.
+	Agents []Agent `json:"agents,omitempty"`
+	// Tools tallies the tool calls finished in the current turn.
+	Tools []ToolCount `json:"tools,omitempty"`
+}
+
+// Agent is a subagent working for a session (Claude Code's Agent tool, a
+// Codex spawned thread).
+type Agent struct {
+	ID      string    `json:"id"`
+	Type    string    `json:"type"`             // Explore, general-purpose, ...
+	Desc    string    `json:"desc,omitempty"`   // what it was asked to do
+	Detail  string    `json:"detail,omitempty"` // what it is doing now
+	State   State     `json:"state"`
+	Since   time.Time `json:"since"` // started
+	Updated time.Time `json:"updated"`
+}
+
+type ToolCount struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+// Active reports whether the state still needs work or attention.
+func (s State) Active() bool {
+	return s == StateApproval || s == StateInput || s == StateError || s == StateRunning
+}
+
+// Effective returns the most urgent state among the session and its
+// agents, and the agent it comes from (nil for the session itself). A
+// session waiting for its next prompt while a subagent asks for approval
+// is, for the user, waiting for approval.
+func (s Session) Effective() (State, *Agent) {
+	st, from := s.State, (*Agent)(nil)
+	for i := range s.Agents {
+		a := &s.Agents[i]
+		if a.State.Active() && a.State.Priority() < st.Priority() {
+			st, from = a.State, a
+		}
+	}
+	return st, from
 }
 
 // Observation is a single signal about a session from one source.
@@ -88,7 +129,19 @@ type Observation struct {
 	Detail    string
 	At        time.Time
 	Source    string // "hook", "sessions", "rollout", ...
-	End       bool   // the session is gone
+	End       bool   // the session is gone (with AgentID: that agent is)
+
+	// With AgentID set, State, Detail and End apply to that subagent of
+	// the session, not the session itself.
+	AgentID   string
+	AgentType string
+	AgentDesc string
+	// AgentLaunch says the session started a subagent whose id is not
+	// known yet; its AgentType and AgentDesc wait for the agent to appear.
+	AgentLaunch bool
+
+	ToolDone string // a tool call of the current turn finished
+	NewTurn  bool   // a new turn starts: reset the tool tally
 }
 
 // Key returns the hub key for the observed session.
