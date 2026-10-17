@@ -21,8 +21,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: host/go.mod
           cache-dependency-path: host/go.sum
@@ -40,8 +40,8 @@ jobs:
         goos: [linux, darwin, windows]
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: host/go.mod
           cache-dependency-path: host/go.sum
@@ -53,7 +53,7 @@ jobs:
         run: |
           ext=""; [ "$GOOS" = windows ] && ext=".exe"
           go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::7}" -o "dist/go-dock-${GOOS}-${GOARCH}${ext}" ./cmd/go-dock
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: go-dock-${{ matrix.goos }}-${{ matrix.goarch }}
           path: host/dist/*

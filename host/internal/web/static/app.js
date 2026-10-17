@@ -93,10 +93,10 @@ function showTab(name) {
     b.setAttribute("aria-selected", String(b.dataset.tab === name));
   }
   for (const s of document.querySelectorAll(".tab")) s.hidden = s.id !== `tab-${name}`;
-  history.replaceState(null, "", `#${name}`);
+  history.replaceState(null, "", `#/${name}`); // "#/x" never matches an element id, so no scroll jump
   try { localStorage.setItem("tab", name); } catch {}
   if (name === "integrations") loadIntegrations();
-  if (name === "settings") loadSettings();
+  if (name === "settings") { loadSettings(); loadSystem(); }
   if (name === "logs") loadLogs();
   if (name === "preview") fitScreen();
 }
@@ -260,6 +260,7 @@ $("#reconnect").addEventListener("click", async () => {
 function render() {
   if (!state) return;
   $("#version").textContent = state.version;
+  renderBanner(state.update);
   renderUsage(state.snapshot);
   renderSessions(state.snapshot);
   renderDevicePill(state.device);
@@ -278,9 +279,113 @@ function connect() {
   const es = new EventSource("/api/events");
   es.addEventListener("open", () => { pill.textContent = "已连接"; pill.className = "pill ok"; });
   es.addEventListener("error", () => { pill.textContent = "已断开，重连中…"; pill.className = "pill bad"; });
-  es.addEventListener("state", (e) => { state = JSON.parse(e.data); render(); });
+  es.addEventListener("state", (e) => {
+    const next = JSON.parse(e.data);
+    if (state && state.version !== next.version) upgradedTo = next.version;
+    state = next;
+    render();
+  });
   es.addEventListener("log", (e) => appendLog(JSON.parse(e.data)));
 }
+
+// ---------- updates & system ----------
+
+let upgradedTo = null;
+let applying = false;
+
+function dismissed(v) { try { return localStorage.getItem("dismissUpdate") === v; } catch { return false; } }
+
+function renderBanner(u) {
+  const box = $("#update-banner");
+  if (!u) { box.hidden = true; return; }
+  let parts = null;
+  let cls = "banner";
+  if (upgradedTo) {
+    parts = [el("span", { class: "msg" }, `已升级到 ${upgradedTo}`),
+      el("button", { class: "btn ghost", onclick: () => { upgradedTo = null; render(); } }, "知道了")];
+  } else if (u.state === "restarting") {
+    parts = [el("span", { class: "msg" }, "新版本已安装，正在重启…")];
+  } else if (u.state === "downloading") {
+    parts = [el("span", { class: "msg" }, `正在下载并校验 ${u.latest}…`)];
+  } else if (applying && u.state === "error") {
+    cls += " err";
+    parts = [el("span", { class: "msg" }, `升级失败：${u.error}`),
+      el("button", { class: "btn ghost", onclick: () => { applying = false; render(); } }, "关闭")];
+  } else if (u.available && !dismissed(u.latest)) {
+    parts = [
+      el("span", { class: "msg" }, `发现新版本 ${u.latest}（当前 ${u.current}）`,
+        u.dev ? "。开发版本不能在线升级，请到发布页下载。" : ""),
+      u.url ? el("a", { href: u.url, target: "_blank", rel: "noopener" }, u.dev ? "发布页" : "更新说明") : null,
+      u.dev ? null : el("button", { class: "btn primary", onclick: applyUpdate }, "升级并重启"),
+      el("button", { class: "btn ghost", onclick: () => {
+        try { localStorage.setItem("dismissUpdate", u.latest); } catch {}
+        render();
+      } }, "稍后"),
+    ];
+  }
+  box.hidden = !parts;
+  if (parts) { box.className = cls; box.replaceChildren(...parts); }
+}
+
+async function applyUpdate() {
+  if (!confirm("下载新版本并重启 go-dock？升级期间屏幕和网页会断开几秒。")) return;
+  applying = true;
+  try {
+    const u = await api("/api/update/apply", { method: "POST", body: {} });
+    if (state) { state.update = u; render(); }
+  } catch (e) {
+    applying = false;
+    alert(e.message);
+  }
+}
+
+function renderSystem(info) {
+  const u = info.update;
+  $("#sys-version").textContent = info.version + (u.dev ? "（开发版本）" : "");
+  const desc = $("#sys-update");
+  desc.className = "sys-desc";
+  if (u.state === "checking") desc.textContent = "正在检查…";
+  else if (u.state === "error" && u.error) { desc.textContent = u.error; desc.className = "sys-desc err"; }
+  else if (!u.checked_at) desc.textContent = "尚未检查更新";
+  else if (!u.latest) desc.textContent = `还没有发布版本（检查于 ${ago(u.checked_at)}）`;
+  else if (u.available) desc.textContent = `有新版本 ${u.latest}` + (u.dev ? "，开发版本请到发布页下载" : "");
+  else desc.textContent = `已是最新版本（检查于 ${ago(u.checked_at)}）`;
+  const apply = $("#apply-update");
+  apply.hidden = !(u.available && !u.dev);
+  apply.textContent = `升级到 ${u.latest}`;
+
+  const a = info.autostart;
+  const toggle = $("#autostart-toggle");
+  const ad = $("#sys-autostart");
+  toggle.checked = !!a.enabled;
+  toggle.disabled = !a.supported || (!!a.error && !a.enabled);
+  ad.className = "sys-desc";
+  const how = { launchd: "macOS 登录项（LaunchAgent）", systemd: "systemd 用户服务", xdg: "桌面环境自启动项", registry: "Windows 注册表启动项" }[a.method] || "";
+  if (!a.supported) ad.textContent = "当前系统不支持";
+  else if (a.error) { ad.textContent = a.error; ad.className = "sys-desc err"; }
+  else if (a.enabled && a.stale) { ad.textContent = "自启项指向的不是当前程序，请关闭后重新开启"; ad.className = "sys-desc warn"; }
+  else if (a.enabled) ad.textContent = `已开启，登录后自动在后台运行（${how}：${a.path}）`;
+  else ad.textContent = `登录系统后自动在后台运行 go-dock（${how}）`;
+}
+
+async function loadSystem() {
+  try { renderSystem(await api("/api/system")); } catch (e) { $("#sys-update").textContent = e.message; }
+}
+
+$("#check-update").addEventListener("click", async (ev) => {
+  ev.target.disabled = true;
+  $("#sys-update").textContent = "正在检查…";
+  try { renderSystem(await api("/api/update/check", { method: "POST", body: {} })); }
+  catch (e) { $("#sys-update").textContent = e.message; $("#sys-update").className = "sys-desc err"; }
+  ev.target.disabled = false;
+});
+$("#apply-update").addEventListener("click", applyUpdate);
+$("#autostart-toggle").addEventListener("change", async (ev) => {
+  const want = ev.target.checked;
+  ev.target.disabled = true;
+  try { renderSystem(await api("/api/autostart", { method: "POST", body: { enabled: want } })); }
+  catch (e) { alert(e.message); ev.target.checked = !want; ev.target.disabled = false; }
+});
 
 // ---------- integrations ----------
 
@@ -434,7 +539,7 @@ $("#log-clear").addEventListener("click", () => { logLines = []; renderLogs(); }
 // ---------- boot ----------
 
 try { $("#show-idle").checked = localStorage.getItem("showIdle") === "1"; } catch {}
-let initialTab = location.hash.slice(1);
+let initialTab = location.hash.replace(/^#\/?/, "");
 if (!initialTab) { try { initialTab = localStorage.getItem("tab") || "overview"; } catch { initialTab = "overview"; } }
 showTab(document.querySelector(`[data-tab="${initialTab}"]`) ? initialTab : "overview");
 connect();

@@ -16,6 +16,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/since2006/go-dock/host/internal/config"
+	"github.com/since2006/go-dock/host/internal/selfexe"
 )
 
 // Status describes one integration as shown on the web UI.
@@ -39,15 +40,9 @@ type Target struct {
 // CurrentTarget resolves the running executable. It refuses binaries that
 // `go run` builds in a temp dir, since hooks would break once it exits.
 func CurrentTarget(addr string) (Target, error) {
-	exe, err := os.Executable()
+	exe, err := selfexe.Path()
 	if err != nil {
 		return Target{}, err
-	}
-	if r, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = r
-	}
-	if strings.Contains(exe, "go-build") || strings.HasPrefix(exe, os.TempDir()) {
-		return Target{}, errors.New("当前是 go run 生成的临时程序，请先 go build 出固定位置的可执行文件再安装集成")
 	}
 	return Target{Exe: exe, Addr: addr}, nil
 }

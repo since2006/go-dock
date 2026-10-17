@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,8 +19,20 @@ type Duration time.Duration
 
 func (d Duration) D() time.Duration { return time.Duration(d) }
 
+// String renders whole minutes and hours without zero units: "30m", "12h".
+func (d Duration) String() string {
+	s := time.Duration(d).String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
+}
+
 func (d Duration) MarshalJSON() ([]byte, error) {
-	return json.Marshal(time.Duration(d).String())
+	return json.Marshal(d.String())
 }
 
 func (d *Duration) UnmarshalJSON(b []byte) error {
@@ -42,6 +55,7 @@ type Config struct {
 	Codex   CodexConfig   `json:"codex"`
 	Display DisplayConfig `json:"display"`
 	Log     LogConfig     `json:"log"`
+	Update  UpdateConfig  `json:"update"`
 	// Pricing overrides the built-in USD prices per million tokens, keyed by
 	// model name prefix.
 	Pricing map[string]Price `json:"pricing,omitempty"`
@@ -82,6 +96,11 @@ type DisplayConfig struct {
 	MaxSessions int      `json:"max_sessions"`
 }
 
+type UpdateConfig struct {
+	// AutoCheck looks for a new release once a day.
+	AutoCheck bool `json:"auto_check"`
+}
+
 type LogConfig struct {
 	Level string `json:"level"` // debug, info, warn, error
 }
@@ -110,7 +129,8 @@ func Default() Config {
 			StaleAfter:  Duration(12 * time.Hour),
 			MaxSessions: 12,
 		},
-		Log: LogConfig{Level: "info"},
+		Log:    LogConfig{Level: "info"},
+		Update: UpdateConfig{AutoCheck: true},
 	}
 }
 

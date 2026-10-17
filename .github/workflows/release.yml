@@ -1,0 +1,84 @@
+name: release
+
+# Push a tag like v0.2.0 to publish a release. go-dock's online update
+# downloads the assets built here: one raw binary per platform named
+# go-dock_<os>_<arch>[.exe], plus SHA256SUMS.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: host
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: host/go.mod
+          cache-dependency-path: host/go.sum
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-latest, goos: linux, goarch: amd64, cgo: "0" }
+          - { runner: ubuntu-latest, goos: linux, goarch: arm64, cgo: "0" }
+          - { runner: ubuntu-latest, goos: windows, goarch: amd64, cgo: "0" }
+          - { runner: ubuntu-latest, goos: windows, goarch: arm64, cgo: "0" }
+          # macOS builds natively with cgo so the screen is found by USB VID/PID.
+          - { runner: macos-latest, goos: darwin, goarch: arm64, cgo: "1" }
+          - { runner: macos-latest, goos: darwin, goarch: amd64, cgo: "1" }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: host
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: host/go.mod
+          cache-dependency-path: host/go.sum
+      - name: build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: |
+          ext=""; [ "$GOOS" = windows ] && ext=".exe"
+          version="${GITHUB_REF_NAME#v}"
+          go build -trimpath -ldflags "-s -w -X main.version=${version}" \
+            -o "dist/go-dock_${GOOS}_${GOARCH}${ext}" ./cmd/go-dock
+      - uses: actions/upload-artifact@v7
+        with:
+          name: go-dock_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: host/dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        working-directory: dist
+        run: sha256sum go-dock_* > SHA256SUMS && cat SHA256SUMS
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

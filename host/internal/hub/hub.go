@@ -278,3 +278,6 @@ func (h *Hub) RemoveProvider(p model.Provider) {
 	h.mu.Unlock()
 	h.notify()
 }
+
+// Touch tells subscribers to refresh, for state kept outside the hub.
+func (h *Hub) Touch() { h.notify() }

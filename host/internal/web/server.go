@@ -38,6 +38,11 @@ type Backend interface {
 	DeviceFrame() any
 	DevicePorts() (any, error)
 	ReconnectDevice()
+	UpdateStatus() any
+	CheckUpdate() error
+	ApplyUpdate() error
+	System() any
+	SetAutostart(enabled bool) error
 }
 
 type Server struct {
@@ -69,6 +74,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/device/frame", s.getFrame)
 	mux.HandleFunc("POST /api/device/reconnect", s.postReconnect)
 	mux.HandleFunc("POST /api/ingest/{provider}/{kind}", s.postIngest)
+	mux.HandleFunc("GET /api/system", s.getSystem)
+	mux.HandleFunc("POST /api/autostart", s.postAutostart)
+	mux.HandleFunc("POST /api/update/check", s.postUpdateCheck)
+	mux.HandleFunc("POST /api/update/apply", s.postUpdateApply)
 	return guard(s.listen, mux)
 }
 
@@ -152,6 +161,7 @@ type statePayload struct {
 	Snapshot model.Snapshot `json:"snapshot"`
 	Device   any            `json:"device"`
 	Frame    any            `json:"frame"`
+	Update   any            `json:"update"`
 }
 
 func (s *Server) state() statePayload {
@@ -160,6 +170,7 @@ func (s *Server) state() statePayload {
 		Snapshot: s.backend.Snapshot(),
 		Device:   s.backend.DeviceStatus(),
 		Frame:    s.backend.DeviceFrame(),
+		Update:   s.backend.UpdateStatus(),
 	}
 }
 
@@ -230,6 +241,41 @@ func (s *Server) getFrame(w http.ResponseWriter, r *http.Request) {
 func (s *Server) postReconnect(w http.ResponseWriter, r *http.Request) {
 	s.backend.ReconnectDevice()
 	writeJSON(w, http.StatusOK, s.backend.DeviceStatus())
+}
+
+func (s *Server) getSystem(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.backend.System())
+}
+
+func (s *Server) postAutostart(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.backend.SetAutostart(req.Enabled); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.backend.System())
+}
+
+func (s *Server) postUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if err := s.backend.CheckUpdate(); err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.backend.System())
+}
+
+func (s *Server) postUpdateApply(w http.ResponseWriter, r *http.Request) {
+	if err := s.backend.ApplyUpdate(); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, s.backend.UpdateStatus())
 }
 
 // postIngest always answers with an empty body: hook runners may treat

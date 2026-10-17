@@ -5,14 +5,16 @@ Guidance for AI coding agents working in this repository.
 ## Layout
 
 - `host/` — Go module `github.com/since2006/go-dock/host` (the desktop daemon).
-  - `cmd/go-dock/` — CLI: `run` (default), `hook <claude|codex>`, `statusline`, `version`.
+  - `cmd/go-dock/` — CLI: `run` (default, `--background` for login items), `hook <claude|codex>`, `statusline`, `autostart on|off|status`, `version`.
   - `internal/model/` — shared types (`Session`, `State`, `Usage`, `Snapshot`, `Observation`).
   - `internal/hub/` — merges observations into ordered sessions + usage; the single source of truth.
   - `internal/providers/` — collectors. `claude/` and `codex/` each have: status-file / log polling, hook mapping, install/uninstall of integrations. `jsonl/` is the incremental JSONL reader, `pricing/` the cost table. Shared install helpers live in `providers/install.go`.
   - `internal/device/` — USB serial link to the screen (`protocol.go` mirrors `docs/protocol-v1.md`).
   - `internal/web/` — HTTP API + embedded UI (`static/`, plain HTML/CSS/JS, no build step).
   - `internal/app/` — wiring; implements `web.Backend`.
-  - `internal/config/`, `internal/logx/`, `internal/ingest/`, `internal/procutil/` — support packages.
+  - `internal/autostart/` — login item per OS (LaunchAgent / systemd user unit or XDG / HKCU Run).
+  - `internal/update/` — checks GitHub Releases, verifies and replaces the executable; `cmd/go-dock/restart_*.go` restarts it.
+  - `internal/config/`, `internal/logx/`, `internal/ingest/`, `internal/procutil/`, `internal/selfexe/` — support packages.
 - `firmware/` — ESP32 firmware (placeholder for now).
 - `docs/protocol-v1.md` — host ↔ device protocol. `docs/plans/` — implementation plans.
 
@@ -34,4 +36,6 @@ CGO_ENABLED=0 GOOS=windows go build ./cmd/go-dock   # also linux, darwin
 - **Hook subcommands** must stay silent and exit 0, even when the daemon is down.
 - **Undocumented sources** (`~/.claude/sessions/*.json`, Codex rollout files) can change between versions: parse defensively, every field optional.
 - UI text and docs are Chinese; code, identifiers and comments are English.
+- **Releases**: pushing a `v*` tag runs `.github/workflows/release.yml`. The updater expects assets named `go-dock_<os>_<arch>[.exe]` plus `SHA256SUMS`, and `go-dock version` printing the tag without `v`; change both sides together. Builds without `-X main.version` report `dev` and never self-update. `GO_DOCK_UPDATE_API` points the updater at a fake GitHub API for testing.
+- **Autostart** never starts a second instance immediately (the running one owns the port); it only registers for the next login.
 - New behavior needs tests; providers keep fixtures in their `testdata/`.

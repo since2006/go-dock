@@ -18,7 +18,7 @@ func TestLoadCreatesDefaults(t *testing.T) {
 		t.Fatalf("defaults not applied: %+v", s.Get().Web)
 	}
 	b, err := os.ReadFile(path)
-	if err != nil || !strings.Contains(string(b), `"done_ttl": "30m0s"`) {
+	if err != nil || !strings.Contains(string(b), `"done_ttl": "30m"`) {
 		t.Fatalf("config not written: %v\n%s", err, b)
 	}
 }
@@ -65,5 +65,20 @@ func TestBadDuration(t *testing.T) {
 	os.WriteFile(path, []byte(`{"display":{"done_ttl":"soon"}}`), 0o600)
 	if _, err := Load(path); err == nil {
 		t.Fatal("bad duration accepted")
+	}
+}
+
+func TestDurationString(t *testing.T) {
+	cases := map[time.Duration]string{
+		30 * time.Minute:           "30m",
+		12 * time.Hour:             "12h",
+		90 * time.Minute:           "1h30m",
+		45 * time.Second:           "45s",
+		time.Hour + 30*time.Second: "1h0m30s",
+	}
+	for d, want := range cases {
+		if got := Duration(d).String(); got != want {
+			t.Errorf("%v = %q, want %q", time.Duration(d), got, want)
+		}
 	}
 }

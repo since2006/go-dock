@@ -27,7 +27,19 @@ go-dock/
 
 go-dock **不读取任何登录凭据**，也不调用非公开接口。
 
-## 编译
+## 安装
+
+从 [Releases](https://github.com/since2006/go-dock/releases) 下载对应平台的程序（如 `go-dock_darwin_arm64`），放到一个固定位置：
+
+```sh
+mkdir -p ~/.local/bin
+mv go-dock_darwin_arm64 ~/.local/bin/go-dock
+chmod +x ~/.local/bin/go-dock
+```
+
+hooks 和开机自启记录的都是程序的绝对路径，所以装好后不要再挪动它。如果挪了，到网页上重新安装集成、重新开启开机自启即可。
+
+## 从源码编译
 
 需要 Go 1.26 或更新版本。
 
@@ -38,13 +50,14 @@ go build -o bin/go-dock ./cmd/go-dock
 
 macOS 本机编译会默认启用 cgo，可以按 USB VID/PID 识别屏幕。交叉编译时（`CGO_ENABLED=0`）macOS 版改为按 `/dev/cu.usbmodem*` 端口名识别，功能不受影响。
 
-> 请把可执行文件放在固定位置再安装集成：hooks 里记录的是它的绝对路径。用 `go run` 运行时不能安装集成。
+> 用 `go run` 运行时不能安装集成，也不能开启开机自启。自己编译的程序版本号为 `dev`，不能在线升级；需要时可加上 `-ldflags "-X main.version=0.1.0"`。
 
 ## 运行
 
 ```sh
-./bin/go-dock            # 启动后台服务并打开 http://127.0.0.1:47321
-./bin/go-dock --no-browser
+go-dock                  # 启动后台服务并打开 http://127.0.0.1:47321
+go-dock --no-browser     # 不打开浏览器
+go-dock run --background # 后台运行：不打开浏览器、不输出到终端
 ```
 
 | 页面 | 用途 |
@@ -60,6 +73,27 @@ macOS 本机编译会默认启用 cgo，可以按 USB VID/PID 识别屏幕。交
 - macOS：`~/Library/Application Support/go-dock/`
 - Linux：`~/.config/go-dock/`
 - Windows：`%AppData%\go-dock\`
+
+## 开机自启
+
+在网页「设置 → 系统」里打开「开机自动启动」，或运行 `go-dock autostart on`（`off` 关闭、`status` 查看）。打开后从**下次登录**开始生效，不会马上再启动一个 go-dock。
+
+| 系统 | 方式 |
+|---|---|
+| macOS | `~/Library/LaunchAgents/io.github.since2006.go-dock.plist` |
+| Linux | 有 systemd 时用用户服务 `~/.config/systemd/user/go-dock.service`，否则用 `~/.config/autostart/go-dock.desktop` |
+| Windows | 注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 中的 `go-dock` |
+
+开机自启以 `run --background` 运行。在 Windows 上，登录时命令行窗口会闪一下然后关闭。
+
+## 在线升级
+
+go-dock 每天检查一次 GitHub Releases（可在设置里关掉），有新版本时网页顶部会出现提示。点「升级并重启」后的流程：
+1. 下载当前平台的程序。
+2. 用 `SHA256SUMS` 校验，并运行一次新程序确认版本号正确。
+3. 原地替换后自动重启，几秒后网页重新连上。
+
+升级不会改变程序路径，所以已安装的 hooks 和开机自启不受影响。如果程序所在目录没有写权限（例如放在 `/usr/local/bin` 且属于 root），会提示手动替换。
 
 ## 集成
 
@@ -86,6 +120,12 @@ macOS 本机编译会默认启用 cgo，可以按 USB VID/PID 识别屏幕。交
 cd host
 go vet ./...
 go test -race ./...
+```
+
+发布新版本：推送形如 `v0.2.0` 的标签，`.github/workflows/release.yml` 会编译 6 个平台的程序、生成 `SHA256SUMS` 并创建 Release。在线升级依赖这些文件名，不要改动。
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
 修改通信协议时，必须同时修改 `docs/protocol-v1.md` 和 `host/internal/device/protocol.go`。更多约定见 [AGENTS.md](AGENTS.md)。

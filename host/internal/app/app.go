@@ -13,7 +13,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
+	"time"
 
+	"github.com/since2006/go-dock/host/internal/autostart"
 	"github.com/since2006/go-dock/host/internal/config"
 	"github.com/since2006/go-dock/host/internal/device"
 	"github.com/since2006/go-dock/host/internal/hub"
@@ -23,6 +26,8 @@ import (
 	"github.com/since2006/go-dock/host/internal/providers/claude"
 	"github.com/since2006/go-dock/host/internal/providers/codex"
 	"github.com/since2006/go-dock/host/internal/providers/pricing"
+	"github.com/since2006/go-dock/host/internal/selfexe"
+	"github.com/since2006/go-dock/host/internal/update"
 	"github.com/since2006/go-dock/host/internal/web"
 )
 
@@ -30,7 +35,14 @@ type Options struct {
 	Version     string
 	OpenBrowser bool      // false disables the configured browser launch
 	Console     io.Writer // also log here; nil for file only
+	// Restarted is set when the previous process exec'd or spawned this one
+	// after an update; it may still be releasing the listen port.
+	Restarted bool
 }
+
+// ErrRestart is returned by Run after an update was installed; the caller
+// should start the new executable.
+var ErrRestart = errors.New("restart requested")
 
 // App implements web.Backend.
 type App struct {
@@ -39,9 +51,12 @@ type App struct {
 	log     *logx.Logger
 	hub     *hub.Hub
 	device  *device.Manager
+	updater *update.Updater
 	listen  string // loopback-reachable address hooks call back to
 
-	ctx context.Context
+	ctx        context.Context
+	restart    func()
+	restarting atomic.Bool
 
 	mu         sync.Mutex
 	claude     *claude.Provider
@@ -66,11 +81,14 @@ func Run(ctx context.Context, o Options) error {
 	lg := logx.New(filepath.Join(dir, "logs", "go-dock.log"), o.Console, logx.ParseLevel(cfg.Log.Level))
 	defer lg.Close()
 
-	ln, err := net.Listen("tcp", cfg.Web.Listen)
+	ln, err := listen(cfg.Web.Listen, o.Restarted)
 	if err != nil {
 		return fmt.Errorf("监听 %s 失败（是否已有 go-dock 在运行？）: %w", cfg.Web.Listen, err)
 	}
+	update.Cleanup()
 
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 	a := &App{
 		version: o.Version,
 		store:   store,
@@ -79,7 +97,9 @@ func Run(ctx context.Context, o Options) error {
 		listen:  browserAddr(ln.Addr().String()),
 		ctx:     ctx,
 	}
+	a.restart = func() { a.restarting.Store(true); stop() }
 	a.device = device.NewManager(a.hub, deviceOptions(cfg), o.Version, lg.Logger)
+	a.updater = update.New(o.Version, lg.Logger, a.hub.Touch)
 	a.applyProviders(cfg)
 	store.OnChange(a.onConfigChange)
 
@@ -88,7 +108,8 @@ func Run(ctx context.Context, o Options) error {
 
 	go a.hub.Run(ctx)
 	go a.device.Run(ctx)
-	if o.OpenBrowser && cfg.Web.OpenBrowser {
+	go a.updater.Run(ctx, func() bool { return a.store.Get().Update.AutoCheck })
+	if o.OpenBrowser && !o.Restarted && cfg.Web.OpenBrowser {
 		openBrowser(url)
 	}
 	srv := web.New(cfg.Web.Listen, a, lg.Ring, lg.Logger, o.Version)
@@ -100,8 +121,23 @@ func Run(ctx context.Context, o Options) error {
 		}
 	}
 	a.mu.Unlock()
+	if a.restarting.Load() {
+		lg.Info("go-dock 正在重启")
+		return ErrRestart
+	}
 	lg.Info("go-dock 已退出")
 	return err
+}
+
+// listen binds addr. After a restart the old process may hold the port for
+// a moment, so it retries for a few seconds.
+func listen(addr string, retry bool) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	for i := 0; err != nil && retry && i < 40; i++ {
+		time.Sleep(250 * time.Millisecond)
+		ln, err = net.Listen("tcp", addr)
+	}
+	return ln, err
 }
 
 func hubOptions(c config.Config) hub.Options {
@@ -174,6 +210,66 @@ func (a *App) SetConfig(c config.Config) error      { return a.store.Set(c) }
 func (a *App) DeviceStatus() any                    { return a.device.Status() }
 func (a *App) ReconnectDevice()                     { a.device.Reconnect() }
 func (a *App) DevicePorts() (any, error)            { return device.ListPorts() }
+
+func (a *App) UpdateStatus() any { return a.updater.Status() }
+
+func (a *App) CheckUpdate() error { return a.updater.Check(a.ctx) }
+
+// ApplyUpdate validates synchronously, then downloads in the background;
+// progress shows up in UpdateStatus and the process restarts when done.
+func (a *App) ApplyUpdate() error {
+	switch st := a.updater.Status(); {
+	case st.Dev:
+		return errors.New("开发版本不支持在线升级，请下载发布版本")
+	case !st.Available:
+		return errors.New("没有可用的新版本")
+	case st.State == "downloading" || st.State == "restarting":
+		return errors.New("正在升级，请稍候")
+	}
+	go func() {
+		if err := a.updater.Apply(a.ctx); err != nil {
+			return
+		}
+		time.Sleep(500 * time.Millisecond) // let the UI see "restarting"
+		a.restart()
+	}()
+	return nil
+}
+
+type systemInfo struct {
+	Version   string           `json:"version"`
+	Exe       string           `json:"exe"`
+	Autostart autostart.Status `json:"autostart"`
+	Update    update.Status    `json:"update"`
+}
+
+func (a *App) System() any {
+	exe, err := selfexe.Path()
+	info := systemInfo{Version: a.version, Exe: exe, Autostart: autostart.Get(exe), Update: a.updater.Status()}
+	if err != nil {
+		info.Autostart.Error = err.Error()
+	}
+	return info
+}
+
+func (a *App) SetAutostart(enabled bool) error {
+	if !enabled {
+		err := autostart.Disable()
+		if err == nil {
+			a.log.Info("已关闭开机自启")
+		}
+		return err
+	}
+	exe, err := selfexe.Path()
+	if err != nil {
+		return err
+	}
+	if err := autostart.Enable(exe); err != nil {
+		return err
+	}
+	a.log.Info("已开启开机自启", "exe", exe)
+	return nil
+}
 
 func (a *App) DeviceFrame() any {
 	return device.BuildFrame(a.hub.Snapshot(), deviceOptions(a.store.Get()), 0)

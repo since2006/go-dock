@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,8 +16,9 @@ import (
 )
 
 type fakeBackend struct {
-	cfg     config.Config
-	ingests []string
+	cfg       config.Config
+	ingests   []string
+	autostart bool
 }
 
 func (f *fakeBackend) Snapshot() model.Snapshot             { return model.Snapshot{} }
@@ -39,6 +41,14 @@ func (f *fakeBackend) DeviceStatus() any         { return map[string]string{"sta
 func (f *fakeBackend) DeviceFrame() any          { return nil }
 func (f *fakeBackend) DevicePorts() (any, error) { return []string{}, nil }
 func (f *fakeBackend) ReconnectDevice()          {}
+func (f *fakeBackend) UpdateStatus() any         { return map[string]string{"state": "idle"} }
+func (f *fakeBackend) CheckUpdate() error        { return nil }
+func (f *fakeBackend) ApplyUpdate() error        { return errors.New("没有可用的新版本") }
+func (f *fakeBackend) System() any               { return map[string]any{"autostart": f.autostart} }
+func (f *fakeBackend) SetAutostart(on bool) error {
+	f.autostart = on
+	return nil
+}
 
 func newTestServer(listen string) (*fakeBackend, http.Handler) {
 	b := &fakeBackend{cfg: config.Default()}
@@ -118,5 +128,18 @@ func TestStaticEmbedded(t *testing.T) {
 		if w := do(h, "GET", "127.0.0.1:47321", p, "", ""); w.Code != http.StatusOK || w.Body.Len() == 0 {
 			t.Fatalf("%s: %d", p, w.Code)
 		}
+	}
+}
+
+func TestSystemEndpoints(t *testing.T) {
+	b, h := newTestServer("127.0.0.1:47321")
+	if w := do(h, "POST", "127.0.0.1:47321", "/api/autostart", "application/json", `{"enabled":true}`); w.Code != http.StatusOK || !b.autostart {
+		t.Fatalf("autostart: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(h, "POST", "127.0.0.1:47321", "/api/update/apply", "application/json", `{}`); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "没有可用") {
+		t.Fatalf("apply: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(h, "GET", "127.0.0.1:47321", "/api/state", "", ""); !strings.Contains(w.Body.String(), `"update":`) {
+		t.Fatalf("state lacks update: %s", w.Body.String())
 	}
 }

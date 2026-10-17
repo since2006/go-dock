@@ -27,6 +27,8 @@
     </div>
   </header>
 
+  <div class="banner" id="update-banner" hidden></div>
+
   <main>
     <section id="tab-overview" class="tab">
       <div class="usage-grid" id="usage"></div>
@@ -68,6 +70,26 @@
     </section>
 
     <section id="tab-settings" class="tab" hidden>
+      <div class="panel system">
+        <h2>系统</h2>
+        <div class="sys-row">
+          <div>
+            <div class="sys-title">版本 <span id="sys-version">—</span></div>
+            <div class="sys-desc" id="sys-update">—</div>
+          </div>
+          <div class="row">
+            <button type="button" class="btn ghost" id="check-update">检查更新</button>
+            <button type="button" class="btn primary" id="apply-update" hidden>升级</button>
+          </div>
+        </div>
+        <div class="sys-row">
+          <div>
+            <div class="sys-title">开机自动启动</div>
+            <div class="sys-desc" id="sys-autostart">—</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="autostart-toggle"><span></span></label>
+        </div>
+      </div>
       <form id="settings" class="panel settings" autocomplete="off">
         <fieldset>
           <legend>设备</legend>
@@ -102,9 +124,10 @@
           <label>刷新间隔<input name="codex.app_server_interval" placeholder="10m"></label>
         </fieldset>
         <fieldset>
-          <legend>管理台与日志</legend>
+          <legend>管理台、日志与更新</legend>
           <label>监听地址<input name="web.listen"><small>修改后需重启 go-dock，已安装的集成也要重新安装。</small></label>
           <label class="check"><input type="checkbox" name="web.open_browser"> 启动时打开浏览器</label>
+          <label class="check"><input type="checkbox" name="update.auto_check"> 每天自动检查新版本（只提示，不会自动安装）</label>
           <label>日志级别
             <select name="log.level">
               <option value="debug">debug</option>
