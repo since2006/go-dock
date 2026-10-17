@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/since2006/go-dock/host/internal/config"
@@ -51,10 +52,13 @@ type Server struct {
 	log     *slog.Logger
 	version string
 	listen  string
+
+	closing     chan struct{} // closed on shutdown so event streams end
+	closingOnce sync.Once
 }
 
 func New(listen string, b Backend, logs *logx.Ring, log *slog.Logger, version string) *Server {
-	return &Server{backend: b, logs: logs, log: log.With("component", "web"), version: version, listen: listen}
+	return &Server{backend: b, logs: logs, log: log.With("component", "web"), version: version, listen: listen, closing: make(chan struct{})}
 }
 
 // Handler returns the full HTTP handler including security middleware.
@@ -84,6 +88,9 @@ func (s *Server) Handler() http.Handler {
 // Serve listens on the configured address until ctx ends.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	// Shutdown waits for active requests; event streams never finish on
+	// their own, so end them first.
+	srv.RegisterOnShutdown(func() { s.closingOnce.Do(func() { close(s.closing) }) })
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -333,6 +340,8 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-s.closing:
 			return
 		case <-changes:
 			if throttle == nil {

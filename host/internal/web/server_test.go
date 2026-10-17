@@ -1,13 +1,16 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/since2006/go-dock/host/internal/config"
 	"github.com/since2006/go-dock/host/internal/logx"
@@ -141,5 +144,33 @@ func TestSystemEndpoints(t *testing.T) {
 	}
 	if w := do(h, "GET", "127.0.0.1:47321", "/api/state", "", ""); !strings.Contains(w.Body.String(), `"update":`) {
 		t.Fatalf("state lacks update: %s", w.Body.String())
+	}
+}
+
+func TestShutdownEndsEventStreams(t *testing.T) {
+	b := &fakeBackend{cfg: config.Default()}
+	srv := New("127.0.0.1:0", b, logx.NewRing(10), slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx, ln) }()
+
+	resp, err := http.Get("http://" + ln.Addr().String() + "/api/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	start := time.Now()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not stop")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("shutdown took %v with an open event stream", d)
 	}
 }

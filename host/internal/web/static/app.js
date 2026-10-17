@@ -187,53 +187,136 @@ function fitScreen() {
 }
 window.addEventListener("resize", fitScreen);
 
-function scrWindow(label, w, now) {
-  const pct = w ? w.pct : null;
-  const reset = w && w.resets_at ? until(w.resets_at, now) : "";
-  return el("div", { class: "scr-win" },
-    el("div", { class: "top" }, el("span", {}, label), el("b", {}, pct === null ? "—" : `${Math.round(pct)}%`)),
-    el("div", { class: "bar" }, el("div", { class: `fill ${level(pct || 0)}`, style: `width:${Math.min(100, pct || 0)}%` })),
-    el("div", { class: "reset" }, reset || " "),
+// Icons drawn on the screen; static markup only.
+const SCR_ICONS = {
+  approval: '<path d="M12 3.5 2.8 19.5h18.4z"/><path d="M12 10v4"/><path d="M12 16.8h.01"/>',
+  input: '<path d="M4 5h16v11H10l-6 4z"/><path d="M9 10.5h.01M12 10.5h.01M15 10.5h.01"/>',
+  error: '<circle cx="12" cy="12" r="8.5"/><path d="m9 9 6 6M15 9l-6 6"/>',
+  running: '<path d="M12 3.5a8.5 8.5 0 1 1-8.5 8.5"/>',
+  done: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+  idle: '<circle cx="12" cy="12" r="2.5"/>',
+  reset: '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/>',
+  moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>',
+  unplug: '<path d="M9 7V3M15 7V3"/><path d="M6 7h12v4a6 6 0 0 1-6 6 6 6 0 0 1-6-6z"/><path d="M12 17v4"/><path d="M3 3l18 18"/>',
+};
+
+function scrIcon(name, size, width = 2.2, color = "currentColor") {
+  const t = document.createElement("template");
+  t.innerHTML = `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${SCR_ICONS[name]}</svg>`;
+  return t.content.firstChild;
+}
+
+const SCR_ACTIVE = ["approval", "input", "error", "running"];
+let hostConnected = false;
+let previewRows = 4;
+try { previewRows = localStorage.getItem("previewRows") === "3" ? 3 : 4; } catch {}
+
+// "2:13" until a reset within a day, "3d" beyond.
+function scrReset(resetsAt, now) {
+  if (!resetsAt) return "—";
+  const sec = Math.max(0, resetsAt - now);
+  if (sec >= 86400) return `${Math.round(sec / 86400)}d`;
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return `${h}:${String(m).padStart(2, "0")}`;
+}
+
+// Running states count up as m:ss (or 1h05m); finished ones say how long ago.
+function scrTime(state, since, now) {
+  const sec = Math.max(0, now - since);
+  if (SCR_ACTIVE.includes(state)) {
+    if (sec >= 3600) return `${Math.floor(sec / 3600)}h${String(Math.floor((sec % 3600) / 60)).padStart(2, "0")}m`;
+    return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+  }
+  if (sec < 60) return "刚刚";
+  if (sec < 3600) return `${Math.floor(sec / 60)}分钟前`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}小时前`;
+  return `${Math.floor(sec / 86400)}天前`;
+}
+
+function scrMeter(label, w, provider, now) {
+  const pct = w ? Math.round(w.pct) : null;
+  const color = pct >= 90 ? "#FF6B5E" : pct >= 70 ? "#FFB020" : `var(--scr-${provider})`;
+  return el("div", { class: "scr-meter" },
+    el("div", { class: "top" },
+      el("span", { class: "lbl" }, label,
+        el("span", { class: "reset mono" }, scrIcon("reset", 12, 2.5), scrReset(w && w.resets_at, now))),
+      el("span", { class: "pct mono" }, pct === null ? "—" : `${pct}%`)),
+    el("div", { class: "bar" },
+      el("div", { class: "fill", style: `width:${pct === null ? 0 : Math.max(pct, 2)}%;background:${color}` })),
   );
 }
 
 function renderScreen(frame) {
   const screen = $("#screen");
+  screen.classList.toggle("rows-3", previewRows === 3);
+  for (const b of document.querySelectorAll(".seg [data-rows]")) {
+    b.setAttribute("aria-pressed", String(Number(b.dataset.rows) === previewRows));
+  }
   if (!frame) { screen.replaceChildren(); return; }
-  const now = frame.now * 1000;
+  const now = frame.now;
+  const sessions = frame.sessions || [];
+  const counts = frame.counts || {};
+
+  const summary = SCR_ACTIVE.filter((k) => counts[k]).map((k) => `${STATE_LABEL[k]} ${counts[k]}`).join(" · ")
+    || (sessions.length ? "全部完成" : "");
+  const clock = new Date(now * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const strip = el("div", { class: "scr-strip" },
+    el("div", { class: "left" }, el("span", { class: "title" }, "Agent"), el("span", { class: "summary" }, summary)),
+    el("div", { class: "right" }, el("span", { class: `link ${hostConnected ? "" : "off"}` }), el("span", { class: "clock mono" }, clock)),
+  );
+
   const usage = el("div", { class: "scr-usage" }, ...["claude", "codex"].map((p) => {
     const u = (frame.usage && frame.usage[p]) || {};
     return el("div", { class: "scr-urow" },
-      el("span", { class: `scr-name ${p}` }, PROVIDER_NAME[p]),
-      scrWindow("5h", u.five_hour, now),
-      scrWindow("7d", u.seven_day, now),
-      el("div", { class: "scr-today" }, el("b", {}, fmtTokens(u.today_tokens || 0)), "今日"),
+      el("span", { class: `name ${p}` }, PROVIDER_NAME[p]),
+      scrMeter("5h", u.five_hour, p, now),
+      scrMeter("7d", u.seven_day, p, now),
+      el("div", { class: "scr-today" }, el("span", { class: "n mono" }, fmtTokens(u.today_tokens || 0)), el("span", { class: "l" }, "今日")),
     );
   }));
 
-  const sessions = frame.sessions || [];
-  const pages = Math.max(1, Math.ceil(sessions.length / 4));
+  const per = previewRows;
+  const pages = Math.max(1, Math.ceil(sessions.length / per));
   previewPage = Math.min(previewPage, pages - 1);
-  const shown = sessions.slice(previewPage * 4, previewPage * 4 + 4);
-  const list = el("div", { class: "scr-list" }, shown.length ? shown.map((s) => el("div", { class: `scr-item ${s.state}` },
-    el("span", { class: "stripe" }),
-    el("div", { class: "main" },
-      el("div", { class: "l1" }, el("span", { class: `p ${s.p}` }, PROVIDER_NAME[s.p] || s.p), s.project),
-      el("div", { class: "l2" }, s.text || " "),
-    ),
-    el("div", { class: "right" },
-      el("div", { class: "state" }, s.label),
-      el("div", { class: "ago" }, fmtDuration(frame.now - s.since)),
-    ),
-  )) : el("div", { class: "scr-empty" }, "暂无任务"));
-
-  const foot = el("div", { class: "scr-foot" },
-    el("button", { onclick: () => { previewPage = (previewPage - 1 + pages) % pages; renderScreen(frame); }, "aria-label": "上一页" }, "‹"),
-    el("span", { class: "dots" }, ...Array.from({ length: pages }, (_, i) => el("i", { class: i === previewPage ? "on" : "" }))),
-    el("button", { onclick: () => { previewPage = (previewPage + 1) % pages; renderScreen(frame); }, "aria-label": "下一页" }, "›"),
+  const shown = sessions.slice(previewPage * per, previewPage * per + per);
+  const list = el("div", { class: "scr-list" }, shown.length
+    ? shown.map((s) => el("div", { class: `scr-row ${s.state}` },
+      el("span", { class: "chip" }, scrIcon(SCR_ICONS[s.state] ? s.state : "idle", 22, s.state === "running" || s.state === "done" ? 2.4 : 2.2)),
+      el("div", { class: "mid" },
+        el("div", { class: "l1" }, el("span", { class: "project" }, s.project || "—"), el("span", { class: `prov ${s.p}` }, PROVIDER_NAME[s.p] || s.p)),
+        el("span", { class: "detail" }, s.text || "\u00a0")),
+      el("div", { class: "end" },
+        el("span", { class: "label" }, s.label),
+        el("span", { class: "time mono" }, scrTime(s.state, s.since, now))),
+    ))
+    : el("div", { class: "scr-empty" }, scrIcon("moon", 44, 1.8, "#5C5B57"),
+      el("span", { class: "t" }, "没有进行中的任务"), el("span", { class: "s" }, "Claude 和 Codex 都在待命")));
+  const tasks = el("div", { class: "scr-tasks" }, list,
+    pages > 1 ? el("button", {
+      class: "scr-pager", type: "button", "aria-label": `下一页任务（第 ${previewPage + 1} 页，共 ${pages} 页）`,
+      onclick: () => { previewPage = (previewPage + 1) % pages; renderScreen(frame); },
+    }, ...Array.from({ length: pages }, (_, i) => el("i", { class: i === previewPage ? "on" : "" }))) : null,
   );
-  screen.replaceChildren(usage, list, foot);
+
+  const body = el("div", { class: `scr-body ${hostConnected ? "" : "dim"}` }, strip, usage, tasks);
+  const parts = [body];
+  if (!hostConnected) {
+    parts.push(el("div", { class: "scr-offline" }, el("div", { class: "card" },
+      scrIcon("unplug", 44, 1.9, "#FF6B5E"),
+      el("span", { class: "t" }, "主机离线"),
+      el("span", { class: "s" }, "网页与 go-dock 的连接已断开"))));
+  }
+  screen.replaceChildren(...parts);
   fitScreen();
+}
+
+for (const b of document.querySelectorAll(".seg [data-rows]")) {
+  b.addEventListener("click", () => {
+    previewRows = Number(b.dataset.rows);
+    previewPage = 0;
+    try { localStorage.setItem("previewRows", String(previewRows)); } catch {}
+    if (state) renderScreen(state.frame);
+  });
 }
 
 function renderDeviceDetail(dev) {
@@ -277,8 +360,12 @@ $("#show-idle").addEventListener("change", (e) => {
 function connect() {
   const pill = $("#conn-pill");
   const es = new EventSource("/api/events");
-  es.addEventListener("open", () => { pill.textContent = "已连接"; pill.className = "pill ok"; });
-  es.addEventListener("error", () => { pill.textContent = "已断开，重连中…"; pill.className = "pill bad"; });
+  es.addEventListener("open", () => { pill.textContent = "已连接"; pill.className = "pill ok"; hostConnected = true; });
+  es.addEventListener("error", () => {
+    pill.textContent = "已断开，重连中…"; pill.className = "pill bad";
+    hostConnected = false;
+    if (state) renderScreen(state.frame);
+  });
   es.addEventListener("state", (e) => {
     const next = JSON.parse(e.data);
     if (state && state.version !== next.version) upgradedTo = next.version;
