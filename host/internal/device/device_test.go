@@ -499,6 +499,37 @@ func TestFrameTitleAndDetail(t *testing.T) {
 	}
 }
 
+func TestFrameMessage(t *testing.T) {
+	t0 := time.Unix(1792200000, 0)
+	ss := model.Session{ID: "claude:x", Provider: model.ProviderClaude, SessionID: "x", Project: "shellr", State: model.StateRunning,
+		Title: "detail", Message: "先把两张截图的像素颜色取出来，对比 ShellRS 的配色和渲染。", Detail: "Finding the red colon's color", Since: t0}
+	f := BuildFrame(model.Snapshot{Now: t0, Sessions: []model.Session{ss}}, Options{MaxSessions: 12}, 1)
+	if s := f.Sessions[0]; s.Title != "detail" || s.Msg != ss.Message || s.Detail != ss.Detail {
+		t.Fatalf("frame = %+v", s)
+	}
+}
+
+func TestEncodeTrimsMessagesBeforeSessions(t *testing.T) {
+	t0 := time.Unix(1792200000, 0)
+	var ss []model.Session
+	for i := 0; i < 12; i++ {
+		ss = append(ss, model.Session{ID: fmt.Sprint("claude:", i), Provider: model.ProviderClaude, Project: "p", State: model.StateRunning,
+			Title: "fix tests", Message: strings.Repeat("长", 48), Detail: "Bash: go test ./...", Since: t0})
+	}
+	line, err := EncodeSnapshot(BuildFrame(model.Snapshot{Now: t0, Sessions: ss}, Options{MaxSessions: 12}, 1))
+	if err != nil || len(line) > MaxLine {
+		t.Fatalf("encode: %d bytes, %v", len(line), err)
+	}
+	var got Snapshot
+	json.Unmarshal(line, &got)
+	if len(got.Sessions) != 12 {
+		t.Fatalf("sessions dropped while messages could go: %d", len(got.Sessions))
+	}
+	if got.Sessions[0].Msg == "" || got.Sessions[11].Msg != "" {
+		t.Fatalf("first msg %q, last msg %q", got.Sessions[0].Msg, got.Sessions[11].Msg)
+	}
+}
+
 // Background subagents keep a session busy after its own turn ended.
 func TestFrameWaitsForBackgroundAgents(t *testing.T) {
 	t0 := time.Unix(1792200000, 0)

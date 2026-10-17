@@ -137,6 +137,7 @@ static void parse_snapshot(const cJSON *root, dock_snapshot_t *s)
         copy_str(d->text, sizeof(d->text), cJSON_GetObjectItem(item, "text"));
         d->since = num(cJSON_GetObjectItem(item, "since"));
         copy_str(d->title, sizeof(d->title), cJSON_GetObjectItem(item, "title"));
+        copy_str(d->msg, sizeof(d->msg), cJSON_GetObjectItem(item, "msg"));
         copy_str(d->detail, sizeof(d->detail), cJSON_GetObjectItem(item, "detail"));
         d->agents_total = (int)num(cJSON_GetObjectItem(item, "agents_total"));
         d->agents_active = (int)num(cJSON_GetObjectItem(item, "agents_active"));

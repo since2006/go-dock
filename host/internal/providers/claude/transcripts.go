@@ -16,8 +16,8 @@ import (
 // window is how far back token statistics reach.
 const window = 8 * 24 * time.Hour
 
-// transcripts tails ~/.claude/projects/**/*.jsonl for token usage and
-// session titles. One API response is written as several lines sharing a
+// transcripts tails ~/.claude/projects/**/*.jsonl for token usage, session
+// titles and the assistant's latest text. One API response is written as several lines sharing a
 // message id, so usage is kept per message id and each field takes its
 // maximum.
 type transcripts struct {
@@ -30,14 +30,15 @@ type transcripts struct {
 
 	agents map[string]*agentTrack // by transcript path; poll goroutine only
 	live   func(sessionID string) bool
-	names  map[string]*sessionNames // by session id; poll goroutine only
+	info   map[string]*sessionInfo // by session id; poll goroutine only
 }
 
-// sessionNames are the two titles Claude Code keeps for a session: the
-// one it generates and the one set with /rename, which wins.
-type sessionNames struct{ ai, custom string }
+// sessionInfo is what a main transcript says about its session: the two
+// titles Claude Code keeps (the /rename one wins over the generated one)
+// and the first line of the assistant's latest text in the current turn.
+type sessionInfo struct{ ai, custom, msg string }
 
-func (n *sessionNames) title() string {
+func (n *sessionInfo) title() string {
 	if n.custom != "" {
 		return n.custom
 	}
@@ -51,13 +52,14 @@ type messageUsage struct {
 }
 
 type pollResult struct {
-	changed bool
-	titles  map[string]string // sessionID -> title, for sessions whose title lines were read
-	agents  []model.Observation
+	changed  bool
+	titles   map[string]string // sessionID -> title, for sessions whose title lines were read
+	messages map[string]string // sessionID -> message, for sessions whose message changed
+	agents   []model.Observation
 }
 
 func newTranscripts(root string, prices *pricing.Table) *transcripts {
-	return &transcripts{root: root, tailer: jsonl.NewTailer(), prices: prices, messages: map[string]*messageUsage{}, agents: map[string]*agentTrack{}, names: map[string]*sessionNames{}}
+	return &transcripts{root: root, tailer: jsonl.NewTailer(), prices: prices, messages: map[string]*messageUsage{}, agents: map[string]*agentTrack{}, info: map[string]*sessionInfo{}}
 }
 
 func (t *transcripts) setPrices(p *pricing.Table) {
@@ -68,7 +70,7 @@ func (t *transcripts) setPrices(p *pricing.Table) {
 
 // poll reads new lines. With rescan it also looks for new files.
 func (t *transcripts) poll(rescan bool, now time.Time) pollResult {
-	res := pollResult{titles: map[string]string{}}
+	res := pollResult{titles: map[string]string{}, messages: map[string]string{}}
 	paths := t.tailer.Paths()
 	if rescan {
 		paths = jsonl.Walk(t.root, window, func(p string) bool { return strings.HasSuffix(p, ".jsonl") })
@@ -76,7 +78,7 @@ func (t *transcripts) poll(rescan bool, now time.Time) pollResult {
 	for _, path := range paths {
 		agent := t.agentFor(path)
 		_ = t.tailer.Read(path, func(line []byte) {
-			if t.line(line, res.titles, agent) {
+			if t.line(line, &res, agent) {
 				res.changed = true
 			}
 		})
@@ -94,6 +96,8 @@ type transcriptLine struct {
 	SessionID   string    `json:"sessionId"`
 	AITitle     string    `json:"aiTitle"`
 	CustomTitle string    `json:"customTitle"`
+	IsMeta      bool      `json:"isMeta"`
+	IsSidechain bool      `json:"isSidechain"`
 	Message     struct {
 		ID      string          `json:"id"`
 		Model   string          `json:"model"`
@@ -113,16 +117,19 @@ type transcriptLine struct {
 
 var (
 	markAssistant   = []byte(`"type":"assistant"`)
+	markUser        = []byte(`"type":"user"`)
+	markToolResult  = []byte(`"tool_use_id"`)
 	markTitle       = []byte(`"type":"ai-title"`)
 	markCustomTitle = []byte(`"type":"custom-title"`)
 )
 
 // line handles one transcript line and reports whether token totals
 // changed. agent is set for a subagent's transcript.
-func (t *transcripts) line(b []byte, titles map[string]string, agent *agentTrack) bool {
+func (t *transcripts) line(b []byte, res *pollResult, agent *agentTrack) bool {
 	// Most lines are large tool results; skip them without decoding.
 	isAssistant := bytes.Contains(b, markAssistant)
-	if !isAssistant && !bytes.Contains(b, markTitle) && !bytes.Contains(b, markCustomTitle) {
+	isPrompt := agent == nil && bytes.Contains(b, markUser) && !bytes.Contains(b, markToolResult)
+	if !isAssistant && !isPrompt && !bytes.Contains(b, markTitle) && !bytes.Contains(b, markCustomTitle) {
 		return false
 	}
 	var l transcriptLine
@@ -134,11 +141,7 @@ func (t *transcripts) line(b []byte, titles map[string]string, agent *agentTrack
 		if l.SessionID == "" {
 			return false
 		}
-		n := t.names[l.SessionID]
-		if n == nil {
-			n = &sessionNames{}
-			t.names[l.SessionID] = n
-		}
+		n := t.session(l.SessionID)
 		if l.Type == "ai-title" && l.AITitle != "" {
 			n.ai = model.Truncate(l.AITitle, providers.TitleLen)
 		}
@@ -146,7 +149,13 @@ func (t *transcripts) line(b []byte, titles map[string]string, agent *agentTrack
 			n.custom = model.Truncate(l.CustomTitle, providers.TitleLen)
 		}
 		if title := n.title(); title != "" {
-			titles[l.SessionID] = title
+			res.titles[l.SessionID] = title
+		}
+		return false
+	case "user":
+		// A new prompt starts a turn: the previous reply no longer applies.
+		if agent == nil && !l.IsMeta && !l.IsSidechain && userPrompt(l.Message.Content) {
+			t.setMessage(res, l.SessionID, "")
 		}
 		return false
 	case "assistant":
@@ -155,6 +164,10 @@ func (t *transcripts) line(b []byte, titles map[string]string, agent *agentTrack
 	}
 	if agent != nil {
 		agent.toolUse(l.Timestamp, l.Message.Content)
+	} else if !l.IsSidechain {
+		if msg := assistantText(l.Message.Content); msg != "" {
+			t.setMessage(res, l.SessionID, msg)
+		}
 	}
 	us := l.Message.Usage
 	if us == nil || l.Message.ID == "" || l.Timestamp.IsZero() {
@@ -181,6 +194,75 @@ func (t *transcripts) line(b []byte, titles map[string]string, agent *agentTrack
 	m.u.CacheWrite5m = max(m.u.CacheWrite5m, u.CacheWrite5m)
 	m.u.CacheWrite1h = max(m.u.CacheWrite1h, u.CacheWrite1h)
 	return m.u != before
+}
+
+func (t *transcripts) session(id string) *sessionInfo {
+	n := t.info[id]
+	if n == nil {
+		n = &sessionInfo{}
+		t.info[id] = n
+	}
+	return n
+}
+
+func (t *transcripts) setMessage(res *pollResult, id, msg string) {
+	if id == "" {
+		return
+	}
+	if n := t.session(id); n.msg != msg {
+		n.msg = msg
+		res.messages[id] = msg
+	}
+}
+
+type contentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// userPrompt reports whether a user line's content is something the user
+// typed, as opposed to a tool result, a slash command's echo or an
+// interruption notice.
+func userPrompt(content json.RawMessage) bool {
+	var text string
+	if json.Unmarshal(content, &text) != nil {
+		var blocks []contentBlock
+		if json.Unmarshal(content, &blocks) != nil {
+			return false
+		}
+		for _, b := range blocks {
+			if b.Type == "tool_result" {
+				return false
+			}
+			if b.Type == "text" && text == "" {
+				text = b.Text
+			}
+		}
+	}
+	text = strings.TrimSpace(text)
+	for _, p := range []string{"<command-name>", "<command-message>", "<local-command-", "[Request interrupted"} {
+		if strings.HasPrefix(text, p) {
+			return false
+		}
+	}
+	return text != ""
+}
+
+// assistantText returns the display line of the last text block in an
+// assistant line's content, or "".
+func assistantText(content json.RawMessage) string {
+	var blocks []contentBlock
+	if json.Unmarshal(content, &blocks) != nil {
+		return ""
+	}
+	for i := len(blocks) - 1; i >= 0; i-- {
+		if blocks[i].Type == "text" {
+			if msg := providers.MessageLine(blocks[i].Text); msg != "" {
+				return msg
+			}
+		}
+	}
+	return ""
 }
 
 func (t *transcripts) prune(now time.Time) {

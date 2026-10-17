@@ -48,7 +48,8 @@ typedef struct {
     char project[104]; // <= 24 runes of UTF-8
     char label[32];
     char text[200];   // one-line summary, <= 48 runes of UTF-8
-    char title[104];  // what the task is (optional)
+    char title[104];  // session name, shown after the project (optional)
+    char msg[152];    // first line of the assistant's latest text (optional)
     char detail[152]; // what the session is doing now (optional)
     int64_t since;    // unix seconds
     int agents_total;  // subagents (child tasks) of this session

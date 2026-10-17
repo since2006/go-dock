@@ -17,11 +17,7 @@ func (p *Provider) HandleHook(body []byte) error {
 	}
 	for _, o := range obs {
 		if o.AgentID == "" && o.State != "" {
-			p.mu.Lock()
-			if o.Title == "" {
-				o.Title = p.titles[o.SessionID]
-			}
-			p.mu.Unlock()
+			p.fromTranscript(&o)
 		}
 		p.sink.Observe(o)
 	}

@@ -16,12 +16,33 @@ type Sink interface {
 	UpdateUsage(model.Provider, func(*model.Usage))
 }
 
-// DetailLen and TitleLen bound what the web UI shows; the device protocol
-// cuts them further for the 600x450 screen.
+// DetailLen, TitleLen and MessageLen bound what the web UI shows; the
+// device protocol cuts them further for the 600x450 screen.
 const (
-	DetailLen = 80
-	TitleLen  = 48
+	DetailLen  = 80
+	TitleLen   = 48
+	MessageLen = 80
 )
+
+// MessageLine reduces the assistant's text to one display line: the first
+// line with words in it, without Markdown markers.
+func MessageLine(text string) string {
+	for _, l := range strings.Split(text, "\n") {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "```") || strings.Trim(l, "-*_=|: ") == "" {
+			continue // fences, rules, table separators
+		}
+		l = strings.TrimLeft(l, "#> ")
+		for _, p := range []string{"- ", "* ", "+ "} {
+			l = strings.TrimPrefix(l, p)
+		}
+		l = strings.NewReplacer("**", "", "__", "", "`", "").Replace(l)
+		if l = strings.TrimSpace(l); l != "" {
+			return model.Truncate(l, MessageLen)
+		}
+	}
+	return ""
+}
 
 // HookPayload is the subset of hook stdin JSON that go-dock uses. Claude
 // Code and Codex share these field names.

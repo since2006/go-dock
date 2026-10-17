@@ -131,6 +131,7 @@ func (h *Hub) observe(o model.Observation) bool {
 	}
 	if o.NewTurn {
 		e.tools = nil
+		s.Message = ""
 	}
 	if o.ToolDone != "" {
 		e.countTool(o.ToolDone)
@@ -141,6 +142,9 @@ func (h *Hub) observe(o model.Observation) bool {
 	} else {
 		if o.Title != "" {
 			s.Title = o.Title
+		}
+		if o.HasMessage {
+			s.Message = o.Message
 		}
 		if o.State != "" && !o.At.Before(e.stateAt) {
 			if o.State != s.State {

@@ -36,6 +36,22 @@ func TestToolAction(t *testing.T) {
 	}
 }
 
+func TestMessageLine(t *testing.T) {
+	cases := map[string]string{
+		"先把两张截图的像素颜色取出来，对比 ShellRS 的配色和渲染。": "先把两张截图的像素颜色取出来，对比 ShellRS 的配色和渲染。",
+		"\n\n## **结果**\n\n正文":          "结果",
+		"```go\nfmt.Println()\n```":    "fmt.Println()",
+		"|---|---|\n- 用 `go test` 跑一遍": "用 go test 跑一遍",
+		"> 引用的话":                       "引用的话",
+		"  \n---\n":                    "",
+	}
+	for in, want := range cases {
+		if got := MessageLine(in); got != want {
+			t.Errorf("MessageLine(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestMergeHookKeepsPositions(t *testing.T) {
 	ours := func(h map[string]any) bool { return h["command"] == "go-dock old" || h["command"] == "go-dock new" }
 	var groups []HookGroup

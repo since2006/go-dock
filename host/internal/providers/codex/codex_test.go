@@ -91,6 +91,9 @@ func TestRolloutParsing(t *testing.T) {
 		t.Fatalf("subagent observation = %+v", a)
 	}
 	o := got[idLegacy]
+	if !o.HasMessage || o.Message != "先跑一遍测试，看看哪个用例不稳定。" {
+		t.Fatalf("legacy message = %q", o.Message)
+	}
 	if o.State != model.StateIdle || o.Detail != "已中断" || o.Title != "Fix the flaky test" ||
 		o.Cwd != "/work/legacy" || o.Source != "rollout" || !o.At.Equal(time.Date(2026, 10, 17, 1, 6, 30, 0, time.UTC)) {
 		t.Fatalf("legacy observation = %+v", o)

@@ -138,6 +138,7 @@ static void add(dock_state_t st, dock_provider_t p, const char *project, const c
 static dock_session_t *last(void) { return &s_snap.sessions[s_snap.count - 1]; }
 static void title(const char *t) { snprintf(last()->title, sizeof(last()->title), "%s", t); }
 static void detail(const char *t) { snprintf(last()->detail, sizeof(last()->detail), "%s", t); }
+static void msg(const char *t) { snprintf(last()->msg, sizeof(last()->msg), "%s", t); }
 
 static void agent(dock_state_t st, const char *type, const char *text, int ago)
 {
@@ -202,9 +203,11 @@ int main(int argc, char **argv)
     add(DOCK_INPUT, DOCK_CLAUDE, "infra", "等待输入", "请选择部署区域", 65);
     add(DOCK_RUNNING, DOCK_CODEX, "api-svc", "进行中", "pytest -q tests/auth", 192);
     title("重构登录模块，拆分 token 校验");
+    msg("先跑一遍认证相关的测试，看哪些用例失败。");
     detail("Bash: pytest -q tests/auth");
     add(DOCK_RUNNING, DOCK_CLAUDE, "另一个项目", "进行中", "Edit: launch.md", 45);
     add(DOCK_DONE, DOCK_CODEX, "scripts", "已完成", "迁移数据库脚本", 120);
+    msg("迁移脚本已完成，共更新 3 张表。");
     add(DOCK_DONE, DOCK_CLAUDE, "dotfiles", "已完成", "整理 zsh 配置", 540);
     send();
     run(2 * SEC);
@@ -242,6 +245,7 @@ int main(int argc, char **argv)
     window(&s_snap.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 15 * 3600);
     add(DOCK_RUNNING, DOCK_CLAUDE, "host-app", "进行中", "Explore · Explore toolbar", 18);
     title("规划 host 端工具栏");
+    msg("派两个 Explore 子任务分别查看工具栏和表格组件。");
     detail("等待 2 个子任务完成");
     agent(DOCK_RUNNING, "Explore", "Explore toolbar & store", 18);
     agent(DOCK_RUNNING, "Explore", "Explore tables, dialogs", 18);
@@ -249,6 +253,24 @@ int main(int argc, char **argv)
     send();
     run(2 * SEC);
     save(out, "5-background");
+
+    // The assistant's latest text under the project line, as in Claude Code.
+    reset();
+    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 41, 4 * 3600 + 33 * 60);
+    window(&s_snap.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 14 * 3600);
+    add(DOCK_RUNNING, DOCK_CLAUDE, "shellrs", "进行中", "Finding the red colon's color in both screenshots", 114);
+    title("detail");
+    msg("先把两张截图的像素颜色取出来，对比 ShellRS 的配色和渲染。");
+    detail("Finding the red colon's color in both screenshots");
+    add(DOCK_RUNNING, DOCK_CLAUDE, "a-very-long-project-name", "进行中", "Read: ui.c", 30);
+    title("一个很长很长的会话名字会被截断");
+    agent(DOCK_RUNNING, "Explore", "查找字体渲染代码", 20);
+    add(DOCK_DONE, DOCK_CODEX, "scripts", "已完成", "迁移数据库脚本", 300);
+    title("迁移数据库脚本");
+    msg("迁移脚本已完成，共更新 3 张表。");
+    send();
+    run(2 * SEC);
+    save(out, "6-message");
 
     // Host went away two minutes ago.
     reset();

@@ -61,8 +61,9 @@ static const struct {
 };
 
 // Task list layout, shared with the web preview (docs/protocol-v1.md
-// §7.1): a session row is 80 px with a title and an action line, 60 px
-// with one; each subagent adds a 32 px row under it; a session and its
+// §7.1): the project line carries the session name; below it a session row
+// is 80 px with the assistant's latest text and an action line, 60 px with
+// one; each subagent adds a 32 px row under it; a session and its
 // subagents never split across pages.
 #define MAIN_H 60
 #define MAIN_H_TALL 80
@@ -83,7 +84,7 @@ typedef struct {
 } meter_t;
 
 typedef struct {
-    lv_obj_t *obj, *chip, *icon, *spinner, *project, *prov, *badge, *badge_text, *title, *detail, *label, *time;
+    lv_obj_t *obj, *chip, *icon, *spinner, *project, *name, *prov, *badge, *badge_text, *msg, *detail, *label, *time;
 } row_t;
 
 typedef struct {
@@ -255,7 +256,7 @@ static void fmt_tokens(char *buf, size_t n, int64_t v)
 
 static bool is_tall(const dock_session_t *s)
 {
-    return s->title[0] && s->detail[0];
+    return s->msg[0] && s->detail[0];
 }
 
 // Splits the sessions into pages by height, keeping each session together
@@ -391,6 +392,10 @@ static void build_row(lv_obj_t *p, row_t *r)
     r->project = text(r->obj, fp, C_TEXT);
     lv_label_set_long_mode(r->project, LV_LABEL_LONG_DOT);
     lv_obj_set_height(r->project, lv_font_get_line_height(fp)); // one line, "..." when cut
+    const lv_font_t *fn = font_get(FONT_REGULAR, 14);
+    r->name = text(r->obj, fn, C_TEXT4);
+    lv_label_set_long_mode(r->name, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(r->name, lv_font_get_line_height(fn));
     r->prov = text(r->obj, font_get(FONT_BOLD, 13), C_TEXT);
 
     // "子任务 N" when the session has subagents.
@@ -400,7 +405,7 @@ static void build_row(lv_obj_t *p, row_t *r)
     lv_obj_set_style_pad_ver(r->badge, 1, 0);
     r->badge_text = text(r->badge, font_get(FONT_BOLD, 13), 0xC9C9C4);
 
-    r->title = line(r->obj, font_get(FONT_REGULAR, 15), 0xC9C9C4, MID_W);
+    r->msg = line(r->obj, font_get(FONT_REGULAR, 15), 0xC9C9C4, MID_W);
     r->detail = line(r->obj, font_get(FONT_REGULAR, 16), C_TEXT2, MID_W);
 
     r->label = text(r->obj, font_get(FONT_BOLD, 18), C_TEXT);
@@ -617,8 +622,9 @@ static int render_main(row_t *r, const dock_session_t *s, int y, int64_t now)
     show_state_icon(r->icon, r->spinner, s->state, color);
     lv_obj_center(r->icon);
 
-    // The project name gets whatever the provider tag and the subagent
-    // badge leave; it is cut first, the tags stay whole.
+    // Project line: project name, session name in small type, provider tag,
+    // subagent badge. The tags stay whole; the session name gives way
+    // first, then the project name.
     set_text(r->prov, PROVIDER_NAME[s->provider]);
     set_color(r->prov, PROVIDER_COLOR[s->provider]);
     if (s->agents_total > 0) {
@@ -631,29 +637,43 @@ static int render_main(row_t *r, const dock_session_t *s, int y, int64_t now)
     lv_obj_set_width(r->project, LV_SIZE_CONTENT);
     set_text(r->project, s->project[0] ? s->project : "-");
     lv_obj_set_pos(r->project, MID_X, tall ? 5 : 4);
+    lv_obj_set_width(r->name, LV_SIZE_CONTENT);
+    set_text(r->name, s->title);
     lv_obj_update_layout(r->obj);
-    int tags = 8 + lv_obj_get_width(r->prov) + (s->agents_total > 0 ? 8 + lv_obj_get_width(r->badge) : 0);
-    if (lv_obj_get_width(r->project) > MID_W - tags) {
-        lv_obj_set_width(r->project, MID_W - tags);
+    int room = MID_W - 8 - lv_obj_get_width(r->prov) - (s->agents_total > 0 ? 8 + lv_obj_get_width(r->badge) : 0);
+    if (lv_obj_get_width(r->project) > room) {
+        lv_obj_set_width(r->project, room);
     }
-    lv_obj_align_to(r->prov, r->project, LV_ALIGN_OUT_RIGHT_BOTTOM, 8, -4);
+    int left = room - lv_obj_get_width(r->project) - 8;
+    if (s->title[0] && left >= 32) {
+        if (lv_obj_get_width(r->name) > left) {
+            lv_obj_set_width(r->name, left);
+        }
+        lv_obj_remove_flag(r->name, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align_to(r->name, r->project, LV_ALIGN_OUT_RIGHT_BOTTOM, 8, -4);
+        lv_obj_align_to(r->prov, r->name, LV_ALIGN_OUT_RIGHT_BOTTOM, 8, 0);
+    } else {
+        lv_obj_add_flag(r->name, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align_to(r->prov, r->project, LV_ALIGN_OUT_RIGHT_BOTTOM, 8, -4);
+    }
     lv_obj_align_to(r->badge, r->prov, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
 
-    // Tall rows: title, then what the session is doing. Short rows: one
-    // line, whichever there is (older hosts only send text).
+    // Tall rows: the assistant's latest text, then what the session is
+    // doing. Short rows: one line, whichever there is (older hosts send
+    // only text, which may repeat the session name).
     if (tall) {
-        lv_obj_remove_flag(r->title, LV_OBJ_FLAG_HIDDEN);
-        set_text(r->title, s->title);
-        lv_obj_set_pos(r->title, MID_X, 35);
+        lv_obj_remove_flag(r->msg, LV_OBJ_FLAG_HIDDEN);
+        set_text(r->msg, s->msg);
+        lv_obj_set_pos(r->msg, MID_X, 35);
         lv_obj_set_style_text_font(r->detail, font_get(FONT_REGULAR, 15), 0);
         set_color(r->detail, C_TEXT3);
         set_text(r->detail, s->detail);
         lv_obj_set_pos(r->detail, MID_X, 56);
     } else {
-        lv_obj_add_flag(r->title, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(r->msg, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_style_text_font(r->detail, font_get(FONT_REGULAR, 16), 0);
         set_color(r->detail, C_TEXT2);
-        const char *one = s->detail[0] ? s->detail : s->title[0] ? s->title : s->text;
+        const char *one = s->msg[0] ? s->msg : s->detail[0] ? s->detail : strcmp(s->text, s->title) ? s->text : "";
         set_text(r->detail, one[0] ? one : " ");
         lv_obj_set_pos(r->detail, MID_X, 34);
     }

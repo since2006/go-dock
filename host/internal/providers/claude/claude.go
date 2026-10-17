@@ -31,16 +31,18 @@ type Provider struct {
 	sessions    *sessionsWatcher
 	transcripts *transcripts
 
-	mu     sync.Mutex
-	titles map[string]string // sessionID -> AI title from transcripts
+	mu       sync.Mutex
+	titles   map[string]string // sessionID -> title from transcripts
+	messages map[string]string // sessionID -> assistant's latest text this turn
 }
 
 func New(home string, sink providers.Sink, prices *pricing.Table, log *slog.Logger) *Provider {
 	p := &Provider{
-		home:   home,
-		sink:   sink,
-		log:    log.With("provider", "claude"),
-		titles: map[string]string{},
+		home:     home,
+		sink:     sink,
+		log:      log.With("provider", "claude"),
+		titles:   map[string]string{},
+		messages: map[string]string{},
 	}
 	p.sessions = newSessionsWatcher(filepath.Join(home, "sessions"))
 	p.transcripts = newTranscripts(filepath.Join(home, "projects"), prices)
@@ -84,12 +86,26 @@ func (p *Provider) Run(ctx context.Context) {
 
 func (p *Provider) pollSessions() {
 	for _, o := range p.sessions.poll(time.Now()) {
-		if o.Title == "" && !o.End {
-			p.mu.Lock()
-			o.Title = p.titles[o.SessionID]
-			p.mu.Unlock()
+		if !o.End {
+			p.fromTranscript(&o)
 		}
 		p.sink.Observe(o)
+	}
+}
+
+// fromTranscript adds what the transcripts know about the session, which
+// the hub ignored if it arrived before the session itself.
+func (p *Provider) fromTranscript(o *model.Observation) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if o.Title == "" {
+		o.Title = p.titles[o.SessionID]
+	}
+	if o.NewTurn {
+		p.messages[o.SessionID] = "" // the reply of the previous turn is stale
+	}
+	if msg, ok := p.messages[o.SessionID]; ok && !o.HasMessage {
+		o.Message, o.HasMessage = msg, true
 	}
 }
 
@@ -102,6 +118,15 @@ func (p *Provider) pollTranscripts(rescan bool) {
 		p.mu.Unlock()
 		if changed {
 			p.sink.Observe(model.Observation{Provider: P, SessionID: id, Title: title})
+		}
+	}
+	for id, msg := range res.messages {
+		p.mu.Lock()
+		old, known := p.messages[id]
+		p.messages[id] = msg
+		p.mu.Unlock()
+		if !known || old != msg {
+			p.sink.Observe(model.Observation{Provider: P, SessionID: id, Message: msg, HasMessage: true})
 		}
 	}
 	// A rescan also republishes so totals roll over at midnight.

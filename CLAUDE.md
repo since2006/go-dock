@@ -56,7 +56,7 @@ Firmware UI checks without hardware: `firmware/sim` compiles `main/ui.c` against
 ## Claude Code data sources (undocumented, parse defensively)
 
 - `~/.claude/sessions/<pid>.json`: live status (`busy|idle|waiting`, `waitingFor`); a file whose PID is no longer alive means the session ended.
-- `~/.claude/projects/**/<session>.jsonl`: token usage (deduplicated per `message.id`, max per field), `ai-title` / `custom-title` lines for session titles (a `/rename` title wins); `subagents/agent-<id>.jsonl` + `.meta.json` for subagents without hooks.
+- `~/.claude/projects/**/<session>.jsonl`: token usage (deduplicated per `message.id`, max per field), `ai-title` / `custom-title` lines for session titles (a `/rename` title wins), the last assistant text block for `Session.Message` (cleared by the next user prompt); `subagents/agent-<id>.jsonl` + `.meta.json` for subagents without hooks.
 - statusLine stdin `rate_limits` is the only source of Claude 5h/7d percentages; go-dock wraps the user's existing statusLine command (`statusline --chain <base64 of original>`).
 
 ## Releases

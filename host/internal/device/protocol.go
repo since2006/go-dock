@@ -21,6 +21,7 @@ const (
 	projectLen = 24
 	textLen    = 48
 	titleLen   = 32
+	msgLen     = 48
 	// maxAgents bounds the subagents listed per session.
 	maxAgents    = 3
 	agentTypeLen = 16
@@ -83,9 +84,11 @@ type SessionFrame struct {
 	// title; when a subagent decides the row's state, "Type · action".
 	Text  string `json:"text"`
 	Since int64  `json:"since"`
-	// Title (what the task is) and Detail (what the session itself is
-	// doing now) let a screen show both on separate lines.
+	// Title names the session; Msg is the first line of the assistant's
+	// latest text this turn and Detail what the session itself is doing
+	// now, so a screen can show all three.
 	Title  string `json:"title,omitempty"`
+	Msg    string `json:"msg,omitempty"`
 	Detail string `json:"detail,omitempty"`
 	// Agents lists up to three subagents, most urgent first. AgentsTotal
 	// and AgentsActive count all of them; all three are omitted when the
@@ -177,6 +180,7 @@ func sessionFrame(ss model.Session, st model.State, from *model.Agent) SessionFr
 		Text:    model.Truncate(text, textLen),
 		Since:   unix(since),
 		Title:   model.Truncate(ss.Title, titleLen),
+		Msg:     model.Truncate(ss.Message, msgLen),
 		Detail:  model.Truncate(ss.Detail, textLen),
 	}
 	if from != nil && (ss.State == model.StateDone || ss.State == model.StateIdle) {
@@ -255,7 +259,8 @@ func encodeLine(v any) ([]byte, error) {
 
 // EncodeSnapshot encodes f as one line of at most MaxLine bytes. When it
 // is too long it first drops listed subagents, starting with the least
-// urgent session (counts stay), then sessions from the tail.
+// urgent session (counts stay), then messages the same way, then sessions
+// from the tail.
 func EncodeSnapshot(f Snapshot) ([]byte, error) {
 	f.Sessions = append([]SessionFrame(nil), f.Sessions...) // trimmed below
 	for {
@@ -266,7 +271,7 @@ func EncodeSnapshot(f Snapshot) ([]byte, error) {
 		if len(line) <= MaxLine {
 			return line, nil
 		}
-		if dropAgent(f.Sessions) {
+		if dropAgent(f.Sessions) || dropMsg(f.Sessions) {
 			continue
 		}
 		if len(f.Sessions) == 0 {
@@ -282,6 +287,18 @@ func dropAgent(ss []SessionFrame) bool {
 	for i := len(ss) - 1; i >= 0; i-- {
 		if n := len(ss[i].Agents); n > 0 {
 			ss[i].Agents = ss[i].Agents[: n-1 : n-1]
+			return true
+		}
+	}
+	return false
+}
+
+// dropMsg clears the message of the last session that has one, and reports
+// whether there was any.
+func dropMsg(ss []SessionFrame) bool {
+	for i := len(ss) - 1; i >= 0; i-- {
+		if ss[i].Msg != "" {
+			ss[i].Msg = ""
 			return true
 		}
 	}

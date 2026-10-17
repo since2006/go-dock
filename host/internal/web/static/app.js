@@ -158,9 +158,10 @@ function renderSessions(snap) {
     el("div", { class: `session ${st}`, title: s.cwd || "" },
       el("span", {}, el("span", { class: `badge ${st}` }, STATE_LABEL[st] || st)),
       el("span", { class: `prov ${s.provider}` }, PROVIDER_NAME[s.provider] || s.provider),
-      el("span", { class: "project" }, s.project || s.session_id.slice(0, 8)),
+      el("span", { class: "project" }, el("span", { class: "name" }, s.project || s.session_id.slice(0, 8)),
+        s.title ? el("span", { class: "sname", title: s.title }, s.title) : null),
       el("span", { class: "text" },
-        ...sessionLines(s).map((t, i, all) => el("span", { class: all.length > 1 && i === 0 ? "line title" : "line", title: t }, t)),
+        ...sessionLines(s).map((t, i, all) => el("span", { class: all.length > 1 && i === 0 ? "line msg" : "line", title: t }, t)),
         s.tools && s.tools.length ? el("span", { class: "tally" }, s.tools.map((t) => `${t.name} ×${t.count}`).join(" · ")) : null),
       el("span", { class: "time", title: `来源：${s.source || "—"}` }, ago(s.since, now)),
     ),
@@ -174,11 +175,11 @@ function renderSessions(snap) {
   ); }));
 }
 
-// The task title above what it is doing now, as on the screen (scrLines).
+// The assistant's latest text above what the session is doing now, as on
+// the screen (scrLines); the session name sits under the project.
 function sessionLines(s) {
-  const what = waitingText(s) || s.detail || "";
-  if (s.title && what && s.title !== what) return [s.title, what];
-  return [what || s.title || ""];
+  const lines = [s.message, waitingText(s) || s.detail].filter(Boolean);
+  return lines.length ? lines : [""];
 }
 
 // A session whose own turn ended while background subagents still work
@@ -284,13 +285,16 @@ function scrMeter(label, w, provider, now) {
 }
 
 // Task list layout, shared with the firmware (docs/protocol-v1.md §7.1):
-// a session row is 80 px with a title and an action line, 60 px with one;
+// the project line carries the session name; below it a session row is
+// 80 px with the assistant's latest text and an action line, 60 px with one;
 // each subagent adds a 32 px row under it; groups never split across pages.
 const SCR_LIST_H = 258, SCR_MAIN_TALL = 80, SCR_MAIN = 60, SCR_SUB = 32, SCR_SUB_GAP = 4, SCR_GROUP_GAP = 6;
 
+// Lines under the project line: the assistant's latest text, then what the
+// session is doing; older hosts only send text, which may be the title.
 function scrLines(s) {
-  if (s.title && s.detail) return [s.title, s.detail];
-  return [s.detail || s.title || s.text || ""]; // older hosts only send text
+  const lines = [s.msg, s.detail].filter(Boolean);
+  return lines.length ? lines : [s.text && s.text !== s.title ? s.text : ""];
 }
 
 function scrGroupHeight(s) {
@@ -321,9 +325,11 @@ function scrGroup(s, now) {
   const row = el("div", { class: `scr-row ${s.state} ${tall ? "tall" : ""}` },
     el("span", { class: "chip" }, scrIcon(SCR_ICONS[s.state] ? s.state : "idle", 22, s.state === "running" || s.state === "done" ? 2.4 : 2.2)),
     el("div", { class: "mid" },
-      el("div", { class: "l1" }, el("span", { class: "project" }, s.project || "—"), el("span", { class: `prov ${s.p}` }, PROVIDER_NAME[s.p] || s.p),
+      el("div", { class: "l1" }, el("span", { class: "project" }, s.project || "—"),
+        s.title ? el("span", { class: "sname" }, s.title) : null,
+        el("span", { class: `prov ${s.p}` }, PROVIDER_NAME[s.p] || s.p),
         s.agents_total ? el("span", { class: "subs" }, `子任务 ${s.agents_active || s.agents_total}`) : null),
-      tall ? el("span", { class: "title" }, lines[0]) : null,
+      tall ? el("span", { class: "msg" }, lines[0]) : null,
       el("span", { class: "detail" }, lines[lines.length - 1] || "\u00a0")),
     el("div", { class: "end" },
       el("span", { class: "label" }, s.label),

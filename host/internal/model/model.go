@@ -70,8 +70,9 @@ type Session struct {
 	SessionID string    `json:"session_id"`
 	Project   string    `json:"project"`
 	Cwd       string    `json:"cwd"`
-	Title     string    `json:"title,omitempty"`  // what the task is about
-	Detail    string    `json:"detail,omitempty"` // what it is doing right now
+	Title     string    `json:"title,omitempty"`   // session name (generated, or set with /rename)
+	Message   string    `json:"message,omitempty"` // first line of the assistant's latest text this turn
+	Detail    string    `json:"detail,omitempty"`  // what it is doing right now
 	State     State     `json:"state"`
 	Since     time.Time `json:"since"`   // when State was entered
 	Updated   time.Time `json:"updated"` // last observation of any kind
@@ -127,9 +128,13 @@ type Observation struct {
 	State     State // empty: no state change, only metadata
 	Title     string
 	Detail    string
-	At        time.Time
-	Source    string // "hook", "sessions", "rollout", ...
-	End       bool   // the session is gone (with AgentID: that agent is)
+	// Message replaces the session's message when HasMessage is set, even
+	// with "" (a new turn clears the previous reply).
+	Message    string
+	HasMessage bool
+	At         time.Time
+	Source     string // "hook", "sessions", "rollout", ...
+	End        bool   // the session is gone (with AgentID: that agent is)
 
 	// With AgentID set, State, Detail and End apply to that subagent of
 	// the session, not the session itself.
@@ -141,7 +146,7 @@ type Observation struct {
 	AgentLaunch bool
 
 	ToolDone string // a tool call of the current turn finished
-	NewTurn  bool   // a new turn starts: reset the tool tally
+	NewTurn  bool   // a new turn starts: reset the tool tally and message
 }
 
 // Key returns the hub key for the observed session.

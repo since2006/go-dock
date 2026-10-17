@@ -65,6 +65,26 @@ func TestSessionKeepsStartDirectory(t *testing.T) {
 	}
 }
 
+func TestSessionMessage(t *testing.T) {
+	now := t0
+	h := newTestHub(&now)
+	msg := func(text string) model.Observation {
+		return model.Observation{Provider: model.ProviderClaude, SessionID: "a", Message: text, HasMessage: true}
+	}
+	h.Observe(obs("a", model.StateRunning, t0, "Bash: ls"))
+	h.Observe(msg("先看看目录结构"))
+	h.Observe(obs("a", model.StateRunning, t0.Add(time.Second), "Read: main.go")) // no HasMessage: kept
+	if s := h.Snapshot().Sessions[0]; s.Message != "先看看目录结构" {
+		t.Fatalf("message = %q", s.Message)
+	}
+	turn := obs("a", model.StateRunning, t0.Add(2*time.Second), "")
+	turn.NewTurn = true
+	h.Observe(turn)
+	if s := h.Snapshot().Sessions[0]; s.Message != "" {
+		t.Fatalf("new turn kept the old reply: %q", s.Message)
+	}
+}
+
 func TestOrdering(t *testing.T) {
 	now := t0
 	h := newTestHub(&now)
