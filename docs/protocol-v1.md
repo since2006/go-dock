@@ -124,9 +124,9 @@
 | `label` | string | 状态的中文标签，设备可直接显示 |
 | `text` | string | 一行摘要：当前动作（如 `Bash: npm install`），没有时为任务标题；最多 48 个字符，可能为空。只能显示一行的旧固件用它 |
 | `since` | int | 进入当前状态的时间 |
-| `title` | string | **可选**。会话名：用 `/rename` 改过时为改的名字，否则为 Claude Code 自动生成的标题（Codex 为最近一次提问），最多 32 个字符。和 `detail` 相同或没有时省略 |
+| `title` | string | **可选**。会话名：用 `/rename` 改过时为改的名字，否则为自动生成的标题（Claude Code、Codex 都会在第一次提问后生成）；Codex 还没有标题时为第一次提问。最多 32 个字符。和 `detail` 相同或没有时省略 |
 | `msg` | string | **可选**。AI 本轮最新一段回复的第一行（和 Claude Code 界面里 ● 开头的那句一样），去掉 Markdown 标记，按一行屏幕宽度截断（见下）。新一轮提问时清空；没有时省略。行太长时最先被去掉（在子代理之后、会话之前） |
-| `detail` | string | **可选**。会话**自己**当前的动作，按一行屏幕宽度截断（见下）。运行中的命令显示 Claude 为它写的说明（如 `Check hooks install`，和 Claude Code 界面里命令上方那行一样），没有说明时显示 `工具: 参数`；等授权时总是显示实际命令（如 `Bash: rm -rf dist`）。会话自己这一轮已结束、但还有子代理在跑时，为「等待 N 个子任务完成」 |
+| `detail` | string | **可选**。会话**自己**当前的动作，按一行屏幕宽度截断（见下）。运行中的命令显示 Claude 为它写的说明（如 `Check hooks install`，和 Claude Code 界面里命令上方那行一样），没有说明时显示 `工具: 参数`；Codex 的命令没有说明，显示 `Bash: 命令`，改文件显示 `apply_patch: 文件名`；等授权时总是显示实际命令（如 `Bash: rm -rf dist`）。Codex 调用 `request_user_input` 提问时状态为 `input`，`detail` 为「等待回答问题」（和 Claude Code 的 AskUserQuestion 一样）。会话自己这一轮已结束、但还有子代理在跑时，为「等待 N 个子任务完成」 |
 | `turn_output` | int | **可选**。本轮（从用户这次提问开始）AI 输出的 token 数，和 Claude Code 转圈提示里的 `↓ 6.5k tokens` 一样；新一轮从 0 开始，为 `0` 时省略 |
 | `turn_secs` | int | **可选**。截至 `now`，本轮 AI 已工作的秒数，和 Claude Code 转圈提示里的时间一样：**不含等用户授权、回答的时间**。会话（含子代理）从空闲变忙或用户提问时开始一轮，变回空闲时结束；后台子代理还在跑时继续计时。为 `0` 时省略 |
 | `agents` | array | **可选**。会话的子代理（Claude Code 的 Agent 工具、Codex 派生的子线程），最紧急的在前，最多 3 个。没有子代理时省略 |
@@ -141,7 +141,7 @@
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `type` | string | 子代理类型，如 `Explore`、`general-purpose`、Codex 的角色名；最多 16 个字符 |
+| `type` | string | 子代理类型，如 `Explore`、`general-purpose`、Codex 的角色名（没有角色时为它的昵称，如 `Kepler`）；最多 16 个字符 |
 | `text` | string | 它被派去做的事（任务描述），没有时为它当前的动作；它在等授权、等输入或出错时，改为它要做的动作（如 `Bash: rm -rf dist`）。最多 32 个字符，可能为空 |
 | `state` | string | `running` / `approval` / `input` / `error` / `done`（刚完成的会保留约 3 分钟） |
 | `since` | int | 开始时间 |

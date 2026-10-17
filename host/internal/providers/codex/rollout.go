@@ -24,11 +24,14 @@ const (
 )
 
 // rollouts tails $CODEX_HOME/sessions/**/rollout-*.jsonl for turn state,
-// titles, rate limits and token usage.
+// tool calls, messages, rate limits and token usage, and
+// $CODEX_HOME/session_index.jsonl for thread names.
 type rollouts struct {
 	home   string
 	loc    *time.Location
 	tailer *jsonl.Tailer
+	index  *jsonl.Tailer     // session_index.jsonl
+	names  map[string]string // thread id -> name (/rename or generated)
 
 	threads map[string]*thread       // by rollout path
 	days    map[string]*model.Tokens // local date -> tokens
@@ -42,24 +45,29 @@ type rollouts struct {
 type thread struct {
 	id     string
 	cwd    string
-	hidden bool   // internal thread (guardian review, memory, ...)
+	hidden bool   // internal thread (guardian review, title generation, ...)
 	parent string // for a spawned subagent: the root session it works for
-	role   string // subagent role, e.g. "explorer"
+	role   string // subagent role, e.g. "explorer", else its nickname
 
-	state   model.State // empty until the first turn event
-	detail  string
-	stateAt time.Time
-	metaAt  time.Time
-	title   string
-	turn    model.Turn  // latest message and output tokens of the current turn
-	last    *tokenUsage // baseline for token deltas
+	state    model.State // empty until the first turn event
+	detail   string      // the latest tool call of the turn
+	stateAt  time.Time
+	detailAt time.Time
+	asking   string // call id of a request_user_input waiting for the user
+	metaAt   time.Time
+	name     string      // from thread_name_updated (Codex 0.128 and older)
+	prompt   string      // the first user message
+	task     string      // the latest user message: a subagent's task
+	turn     model.Turn  // latest message and output tokens of the current turn
+	last     *tokenUsage // baseline for token deltas
 
 	// What has been sent to the sink.
-	open      bool
-	sentState model.State
-	sentAt    time.Time
-	sentTitle string
-	sentTurn  model.Turn
+	open       bool
+	sentState  model.State
+	sentAt     time.Time
+	sentDetail string
+	sentTitle  string
+	sentTurn   model.Turn
 }
 
 type pollResult struct {
@@ -73,6 +81,8 @@ func newRollouts(home string, loc *time.Location) *rollouts {
 		home:    home,
 		loc:     loc,
 		tailer:  jsonl.NewTailer(),
+		index:   jsonl.NewTailer(),
+		names:   map[string]string{},
 		threads: map[string]*thread{},
 		days:    map[string]*model.Tokens{},
 	}
@@ -129,6 +139,7 @@ func (r *rollouts) poll(rescan bool, now time.Time) pollResult {
 		}
 	}
 
+	_ = r.index.Read(filepath.Join(r.home, "session_index.jsonl"), r.indexLine)
 	res.obs = append(res.obs, r.reconcile(now)...)
 
 	if rescan {
@@ -177,7 +188,7 @@ func (r *rollouts) reconcile(now time.Time) []model.Observation {
 					end.SessionID, end.AgentID = th.parent, th.id
 				}
 				out = append(out, end)
-				th.open, th.sentState, th.sentAt, th.sentTitle, th.sentTurn = false, "", time.Time{}, "", model.Turn{}
+				th.open, th.sentState, th.sentAt, th.sentDetail, th.sentTitle, th.sentTurn = false, "", time.Time{}, "", "", model.Turn{}
 			}
 			continue
 		}
@@ -191,21 +202,53 @@ func (r *rollouts) reconcile(now time.Time) []model.Observation {
 			}
 			continue
 		}
+		title, turn := r.title(th), th.turn
 		switch {
 		case !th.open || st != th.sentState || !at.Equal(th.sentAt):
-			turn := th.turn
 			out = append(out, model.Observation{
-				Provider: P, SessionID: th.id, Cwd: th.cwd, Title: th.title, Turn: &turn,
+				Provider: P, SessionID: th.id, Cwd: th.cwd, Title: title, Turn: &turn,
 				State: st, Detail: th.detail, At: at, Source: "rollout",
 			})
-			th.open, th.sentState, th.sentAt, th.sentTitle, th.sentTurn = true, st, at, th.title, th.turn
-		case th.title != th.sentTitle || th.turn != th.sentTurn:
-			turn := th.turn
-			out = append(out, model.Observation{Provider: P, SessionID: th.id, Title: th.title, Turn: &turn, Source: "rollout"})
-			th.sentTitle, th.sentTurn = th.title, th.turn
+		case th.detail != th.sentDetail:
+			// A new tool call in the same state, as of when it was made.
+			out = append(out, model.Observation{
+				Provider: P, SessionID: th.id, Title: title, Turn: &turn,
+				State: st, Detail: th.detail, At: th.detailAt, Source: "rollout",
+			})
+		case title != th.sentTitle || turn != th.sentTurn:
+			out = append(out, model.Observation{Provider: P, SessionID: th.id, Title: title, Turn: &turn, Source: "rollout"})
+		default:
+			continue
 		}
+		th.open, th.sentState, th.sentAt, th.sentDetail, th.sentTitle, th.sentTurn = true, st, at, th.detail, title, turn
 	}
 	return out
+}
+
+// title names a thread as Codex does: by its name (set with /rename, or
+// generated after the first prompt), else by its first prompt.
+func (r *rollouts) title(th *thread) string {
+	if n := r.names[th.id]; n != "" {
+		return n
+	}
+	if th.name != "" {
+		return th.name
+	}
+	return th.prompt
+}
+
+// indexLine reads one session_index.jsonl entry. Codex appends one per
+// rename; the last one per thread wins and empty names are skipped.
+func (r *rollouts) indexLine(b []byte) {
+	var e struct {
+		ID   string `json:"id"`
+		Name string `json:"thread_name"`
+	}
+	if json.Unmarshal(b, &e) == nil && e.ID != "" {
+		if n := model.Truncate(e.Name, providers.TitleLen); n != "" {
+			r.names[e.ID] = n
+		}
+	}
 }
 
 // agentObservation reports a subagent thread as an agent of its session.
@@ -218,17 +261,22 @@ func (th *thread) agentObservation(st model.State, at time.Time) (model.Observat
 		} else {
 			st = model.StateDone // interrupted
 		}
-	case model.StateDone, model.StateRunning:
+	case model.StateDone, model.StateRunning, model.StateInput:
 	default:
 		st = model.StateRunning
 	}
-	if th.open && st == th.sentState && at.Equal(th.sentAt) && th.title == th.sentTitle {
+	same := th.open && st == th.sentState && at.Equal(th.sentAt)
+	if same && th.detail == th.sentDetail && th.task == th.sentTitle {
 		return model.Observation{}, false
 	}
-	th.open, th.sentState, th.sentAt, th.sentTitle = true, st, at, th.title
+	obsAt := at
+	if same && th.detailAt.After(at) {
+		obsAt = th.detailAt // a new tool call
+	}
+	th.open, th.sentState, th.sentAt, th.sentDetail, th.sentTitle = true, st, at, th.detail, th.task
 	return model.Observation{
-		Provider: P, SessionID: th.parent, Cwd: th.cwd, At: at, Source: "rollout",
-		AgentID: th.id, AgentType: th.role, AgentDesc: th.title, State: st,
+		Provider: P, SessionID: th.parent, Cwd: th.cwd, At: obsAt, Source: "rollout",
+		AgentID: th.id, AgentType: th.role, AgentDesc: th.task, State: st, Detail: th.detail,
 	}, true
 }
 
@@ -247,15 +295,42 @@ type sessionMeta struct {
 	ThreadSource string          `json:"thread_source"`
 	ParentThread *string         `json:"parent_thread_id"`
 	AgentRole    string          `json:"agent_role"`
+	AgentNick    string          `json:"agent_nickname"`
 }
 
 type eventMsg struct {
 	Type       string          `json:"type"`
 	Message    string          `json:"message"`            // user_message, agent_message
 	LastAgent  string          `json:"last_agent_message"` // task_complete
+	Error      json.RawMessage `json:"error"`              // task_complete of a failed turn
+	ThreadName string          `json:"thread_name"`        // thread_name_updated
 	Item       *completedItem  `json:"item"`               // item_completed
 	Info       *tokenInfo      `json:"info"`               // token_count
 	RateLimits json.RawMessage `json:"rate_limits"`
+}
+
+// errorText reads a failed turn's error, {"message": ...}; a plain
+// string is taken as is.
+func errorText(raw json.RawMessage) string {
+	var e struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(raw, &e) != nil {
+		_ = json.Unmarshal(raw, &e.Message)
+	}
+	return model.Truncate(e.Message, providers.DetailLen)
+}
+
+// responseItem is a tool call the model made (function_call,
+// custom_tool_call, local_shell_call, web_search_call) or a tool's output.
+type responseItem struct {
+	Type      string          `json:"type"`
+	Name      string          `json:"name"`
+	Namespace string          `json:"namespace"`
+	Arguments json.RawMessage `json:"arguments"` // function_call: JSON text
+	Input     string          `json:"input"`     // custom_tool_call
+	Action    json.RawMessage `json:"action"`    // local_shell_call, web_search_call
+	CallID    string          `json:"call_id"`
 }
 
 type completedItem struct {
@@ -278,15 +353,19 @@ type tokenUsage struct {
 }
 
 var (
-	markEvent = []byte(`"type":"event_msg"`)
-	markMeta  = []byte(`"type":"session_meta"`)
-	markTurn  = []byte(`"type":"turn_context"`)
+	markEvent    = []byte(`"type":"event_msg"`)
+	markMeta     = []byte(`"type":"session_meta"`)
+	markTurn     = []byte(`"type":"turn_context"`)
+	markResponse = []byte(`"type":"response_item"`)
+	markCalls    = [][]byte{
+		[]byte(`"type":"function_call"`), []byte(`"type":"custom_tool_call"`),
+		[]byte(`"type":"local_shell_call"`), []byte(`"type":"web_search_call"`),
+	}
 )
 
 // line handles one rollout line and reports whether token totals changed.
 func (r *rollouts) line(th *thread, b []byte) bool {
-	// response_item lines carry whole model outputs; skip them undecoded.
-	if !bytes.Contains(b, markEvent) && !bytes.Contains(b, markMeta) && !bytes.Contains(b, markTurn) {
+	if !bytes.Contains(b, markEvent) && !bytes.Contains(b, markMeta) && !bytes.Contains(b, markTurn) && !toolLine(th, b) {
 		return false
 	}
 	var l rolloutLine
@@ -311,7 +390,12 @@ func (r *rollouts) line(th *thread, b []byte) bool {
 			th.hidden = internalThread(m)
 			if !th.hidden {
 				th.parent = subagentParent(m)
+				// Agents without a role are "default"; Codex tells them
+				// apart by nickname.
 				th.role = m.AgentRole
+				if (th.role == "" || th.role == "default") && m.AgentNick != "" {
+					th.role = m.AgentNick
+				}
 				if th.role == "" && th.parent != "" {
 					th.role = "subagent"
 				}
@@ -333,14 +417,79 @@ func (r *rollouts) line(th *thread, b []byte) bool {
 			return false
 		}
 		return r.event(th, l.Timestamp, e)
+	case "response_item":
+		var it responseItem
+		if json.Unmarshal(l.Payload, &it) == nil {
+			th.toolItem(l.Timestamp, it)
+		}
 	}
 	return false
+}
+
+// toolLine reports a response_item line worth decoding: a tool call, or
+// the answer to a pending request_user_input. Other response items carry
+// whole model outputs and are skipped undecoded.
+func toolLine(th *thread, b []byte) bool {
+	if !bytes.Contains(b, markResponse) {
+		return false
+	}
+	if th.asking != "" && bytes.Contains(b, []byte(th.asking)) {
+		return true
+	}
+	for _, m := range markCalls {
+		if bytes.Contains(b, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// toolItem follows the tool calls of a running turn. Codex writes a call
+// before running it, so the latest call is what the thread is doing now.
+func (th *thread) toolItem(ts time.Time, it responseItem) {
+	if it.Type == "function_call_output" || it.Type == "custom_tool_call_output" {
+		if th.asking != "" && it.CallID == th.asking {
+			th.asking = ""
+			if th.state == model.StateInput {
+				th.state, th.detail, th.stateAt = model.StateRunning, "", ts
+			}
+		}
+		return
+	}
+	if th.state != model.StateRunning {
+		return
+	}
+	detail := ""
+	switch it.Type {
+	case "function_call":
+		name := toolName(it.Namespace, it.Name)
+		if name == "request_user_input" {
+			th.state, th.detail, th.stateAt, th.asking = model.StateInput, "等待回答问题", ts, it.CallID
+			return
+		}
+		args := it.Arguments
+		var text string
+		if json.Unmarshal(args, &text) == nil {
+			args = json.RawMessage(text)
+		}
+		detail = toolDetail(name, args)
+	case "custom_tool_call":
+		in, _ := json.Marshal(map[string]string{"command": it.Input})
+		detail = toolDetail(it.Name, in)
+	case "local_shell_call":
+		detail = providers.ToolSummary("Bash", it.Action)
+	case "web_search_call":
+		detail = providers.ToolSummary("web_search", it.Action)
+	}
+	if detail != "" {
+		th.detail, th.detailAt = detail, ts
+	}
 }
 
 // internalThread reports Codex's own helper threads, which go-dock hides.
 func internalThread(m sessionMeta) bool {
 	switch m.ThreadSource {
-	case "guardian_review", "memory_consolidation":
+	case "guardian_review", "memory_consolidation", "thread_title", "system":
 		return true
 	}
 	var src map[string]json.RawMessage
@@ -376,30 +525,35 @@ func subagentParent(m sessionMeta) string {
 func (r *rollouts) event(th *thread, ts time.Time, e eventMsg) bool {
 	switch e.Type {
 	case "task_started", "turn_started":
-		th.state, th.detail, th.stateAt, th.turn = model.StateRunning, "", ts, model.Turn{}
+		th.state, th.detail, th.stateAt, th.asking, th.turn = model.StateRunning, "", ts, "", model.Turn{}
 	case "agent_message":
-		if msg := providers.MessageLine(e.Message); msg != "" {
-			th.turn.Message = msg
-		}
+		th.message(e.Message)
 	case "task_complete", "turn_complete":
-		th.state, th.detail, th.stateAt = model.StateDone, "", ts
-		if msg := providers.MessageLine(e.LastAgent); msg != "" {
-			th.turn.Message = msg
+		th.state, th.detail, th.stateAt, th.asking = model.StateDone, "", ts, ""
+		if msg := errorText(e.Error); msg != "" {
+			th.state, th.detail = model.StateError, msg
 		}
+		th.message(e.LastAgent)
 	case "turn_aborted":
-		th.state, th.detail, th.stateAt = model.StateIdle, "已中断", ts
+		th.state, th.detail, th.stateAt, th.asking = model.StateIdle, "已中断", ts, ""
 	case "user_message":
-		if t := model.Truncate(e.Message, providers.TitleLen); t != "" {
-			th.title = t
-		}
+		th.userMessage(e.Message)
+	case "thread_name_updated":
+		th.name = model.Truncate(e.ThreadName, providers.TitleLen)
 	case "item_completed":
-		if e.Item != nil && e.Item.Type == "UserMessage" {
-			for _, c := range e.Item.Content {
-				if t := model.Truncate(c.Text, providers.TitleLen); t != "" {
-					th.title = t
-					break
-				}
-			}
+		// Paginated rollouts (Codex 0.147+) record messages only as items.
+		if e.Item == nil {
+			break
+		}
+		var text strings.Builder
+		for _, c := range e.Item.Content {
+			text.WriteString(c.Text)
+		}
+		switch e.Item.Type {
+		case "UserMessage":
+			th.userMessage(text.String())
+		case "AgentMessage":
+			th.message(text.String())
 		}
 	case "token_count":
 		r.rateLimits(ts, e.RateLimits)
@@ -408,6 +562,24 @@ func (r *rollouts) event(th *thread, ts time.Time, e eventMsg) bool {
 		}
 	}
 	return false
+}
+
+// userMessage takes a prompt: the first one names the thread until it
+// has a name, the latest one is a subagent's task.
+func (th *thread) userMessage(text string) {
+	if t := model.Truncate(text, providers.TitleLen); t != "" {
+		if th.prompt == "" {
+			th.prompt = t
+		}
+		th.task = t
+	}
+}
+
+// message takes the assistant's latest text of the turn.
+func (th *thread) message(text string) {
+	if msg := providers.MessageLine(text); msg != "" {
+		th.turn.Message = msg
+	}
 }
 
 // tokens attributes the growth of a thread's cumulative usage to the day

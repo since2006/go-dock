@@ -3,6 +3,7 @@ package codex
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -234,9 +235,12 @@ func TestHookObservation(t *testing.T) {
 		skip   bool
 	}{
 		{body: `{"hook_event_name":"SessionStart","session_id":"s","source":"startup"}`, state: model.StateIdle},
-		{body: `{"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"Refactor the parser\nplease"}`, state: model.StateRunning, title: "Refactor the parser"},
+		// The title comes from the rollout, not the latest prompt.
+		{body: `{"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"Refactor the parser\nplease"}`, state: model.StateRunning},
 		{body: `{"hook_event_name":"PermissionRequest","session_id":"s","tool_name":"Bash","tool_input":{"command":"rm -rf build","description":"clean"}}`, state: model.StateApproval, detail: "Bash: rm -rf build"},
-		{body: `{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch"}}`, state: model.StateRunning, detail: "apply_patch: *** Begin Patch"},
+		{body: `{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Bash","tool_input":{"command":"go test ./..."}}`, state: model.StateRunning, detail: "Bash: go test ./..."},
+		{body: `{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: internal/hub/hub.go\n@@\n*** Add File: docs/a.md\n*** End Patch"}}`, state: model.StateRunning, detail: "apply_patch: hub.go, a.md"},
+		{body: `{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"request_user_input","tool_input":{"questions":[]}}`, state: model.StateInput, detail: "等待回答问题"},
 		{body: `{"hook_event_name":"Stop","session_id":"s","last_assistant_message":"ok"}`, state: model.StateDone},
 		{body: `{"hook_event_name":"Interrupt","session_id":"s"}`, state: model.StateIdle, detail: "已中断"},
 		{body: `{"hook_event_name":"SessionEnd","session_id":"s"}`, end: true},
@@ -456,6 +460,11 @@ func TestSubagentHooks(t *testing.T) {
 	if err != nil || !ok || o.SessionID != "root" || o.AgentID != "t2" || o.AgentType != "explorer" || o.State != model.StateRunning {
 		t.Fatalf("start = %+v %v %v", o, ok, err)
 	}
+	// "default" is no role: the rollout's nickname names the agent.
+	o, _, _ = hookObservation([]byte(`{"hook_event_name":"SubagentStart","session_id":"root","agent_id":"t3","agent_type":"default"}`), now)
+	if o.AgentID != "t3" || o.AgentType != "" {
+		t.Fatalf("default agent = %+v", o)
+	}
 	o, _, _ = hookObservation([]byte(`{"hook_event_name":"PreToolUse","session_id":"root","agent_id":"t2","agent_type":"explorer","tool_name":"Bash","tool_input":{"command":"rg TODO"}}`), now)
 	if o.AgentID != "t2" || o.Detail != "Bash: rg TODO" || o.ToolDone != "" {
 		t.Fatalf("agent tool = %+v", o)
@@ -486,5 +495,152 @@ func TestHooksStaleWithoutSubagentEvents(t *testing.T) {
 	f.Save()
 	if st := HooksStatus(home, tg); !st.Installed || !st.Stale {
 		t.Fatalf("old install not reported as needing an update: %+v", st)
+	}
+}
+
+// TestRolloutCurrentFormat follows a paginated rollout (Codex 0.147+) line
+// by line: no user_message / agent_message events, messages as items, tool
+// calls as response items, names in session_index.jsonl.
+func TestRolloutCurrentFormat(t *testing.T) {
+	const id, sub = "44444444-dddd", "55555555-eeee"
+	home := t.TempDir()
+	os.MkdirAll(filepath.Join(home, "thread-writer-locks"), 0o755)
+	setLock(t, home, id, true)
+	setLock(t, home, sub, true)
+	dir := filepath.Join(home, "sessions", "2026", "10", "17")
+	os.MkdirAll(dir, 0o755)
+	main := filepath.Join(dir, "rollout-2026-10-17T03-00-00-"+id+".jsonl")
+	agent := filepath.Join(dir, "rollout-2026-10-17T03-01-00-"+sub+".jsonl")
+	index := filepath.Join(home, "session_index.jsonl")
+
+	r := newRollouts(home, time.UTC)
+	sec := 0
+	add := func(path string, lines ...string) {
+		t.Helper()
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range lines {
+			if !strings.HasPrefix(l, `{"id"`) { // session index lines have no envelope
+				sec++
+				l = fmt.Sprintf(`{"timestamp":"2026-10-17T03:00:%02d.000Z",%s}`, sec, l)
+			}
+			f.WriteString(l + "\n")
+		}
+		f.Close()
+	}
+	at := func(s int) time.Time { return time.Date(2026, 10, 17, 3, 0, s, 0, time.UTC) }
+	poll := func() map[string]model.Observation {
+		t.Helper()
+		return byID(r.poll(false, testNow).obs)
+	}
+
+	add(main,
+		`"type":"session_meta","payload":{"id":"`+id+`","session_id":"`+id+`","cwd":"/work/cur","source":"cli","history_mode":"paginated","thread_source":"user"}`,
+		`"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}`,
+		`"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"u1","content":[{"type":"Text","text":"修复登录超时\n细节"}]}}`,
+		`"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"**Planning**"}]}`,
+		`"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"go test ./...\",\"workdir\":\"/work/cur\"}","call_id":"c1"}`,
+		`"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"**测试**通过了，接着改超时。"}],"phase":"commentary"}}`,
+	)
+	o := poll()[id]
+	if o.State != model.StateRunning || o.Title != "修复登录超时" || o.Detail != "Bash: go test ./..." ||
+		o.Turn == nil || o.Turn.Message != "测试通过了，接着改超时。" || !o.At.Equal(at(2)) {
+		t.Fatalf("first poll = %+v turn %+v", o, o.Turn)
+	}
+
+	// A patch is a new action in the same state, as of the call.
+	add(main,
+		`"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok"}`,
+		`"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"c2","input":"*** Begin Patch\n*** Update File: auth/login.go\n@@\n-a\n+b\n*** End Patch"}`,
+	)
+	if o = poll()[id]; o.State != model.StateRunning || o.Detail != "apply_patch: login.go" || !o.At.Equal(at(8)) {
+		t.Fatalf("patch = %+v", o)
+	}
+	add(main, `"type":"response_item","payload":{"type":"function_call","namespace":"mcp__docs__","name":"search","arguments":"{\"query\":\"timeout\"}","call_id":"c3"}`)
+	if o = poll()[id]; o.Detail != "mcp__docs__search: timeout" {
+		t.Fatalf("mcp = %+v", o)
+	}
+	// write_stdin keeps the command it feeds.
+	add(main, `"type":"response_item","payload":{"type":"function_call","name":"write_stdin","arguments":"{\"session_id\":3,\"chars\":\"\"}","call_id":"c4"}`)
+	if got := poll(); len(got) != 0 {
+		t.Fatalf("write_stdin = %+v", got)
+	}
+
+	// request_user_input waits for the user until its output arrives.
+	add(main, `"type":"response_item","payload":{"type":"function_call","name":"request_user_input","arguments":"{\"questions\":[]}","call_id":"c5"}`)
+	if o = poll()[id]; o.State != model.StateInput || o.Detail != "等待回答问题" || !o.At.Equal(at(11)) {
+		t.Fatalf("question = %+v", o)
+	}
+	add(main, `"type":"response_item","payload":{"type":"function_call_output","call_id":"c5","output":"{\"answers\":{}}"}`)
+	if o = poll()[id]; o.State != model.StateRunning || o.Detail != "" || !o.At.Equal(at(12)) {
+		t.Fatalf("answered = %+v", o)
+	}
+
+	// A subagent without a role goes by its nickname; its latest prompt is
+	// its task and its tool calls are its detail.
+	add(agent,
+		`"type":"session_meta","payload":{"id":"`+sub+`","session_id":"`+id+`","cwd":"/work/cur","source":{"subagent":{"thread_spawn":{"parent_thread_id":"`+id+`","depth":1,"agent_nickname":"Kepler","agent_role":"default"}}},"thread_source":"subagent","agent_nickname":"Kepler","agent_role":"default"}`,
+		`"type":"event_msg","payload":{"type":"task_started","turn_id":"s1"}`,
+		`"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"Text","text":"查找所有超时配置"}]}}`,
+		`"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rg timeout\"}","call_id":"a1"}`,
+	)
+	a := poll()["agent:"+sub]
+	if a.SessionID != id || a.AgentType != "Kepler" || a.AgentDesc != "查找所有超时配置" || a.Detail != "Bash: rg timeout" ||
+		a.State != model.StateRunning || !a.At.Equal(at(14)) {
+		t.Fatalf("subagent = %+v", a)
+	}
+	add(agent, `"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rg -l deadline\"}","call_id":"a2"}`)
+	if a = poll()["agent:"+sub]; a.Detail != "Bash: rg -l deadline" || !a.At.Equal(at(17)) {
+		t.Fatalf("subagent call = %+v", a)
+	}
+
+	// Later prompts keep the title; a thread name replaces it, and a name
+	// in session_index.jsonl (the last non-empty one) wins over both.
+	add(main,
+		`"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"Text","text":"再加个测试"}]}}`,
+		`"type":"event_msg","payload":{"type":"thread_name_updated","thread_id":"`+id+`","thread_name":"Old name"}`,
+	)
+	if o = poll()[id]; o.Title != "Old name" || o.State != "" {
+		t.Fatalf("thread_name_updated = %+v", o)
+	}
+	add(index,
+		`{"id":"`+id+`","thread_name":"Fix login timeout","updated_at":"2026-10-17T03:00:30Z"}`,
+		`{"id":"other","thread_name":"Unrelated","updated_at":"2026-10-17T03:00:31Z"}`,
+		`{"id":"`+id+`","thread_name":"登录超时修复","updated_at":"2026-10-17T03:00:32Z"}`,
+		`{"id":"`+id+`","thread_name":"","updated_at":"2026-10-17T03:00:33Z"}`,
+	)
+	if o = poll()[id]; o.Title != "登录超时修复" {
+		t.Fatalf("session index = %+v", o)
+	}
+
+	// A failed turn is an error with its message.
+	add(main, `"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":null,"error":{"message":"stream disconnected","codex_error_info":null}}`)
+	if o = poll()[id]; o.State != model.StateError || o.Detail != "stream disconnected" || o.Title != "登录超时修复" {
+		t.Fatalf("failed turn = %+v", o)
+	}
+}
+
+func TestToolDetail(t *testing.T) {
+	cases := []struct {
+		name, input, want string
+	}{
+		{"exec_command", `{"cmd":"npm install","justification":"needs network"}`, "Bash: npm install"},
+		{"shell", `{"command":["bash","-lc","ls -la"]}`, "Bash: ls -la"},
+		{"shell_command", `{"command":"git status"}`, "Bash: git status"},
+		{"apply_patch", `{"command":"*** Begin Patch\n*** Delete File: C:\\src\\old.go\n*** Update File: a/x.go\n*** Update File: a/x.go\n*** End Patch"}`, "apply_patch: old.go, x.go"},
+		{"spawn_agent", `{"task_name":"audit_routes","message":"List every route"}`, "spawn_agent: audit_routes"},
+		{"view_image", `{"path":"/tmp/shot.png"}`, "view_image: shot.png"},
+		{"update_plan", `{"plan":[]}`, "update_plan"},
+		{"write_stdin", `{"session_id":1}`, ""},
+	}
+	for _, c := range cases {
+		if got := toolDetail(c.name, json.RawMessage(c.input)); got != c.want {
+			t.Errorf("toolDetail(%s, %s) = %q, want %q", c.name, c.input, got, c.want)
+		}
+	}
+	if got := toolName("mcp__docs", "search"); got != "mcp__docs__search" {
+		t.Errorf("toolName = %q", got)
 	}
 }

@@ -59,6 +59,12 @@ Firmware UI checks without hardware: `firmware/sim` compiles `main/ui.c` against
 - `~/.claude/projects/**/<session>.jsonl`: token usage (deduplicated per `message.id`, max per field), `ai-title` / `custom-title` lines for session titles (a `/rename` title wins), the last assistant text block for `Session.Message` (cleared by the next user prompt); `subagents/agent-<id>.jsonl` + `.meta.json` for subagents without hooks.
 - statusLine stdin `rate_limits` is the only source of Claude 5h/7d percentages; go-dock wraps the user's existing statusLine command (`statusline --chain <base64 of original>`).
 
+## Codex data sources (undocumented, parse defensively)
+
+- `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`, one file per thread (subagents too, linked by `session_id` / `parent_thread_id`). Since Codex 0.147 threads are `"history_mode":"paginated"`: no `user_message` / `agent_message` events, messages come as `item_completed` items (`UserMessage`, `AgentMessage`). Tool calls are `response_item` lines (`function_call` with `arguments` as JSON text, `custom_tool_call` for `apply_patch`), written before the tool runs. Approval requests are never written: only hooks report them.
+- `$CODEX_HOME/session_index.jsonl`: thread names (`/rename` or generated after the first prompt), appended; the last non-empty name per `id` wins.
+- `$CODEX_HOME/thread-writer-locks/<id>.lock` exists while a thread is open (0.155+); older versions fall back to file mtime.
+
 ## Releases
 
 Pushing `vX.Y.Z` publishes a release; a tag with a suffix (`v0.1.2-beta.2`) is published as a prerelease and only offered to users who enabled "接收测试版". The release also attaches `go-dock-firmware-v2.bin` (merged image, flash at `0x0`).
