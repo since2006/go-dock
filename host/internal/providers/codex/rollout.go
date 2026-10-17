@@ -51,15 +51,15 @@ type thread struct {
 	stateAt time.Time
 	metaAt  time.Time
 	title   string
-	message string      // first line of the agent's latest message this turn
+	turn    model.Turn  // latest message and output tokens of the current turn
 	last    *tokenUsage // baseline for token deltas
 
 	// What has been sent to the sink.
-	open        bool
-	sentState   model.State
-	sentAt      time.Time
-	sentTitle   string
-	sentMessage string
+	open      bool
+	sentState model.State
+	sentAt    time.Time
+	sentTitle string
+	sentTurn  model.Turn
 }
 
 type pollResult struct {
@@ -177,7 +177,7 @@ func (r *rollouts) reconcile(now time.Time) []model.Observation {
 					end.SessionID, end.AgentID = th.parent, th.id
 				}
 				out = append(out, end)
-				th.open, th.sentState, th.sentAt, th.sentTitle, th.sentMessage = false, "", time.Time{}, "", ""
+				th.open, th.sentState, th.sentAt, th.sentTitle, th.sentTurn = false, "", time.Time{}, "", model.Turn{}
 			}
 			continue
 		}
@@ -193,18 +193,16 @@ func (r *rollouts) reconcile(now time.Time) []model.Observation {
 		}
 		switch {
 		case !th.open || st != th.sentState || !at.Equal(th.sentAt):
+			turn := th.turn
 			out = append(out, model.Observation{
-				Provider: P, SessionID: th.id, Cwd: th.cwd, Title: th.title,
-				Message: th.message, HasMessage: true,
+				Provider: P, SessionID: th.id, Cwd: th.cwd, Title: th.title, Turn: &turn,
 				State: st, Detail: th.detail, At: at, Source: "rollout",
 			})
-			th.open, th.sentState, th.sentAt, th.sentTitle, th.sentMessage = true, st, at, th.title, th.message
-		case th.title != th.sentTitle || th.message != th.sentMessage:
-			out = append(out, model.Observation{
-				Provider: P, SessionID: th.id, Title: th.title,
-				Message: th.message, HasMessage: true, Source: "rollout",
-			})
-			th.sentTitle, th.sentMessage = th.title, th.message
+			th.open, th.sentState, th.sentAt, th.sentTitle, th.sentTurn = true, st, at, th.title, th.turn
+		case th.title != th.sentTitle || th.turn != th.sentTurn:
+			turn := th.turn
+			out = append(out, model.Observation{Provider: P, SessionID: th.id, Title: th.title, Turn: &turn, Source: "rollout"})
+			th.sentTitle, th.sentTurn = th.title, th.turn
 		}
 	}
 	return out
@@ -378,15 +376,15 @@ func subagentParent(m sessionMeta) string {
 func (r *rollouts) event(th *thread, ts time.Time, e eventMsg) bool {
 	switch e.Type {
 	case "task_started", "turn_started":
-		th.state, th.detail, th.stateAt, th.message = model.StateRunning, "", ts, ""
+		th.state, th.detail, th.stateAt, th.turn = model.StateRunning, "", ts, model.Turn{}
 	case "agent_message":
 		if msg := providers.MessageLine(e.Message); msg != "" {
-			th.message = msg
+			th.turn.Message = msg
 		}
 	case "task_complete", "turn_complete":
 		th.state, th.detail, th.stateAt = model.StateDone, "", ts
 		if msg := providers.MessageLine(e.LastAgent); msg != "" {
-			th.message = msg
+			th.turn.Message = msg
 		}
 	case "turn_aborted":
 		th.state, th.detail, th.stateAt = model.StateIdle, "已中断", ts
@@ -428,6 +426,7 @@ func (r *rollouts) tokens(th *thread, ts time.Time, cur tokenUsage) bool {
 		Output:      nonNeg(cur.Output - last.Output),
 		CacheCreate: nonNeg(cur.CacheWrite - last.CacheWrite),
 	}
+	th.turn.Output += d.Output
 	if d.Total() == 0 || ts.IsZero() {
 		return false
 	}

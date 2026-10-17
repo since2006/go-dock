@@ -65,18 +65,25 @@ func (s State) Label() string {
 
 // Session is one Claude Code or Codex conversation as tracked by the hub.
 type Session struct {
-	ID        string    `json:"id"` // provider:session_id
-	Provider  Provider  `json:"provider"`
-	SessionID string    `json:"session_id"`
-	Project   string    `json:"project"`
-	Cwd       string    `json:"cwd"`
-	Title     string    `json:"title,omitempty"`   // session name (generated, or set with /rename)
-	Message   string    `json:"message,omitempty"` // first line of the assistant's latest text this turn
-	Detail    string    `json:"detail,omitempty"`  // what it is doing right now
-	State     State     `json:"state"`
-	Since     time.Time `json:"since"`   // when State was entered
-	Updated   time.Time `json:"updated"` // last observation of any kind
-	Source    string    `json:"source"`  // source of the last state change
+	ID        string   `json:"id"` // provider:session_id
+	Provider  Provider `json:"provider"`
+	SessionID string   `json:"session_id"`
+	Project   string   `json:"project"`
+	Cwd       string   `json:"cwd"`
+	Title     string   `json:"title,omitempty"`   // session name (generated, or set with /rename)
+	Message   string   `json:"message,omitempty"` // first line of the assistant's latest text this turn
+	Detail    string   `json:"detail,omitempty"`  // what it is doing right now
+	// TurnOutput counts the output tokens of the current turn, like the
+	// "↓ 6.5k tokens" in Claude Code's spinner.
+	TurnOutput int64 `json:"turn_output,omitempty"`
+	// TurnSecs is how long the current (or last) turn has worked, as
+	// Claude Code's spinner counts it: without the time spent waiting for
+	// the user. Filled in by Snapshot.
+	TurnSecs int64     `json:"turn_secs,omitempty"`
+	State    State     `json:"state"`
+	Since    time.Time `json:"since"`   // when State was entered
+	Updated  time.Time `json:"updated"` // last observation of any kind
+	Source   string    `json:"source"`  // source of the last state change
 	// Agents are the session's subagents, most urgent first.
 	Agents []Agent `json:"agents,omitempty"`
 	// Tools tallies the tool calls finished in the current turn.
@@ -128,13 +135,12 @@ type Observation struct {
 	State     State // empty: no state change, only metadata
 	Title     string
 	Detail    string
-	// Message replaces the session's message when HasMessage is set, even
-	// with "" (a new turn clears the previous reply).
-	Message    string
-	HasMessage bool
-	At         time.Time
-	Source     string // "hook", "sessions", "rollout", ...
-	End        bool   // the session is gone (with AgentID: that agent is)
+	// Turn, when set, replaces what the session knows about its current
+	// turn (a new turn starts from zero).
+	Turn   *Turn
+	At     time.Time
+	Source string // "hook", "sessions", "rollout", ...
+	End    bool   // the session is gone (with AgentID: that agent is)
 
 	// With AgentID set, State, Detail and End apply to that subagent of
 	// the session, not the session itself.
@@ -147,6 +153,12 @@ type Observation struct {
 
 	ToolDone string // a tool call of the current turn finished
 	NewTurn  bool   // a new turn starts: reset the tool tally and message
+}
+
+// Turn is what a transcript says about a session's current turn.
+type Turn struct {
+	Message string // first line of the assistant's latest text
+	Output  int64  // output tokens so far
 }
 
 // Key returns the hub key for the observed session.

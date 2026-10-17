@@ -254,7 +254,7 @@ func TestTranscriptsPreferRenamedTitle(t *testing.T) {
 	}
 }
 
-func TestTranscriptMessages(t *testing.T) {
+func TestTranscriptTurn(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "-work-demo")
 	os.MkdirAll(dir, 0o755)
 	path := filepath.Join(dir, "s1.jsonl")
@@ -268,21 +268,22 @@ func TestTranscriptMessages(t *testing.T) {
 	const reply = "先把两张截图的像素颜色取出来，对比 ShellRS 的配色和渲染。"
 
 	write(`{"type":"user","sessionId":"s1","message":{"role":"user","content":"对比一下配色"}}`,
-		`{"type":"assistant","sessionId":"s1","message":{"id":"m1","content":[{"type":"text","text":"`+reply+`"}]}}`,
-		`{"type":"assistant","sessionId":"s1","message":{"id":"m1","content":[{"type":"tool_use","name":"Bash","input":{}}]}}`,
+		`{"type":"assistant","sessionId":"s1","message":{"id":"m1","content":[{"type":"text","text":"`+reply+`"}],"usage":{"output_tokens":50}}}`,
+		`{"type":"assistant","sessionId":"s1","message":{"id":"m1","content":[{"type":"tool_use","name":"Bash","input":{}}],"usage":{"output_tokens":120}}}`,
 		`{"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}`,
-		`{"type":"assistant","sessionId":"s1","isSidechain":true,"message":{"id":"m2","content":[{"type":"text","text":"sidechain"}]}}`)
-	if got := tr.poll(true, now).messages["s1"]; got != reply {
-		t.Fatalf("message = %q", got)
+		`{"type":"assistant","sessionId":"s1","message":{"id":"m3","content":[{"type":"tool_use","name":"Read","input":{}}],"usage":{"output_tokens":30}}}`,
+		`{"type":"assistant","sessionId":"s1","isSidechain":true,"message":{"id":"m2","content":[{"type":"text","text":"sidechain"}],"usage":{"output_tokens":999}}}`)
+	if got := tr.poll(true, now).turns["s1"]; got != (model.Turn{Message: reply, Output: 150}) {
+		t.Fatalf("turn = %+v", got)
 	}
 	// A local slash command is not a new turn; a prompt is.
 	write(`{"type":"user","sessionId":"s1","message":{"role":"user","content":"<command-name>/rename</command-name>"}}`)
-	if res := tr.poll(false, now); len(res.messages) != 0 {
-		t.Fatalf("slash command changed the message: %+v", res.messages)
+	if res := tr.poll(false, now); len(res.turns) != 0 {
+		t.Fatalf("slash command changed the turn: %+v", res.turns)
 	}
 	write(`{"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"text","text":"再看看字体"}]}}`)
-	if got, ok := tr.poll(false, now).messages["s1"]; !ok || got != "" {
-		t.Fatalf("new prompt: message = %q (reported %v)", got, ok)
+	if got, ok := tr.poll(false, now).turns["s1"]; !ok || got != (model.Turn{}) {
+		t.Fatalf("new prompt: turn = %+v (reported %v)", got, ok)
 	}
 }
 

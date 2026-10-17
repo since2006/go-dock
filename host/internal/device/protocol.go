@@ -90,6 +90,11 @@ type SessionFrame struct {
 	Title  string `json:"title,omitempty"`
 	Msg    string `json:"msg,omitempty"`
 	Detail string `json:"detail,omitempty"`
+	// TurnOutput counts the output tokens of the session's current turn;
+	// TurnSecs is its work time at Now, without waits for the user. A
+	// screen keeps counting from it while the row is running.
+	TurnOutput int64 `json:"turn_output,omitempty"`
+	TurnSecs   int64 `json:"turn_secs,omitempty"`
 	// Agents lists up to three subagents, most urgent first. AgentsTotal
 	// and AgentsActive count all of them; all three are omitted when the
 	// session has none.
@@ -182,6 +187,9 @@ func sessionFrame(ss model.Session, st model.State, from *model.Agent) SessionFr
 		Title:   model.Truncate(ss.Title, titleLen),
 		Msg:     model.Truncate(ss.Message, msgLen),
 		Detail:  model.Truncate(ss.Detail, textLen),
+
+		TurnOutput: ss.TurnOutput,
+		TurnSecs:   ss.TurnSecs,
 	}
 	if from != nil && (ss.State == model.StateDone || ss.State == model.StateIdle) {
 		// The session's own turn ended while background subagents work.

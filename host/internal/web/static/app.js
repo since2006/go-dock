@@ -262,14 +262,24 @@ function scrReset(resetsAt, now) {
 // Running states count up as m:ss (or 1h05m); finished ones say how long ago.
 function scrTime(state, since, now) {
   const sec = Math.max(0, now - since);
-  if (SCR_ACTIVE.includes(state)) {
-    if (sec >= 3600) return `${Math.floor(sec / 3600)}h${String(Math.floor((sec % 3600) / 60)).padStart(2, "0")}m`;
-    return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
-  }
+  if (SCR_ACTIVE.includes(state)) return scrClock(sec);
   if (sec < 60) return "刚刚";
   if (sec < 3600) return `${Math.floor(sec / 60)}分钟前`;
   if (sec < 86400) return `${Math.floor(sec / 3600)}小时前`;
   return `${Math.floor(sec / 86400)}天前`;
+}
+
+function scrClock(sec) {
+  if (sec >= 3600) return `${Math.floor(sec / 3600)}h${String(Math.floor((sec % 3600) / 60)).padStart(2, "0")}m`;
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+}
+
+// A session row's time: while the turn runs or waits for the user, its work
+// time as Claude Code's spinner counts it (held during the wait; a screen
+// keeps counting from turn_secs while running); otherwise scrTime.
+function scrRowTime(s, now) {
+  const turn = ["running", "approval", "input"].includes(s.state) && s.turn_secs;
+  return turn ? scrClock(s.turn_secs) : scrTime(s.state, s.since, now);
 }
 
 function scrMeter(label, w, provider, now) {
@@ -292,9 +302,11 @@ const SCR_LIST_H = 258, SCR_MAIN_TALL = 80, SCR_MAIN = 60, SCR_SUB = 32, SCR_SUB
 
 // Lines under the project line: the assistant's latest text, then what the
 // session is doing; older hosts only send text, which may be the title.
+// None at all leaves the project line alone, centred in the row.
 function scrLines(s) {
   const lines = [s.msg, s.detail].filter(Boolean);
-  return lines.length ? lines : [s.text && s.text !== s.title ? s.text : ""];
+  if (lines.length) return lines;
+  return s.text && s.text !== s.title ? [s.text] : [];
 }
 
 function scrGroupHeight(s) {
@@ -325,15 +337,19 @@ function scrGroup(s, now) {
   const row = el("div", { class: `scr-row ${s.state} ${tall ? "tall" : ""}` },
     el("span", { class: "chip" }, scrIcon(SCR_ICONS[s.state] ? s.state : "idle", 22, s.state === "running" || s.state === "done" ? 2.4 : 2.2)),
     el("div", { class: "mid" },
+      // Project line: names on the left, state, time and this turn's output
+      // tokens ("1:55 ↓6.5K", like Claude Code's spinner) on the right, so
+      // the lines below get the full width.
       el("div", { class: "l1" }, el("span", { class: "project" }, s.project || "—"),
         s.title ? el("span", { class: "sname" }, s.title) : null,
         el("span", { class: `prov ${s.p}` }, PROVIDER_NAME[s.p] || s.p),
-        s.agents_total ? el("span", { class: "subs" }, `子任务 ${s.agents_active || s.agents_total}`) : null),
+        s.agents_total ? el("span", { class: "subs" }, `子任务 ${s.agents_active || s.agents_total}`) : null,
+        el("span", { class: "end" },
+          el("span", { class: "label" }, s.label),
+          el("span", { class: "time mono" }, scrRowTime(s, now),
+            s.turn_output ? el("span", { class: "tok" }, ` ↓${fmtTokens(s.turn_output)}`) : null))),
       tall ? el("span", { class: "msg" }, lines[0]) : null,
-      el("span", { class: "detail" }, lines[lines.length - 1] || "\u00a0")),
-    el("div", { class: "end" },
-      el("span", { class: "label" }, s.label),
-      el("span", { class: "time mono" }, scrTime(s.state, s.since, now))),
+      lines.length ? el("span", { class: "detail" }, lines[lines.length - 1]) : null),
   );
   const subs = (s.agents || []).map((a) => el("div", { class: `scr-sub ${a.state}` },
     el("span", { class: "dot" }, scrIcon(SCR_ICONS[a.state] ? a.state : "idle", 14, 2.6)),

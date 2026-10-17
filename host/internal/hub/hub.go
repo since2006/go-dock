@@ -43,6 +43,12 @@ type entry struct {
 	agents  map[string]*model.Agent
 	pending []launch
 	tools   []model.ToolCount
+
+	// The current turn's clock, paused while the session or one of its
+	// agents waits for the user.
+	turnStart, turnEnd time.Time
+	paused             time.Duration // finished waits this turn
+	pauseStart         time.Time     // set while waiting
 }
 
 // launch is a subagent the session started whose id is not known yet.
@@ -131,8 +137,9 @@ func (h *Hub) observe(o model.Observation) bool {
 	}
 	if o.NewTurn {
 		e.tools = nil
-		s.Message = ""
+		s.Message, s.TurnOutput = "", 0
 	}
+	effBefore := e.effective()
 	if o.ToolDone != "" {
 		e.countTool(o.ToolDone)
 	}
@@ -143,8 +150,8 @@ func (h *Hub) observe(o model.Observation) bool {
 		if o.Title != "" {
 			s.Title = o.Title
 		}
-		if o.HasMessage {
-			s.Message = o.Message
+		if o.Turn != nil {
+			s.Message, s.TurnOutput = o.Turn.Message, o.Turn.Output
 		}
 		if o.State != "" && !o.At.Before(e.stateAt) {
 			if o.State != s.State {
@@ -158,6 +165,7 @@ func (h *Hub) observe(o model.Observation) bool {
 			e.stateAt = o.At
 		}
 	}
+	e.clock(effBefore, e.effective(), o.NewTurn, o.At)
 	// Any state news, the session's or an agent's, shows the session lives.
 	if (o.State != "" || o.End) && o.At.After(s.Updated) {
 		s.Updated = o.At
@@ -227,6 +235,61 @@ func (e *entry) drop(desc string) {
 			return
 		}
 	}
+}
+
+// effective is Session.Effective for an entry, whose Session.Agents is only
+// filled in by Snapshot.
+func (e *entry) effective() model.State {
+	st := e.s.State
+	for _, a := range e.agents {
+		if a.State.Active() && a.State.Priority() < st.Priority() {
+			st = a.State
+		}
+	}
+	return st
+}
+
+// clock moves the turn clock for a change of the effective state. A turn
+// starts with a prompt or when a finished session gets busy, and ends when
+// it is finished again; waits for approval or input do not count.
+func (e *entry) clock(before, after model.State, newTurn bool, at time.Time) {
+	busy := func(st model.State) bool {
+		return st == model.StateRunning || st == model.StateApproval || st == model.StateInput
+	}
+	waiting := after == model.StateApproval || after == model.StateInput
+	if newTurn || (!busy(before) && busy(after)) {
+		e.turnStart, e.turnEnd, e.paused, e.pauseStart = at, time.Time{}, 0, time.Time{}
+	}
+	if e.turnStart.IsZero() {
+		return
+	}
+	if !e.pauseStart.IsZero() && !waiting {
+		if at.After(e.pauseStart) {
+			e.paused += at.Sub(e.pauseStart)
+		}
+		e.pauseStart = time.Time{}
+	}
+	if waiting && e.pauseStart.IsZero() {
+		e.pauseStart = at
+	}
+	if busy(before) && !busy(after) {
+		e.turnEnd = at
+	}
+}
+
+// turnSecs is the turn's work time at now.
+func (e *entry) turnSecs(now time.Time) int64 {
+	if e.turnStart.IsZero() {
+		return 0
+	}
+	end := now
+	if !e.turnEnd.IsZero() {
+		end = e.turnEnd
+	}
+	if !e.pauseStart.IsZero() && e.pauseStart.Before(end) {
+		end = e.pauseStart
+	}
+	return int64(max(end.Sub(e.turnStart)-e.paused, 0) / time.Second)
 }
 
 func (e *entry) countTool(name string) {
@@ -353,6 +416,7 @@ func (h *Hub) Snapshot() model.Snapshot {
 	for _, e := range h.sessions {
 		s := e.s
 		s.Tools = append([]model.ToolCount(nil), e.tools...)
+		s.TurnSecs = e.turnSecs(now)
 		for _, a := range e.agents {
 			s.Agents = append(s.Agents, *a)
 		}

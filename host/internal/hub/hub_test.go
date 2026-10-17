@@ -68,20 +68,63 @@ func TestSessionKeepsStartDirectory(t *testing.T) {
 func TestSessionMessage(t *testing.T) {
 	now := t0
 	h := newTestHub(&now)
-	msg := func(text string) model.Observation {
-		return model.Observation{Provider: model.ProviderClaude, SessionID: "a", Message: text, HasMessage: true}
-	}
 	h.Observe(obs("a", model.StateRunning, t0, "Bash: ls"))
-	h.Observe(msg("先看看目录结构"))
-	h.Observe(obs("a", model.StateRunning, t0.Add(time.Second), "Read: main.go")) // no HasMessage: kept
-	if s := h.Snapshot().Sessions[0]; s.Message != "先看看目录结构" {
-		t.Fatalf("message = %q", s.Message)
+	h.Observe(model.Observation{Provider: model.ProviderClaude, SessionID: "a", Turn: &model.Turn{Message: "先看看目录结构", Output: 6500}})
+	h.Observe(obs("a", model.StateRunning, t0.Add(time.Second), "Read: main.go")) // no Turn: kept
+	if s := h.Snapshot().Sessions[0]; s.Message != "先看看目录结构" || s.TurnOutput != 6500 {
+		t.Fatalf("turn = %q %d", s.Message, s.TurnOutput)
 	}
 	turn := obs("a", model.StateRunning, t0.Add(2*time.Second), "")
 	turn.NewTurn = true
 	h.Observe(turn)
-	if s := h.Snapshot().Sessions[0]; s.Message != "" {
-		t.Fatalf("new turn kept the old reply: %q", s.Message)
+	if s := h.Snapshot().Sessions[0]; s.Message != "" || s.TurnOutput != 0 {
+		t.Fatalf("new turn kept the old one: %q %d", s.Message, s.TurnOutput)
+	}
+}
+
+// The turn clock counts like Claude Code's spinner: waits for the user do
+// not count.
+func TestTurnClock(t *testing.T) {
+	now := t0
+	h := newTestHub(&now)
+	secs := func() int64 { return h.Snapshot().Sessions[0].TurnSecs }
+	at := func(d time.Duration) time.Time { now = t0.Add(d); return now }
+
+	prompt := obs("a", model.StateRunning, at(0), "")
+	prompt.NewTurn = true
+	h.Observe(prompt)
+	h.Observe(obs("a", model.StateApproval, at(2*time.Minute), "Bash: rm -rf dist"))
+	at(7 * time.Minute)
+	if got := secs(); got != 120 {
+		t.Fatalf("waiting for approval: %ds, want the clock held at 120", got)
+	}
+	h.Observe(obs("a", model.StateRunning, at(12*time.Minute), "Bash: rm -rf dist"))
+	at(13 * time.Minute)
+	if got := secs(); got != 180 {
+		t.Fatalf("after approval: %ds, want 120+60", got)
+	}
+
+	// The session's own turn ends while a background agent works: still
+	// counting, until the agent is done too.
+	h.Observe(model.Observation{Provider: model.ProviderClaude, SessionID: "a", AgentID: "x", AgentType: "Explore", State: model.StateRunning, At: at(13 * time.Minute)})
+	h.Observe(obs("a", model.StateDone, at(14*time.Minute), ""))
+	at(15 * time.Minute)
+	if got := secs(); got != 300 {
+		t.Fatalf("agent still working: %ds, want 300", got)
+	}
+	h.Observe(model.Observation{Provider: model.ProviderClaude, SessionID: "a", AgentID: "x", State: model.StateDone, At: at(16 * time.Minute)})
+	at(20 * time.Minute)
+	if got := secs(); got != 360 {
+		t.Fatalf("finished turn: %ds, want it frozen at 360", got)
+	}
+
+	// The next prompt starts from zero.
+	next := obs("a", model.StateRunning, at(30*time.Minute), "")
+	next.NewTurn = true
+	h.Observe(next)
+	at(30*time.Minute + 5*time.Second)
+	if got := secs(); got != 5 {
+		t.Fatalf("new turn: %ds, want 5", got)
 	}
 }
 

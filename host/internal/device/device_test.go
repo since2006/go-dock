@@ -502,9 +502,9 @@ func TestFrameTitleAndDetail(t *testing.T) {
 func TestFrameMessage(t *testing.T) {
 	t0 := time.Unix(1792200000, 0)
 	ss := model.Session{ID: "claude:x", Provider: model.ProviderClaude, SessionID: "x", Project: "shellr", State: model.StateRunning,
-		Title: "detail", Message: "先把两张截图的像素颜色取出来，对比 ShellRS 的配色和渲染。", Detail: "Finding the red colon's color", Since: t0}
+		Title: "detail", Message: "先把两张截图的像素颜色取出来，对比 ShellRS 的配色和渲染。", Detail: "Finding the red colon's color", TurnOutput: 6500, Since: t0}
 	f := BuildFrame(model.Snapshot{Now: t0, Sessions: []model.Session{ss}}, Options{MaxSessions: 12}, 1)
-	if s := f.Sessions[0]; s.Title != "detail" || s.Msg != ss.Message || s.Detail != ss.Detail {
+	if s := f.Sessions[0]; s.Title != "detail" || s.Msg != ss.Message || s.Detail != ss.Detail || s.TurnOutput != 6500 {
 		t.Fatalf("frame = %+v", s)
 	}
 }

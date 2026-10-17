@@ -35,8 +35,12 @@ type transcripts struct {
 
 // sessionInfo is what a main transcript says about its session: the two
 // titles Claude Code keeps (the /rename one wins over the generated one)
-// and the first line of the assistant's latest text in the current turn.
-type sessionInfo struct{ ai, custom, msg string }
+// and the current turn.
+type sessionInfo struct {
+	ai, custom string
+	turn       model.Turn
+	outputs    map[string]int64 // message id -> output tokens, this turn
+}
 
 func (n *sessionInfo) title() string {
 	if n.custom != "" {
@@ -52,10 +56,10 @@ type messageUsage struct {
 }
 
 type pollResult struct {
-	changed  bool
-	titles   map[string]string // sessionID -> title, for sessions whose title lines were read
-	messages map[string]string // sessionID -> message, for sessions whose message changed
-	agents   []model.Observation
+	changed bool
+	titles  map[string]string     // sessionID -> title, for sessions whose title lines were read
+	turns   map[string]model.Turn // sessionID -> current turn, for sessions whose turn changed
+	agents  []model.Observation
 }
 
 func newTranscripts(root string, prices *pricing.Table) *transcripts {
@@ -70,7 +74,7 @@ func (t *transcripts) setPrices(p *pricing.Table) {
 
 // poll reads new lines. With rescan it also looks for new files.
 func (t *transcripts) poll(rescan bool, now time.Time) pollResult {
-	res := pollResult{titles: map[string]string{}, messages: map[string]string{}}
+	res := pollResult{titles: map[string]string{}, turns: map[string]model.Turn{}}
 	paths := t.tailer.Paths()
 	if rescan {
 		paths = jsonl.Walk(t.root, window, func(p string) bool { return strings.HasSuffix(p, ".jsonl") })
@@ -155,21 +159,31 @@ func (t *transcripts) line(b []byte, res *pollResult, agent *agentTrack) bool {
 	case "user":
 		// A new prompt starts a turn: the previous reply no longer applies.
 		if agent == nil && !l.IsMeta && !l.IsSidechain && userPrompt(l.Message.Content) {
-			t.setMessage(res, l.SessionID, "")
+			t.updateTurn(res, l.SessionID, func(n *sessionInfo) { n.turn, n.outputs = model.Turn{}, nil })
 		}
 		return false
 	case "assistant":
 	default:
 		return false
 	}
+	us := l.Message.Usage
 	if agent != nil {
 		agent.toolUse(l.Timestamp, l.Message.Content)
 	} else if !l.IsSidechain {
-		if msg := assistantText(l.Message.Content); msg != "" {
-			t.setMessage(res, l.SessionID, msg)
-		}
+		t.updateTurn(res, l.SessionID, func(n *sessionInfo) {
+			if msg := assistantText(l.Message.Content); msg != "" {
+				n.turn.Message = msg
+			}
+			// Lines of one response repeat its usage; count each id once.
+			if id := l.Message.ID; us != nil && id != "" && us.Output > n.outputs[id] {
+				if n.outputs == nil {
+					n.outputs = map[string]int64{}
+				}
+				n.turn.Output += us.Output - n.outputs[id]
+				n.outputs[id] = us.Output
+			}
+		})
 	}
-	us := l.Message.Usage
 	if us == nil || l.Message.ID == "" || l.Timestamp.IsZero() {
 		return false
 	}
@@ -205,13 +219,15 @@ func (t *transcripts) session(id string) *sessionInfo {
 	return n
 }
 
-func (t *transcripts) setMessage(res *pollResult, id, msg string) {
+func (t *transcripts) updateTurn(res *pollResult, id string, f func(*sessionInfo)) {
 	if id == "" {
 		return
 	}
-	if n := t.session(id); n.msg != msg {
-		n.msg = msg
-		res.messages[id] = msg
+	n := t.session(id)
+	before := n.turn
+	f(n)
+	if n.turn != before {
+		res.turns[id] = n.turn
 	}
 }
 

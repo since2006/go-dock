@@ -31,18 +31,18 @@ type Provider struct {
 	sessions    *sessionsWatcher
 	transcripts *transcripts
 
-	mu       sync.Mutex
-	titles   map[string]string // sessionID -> title from transcripts
-	messages map[string]string // sessionID -> assistant's latest text this turn
+	mu     sync.Mutex
+	titles map[string]string     // sessionID -> title from transcripts
+	turns  map[string]model.Turn // sessionID -> current turn from transcripts
 }
 
 func New(home string, sink providers.Sink, prices *pricing.Table, log *slog.Logger) *Provider {
 	p := &Provider{
-		home:     home,
-		sink:     sink,
-		log:      log.With("provider", "claude"),
-		titles:   map[string]string{},
-		messages: map[string]string{},
+		home:   home,
+		sink:   sink,
+		log:    log.With("provider", "claude"),
+		titles: map[string]string{},
+		turns:  map[string]model.Turn{},
 	}
 	p.sessions = newSessionsWatcher(filepath.Join(home, "sessions"))
 	p.transcripts = newTranscripts(filepath.Join(home, "projects"), prices)
@@ -102,10 +102,10 @@ func (p *Provider) fromTranscript(o *model.Observation) {
 		o.Title = p.titles[o.SessionID]
 	}
 	if o.NewTurn {
-		p.messages[o.SessionID] = "" // the reply of the previous turn is stale
+		p.turns[o.SessionID] = model.Turn{} // the previous turn is over
 	}
-	if msg, ok := p.messages[o.SessionID]; ok && !o.HasMessage {
-		o.Message, o.HasMessage = msg, true
+	if turn, ok := p.turns[o.SessionID]; ok && o.Turn == nil {
+		o.Turn = &turn
 	}
 }
 
@@ -120,13 +120,13 @@ func (p *Provider) pollTranscripts(rescan bool) {
 			p.sink.Observe(model.Observation{Provider: P, SessionID: id, Title: title})
 		}
 	}
-	for id, msg := range res.messages {
+	for id, turn := range res.turns {
 		p.mu.Lock()
-		old, known := p.messages[id]
-		p.messages[id] = msg
+		old, known := p.turns[id]
+		p.turns[id] = turn
 		p.mu.Unlock()
-		if !known || old != msg {
-			p.sink.Observe(model.Observation{Provider: P, SessionID: id, Message: msg, HasMessage: true})
+		if !known || old != turn {
+			p.sink.Observe(model.Observation{Provider: P, SessionID: id, Turn: &turn})
 		}
 	}
 	// A rescan also republishes so totals roll over at midnight.
