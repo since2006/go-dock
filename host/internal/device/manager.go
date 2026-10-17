@@ -39,15 +39,21 @@ const (
 
 // Status is the link state shown on the web UI.
 type Status struct {
-	State     string    `json:"state"`
-	Port      string    `json:"port,omitempty"`
-	Firmware  string    `json:"firmware,omitempty"`
-	Width     int       `json:"width,omitempty"`
-	Height    int       `json:"height,omitempty"`
-	LastSent  time.Time `json:"last_sent,omitzero"`
-	LastHeard time.Time `json:"last_heard,omitzero"`
-	Error     string    `json:"error,omitempty"`
-	Sent      uint64    `json:"sent"`
+	State    string `json:"state"`
+	Port     string `json:"port,omitempty"`
+	Firmware string `json:"firmware,omitempty"`
+	// OTA: the firmware can be updated over the link.
+	OTA bool `json:"ota,omitempty"`
+	// Incompatible: the device speaks another protocol version; it gets no
+	// snapshots but can still be updated.
+	Incompatible bool        `json:"incompatible,omitempty"`
+	Width        int         `json:"width,omitempty"`
+	Height       int         `json:"height,omitempty"`
+	LastSent     time.Time   `json:"last_sent,omitzero"`
+	LastHeard    time.Time   `json:"last_heard,omitzero"`
+	Error        string      `json:"error,omitempty"`
+	Sent         uint64      `json:"sent"`
+	Flash        FlashStatus `json:"flash,omitzero"` // kept across reconnects
 }
 
 // Manager finds the device, keeps the serial link up and pushes snapshots.
@@ -55,37 +61,57 @@ type Manager struct {
 	src         SnapshotSource
 	hostVersion string
 	log         *slog.Logger
+	onChange    func()
 
 	// Replaceable in tests.
-	list       func() ([]PortInfo, error)
-	open       func(name string) (io.ReadWriteCloser, error)
-	heartbeat  time.Duration
-	helloEvery time.Duration
-	rescan     time.Duration
-	debounce   time.Duration
+	list         func() ([]PortInfo, error)
+	open         func(name string) (io.ReadWriteCloser, error)
+	heartbeat    time.Duration
+	helloEvery   time.Duration
+	rescan       time.Duration
+	debounce     time.Duration
+	writeTimeout time.Duration
+	// Firmware update: waits for the device to erase (otaReady), write a
+	// chunk (otaAck) and check the image (otaDone); for the serve loop to
+	// take the image (otaPickup); and for the new firmware to say hello
+	// (otaReboot), ignoring the old one for otaSettle after it accepted.
+	otaReady, otaAck, otaDone, otaPickup, otaReboot, otaSettle time.Duration
 
-	kick chan struct{}
+	kick     chan struct{}
+	flashReq chan flashJob
 
-	mu     sync.Mutex
-	opts   Options
-	status Status
-	seq    uint64
+	mu          sync.Mutex
+	opts        Options
+	status      Status
+	seq         uint64
+	flashDoneAt time.Time
 }
 
-func NewManager(src SnapshotSource, opts Options, hostVersion string, log *slog.Logger) *Manager {
+// NewManager creates the link manager. onChange, if set, is called when a
+// firmware update makes progress.
+func NewManager(src SnapshotSource, opts Options, hostVersion string, log *slog.Logger, onChange func()) *Manager {
 	return &Manager{
-		src:         src,
-		hostVersion: hostVersion,
-		log:         log.With("component", "device"),
-		list:        ListPorts,
-		open:        openSerial,
-		heartbeat:   5 * time.Second,
-		helloEvery:  5 * time.Second,
-		rescan:      2 * time.Second,
-		debounce:    200 * time.Millisecond,
-		kick:        make(chan struct{}, 1),
-		opts:        opts,
-		status:      Status{State: StateSearching},
+		src:          src,
+		hostVersion:  hostVersion,
+		log:          log.With("component", "device"),
+		onChange:     onChange,
+		list:         ListPorts,
+		open:         openSerial,
+		heartbeat:    5 * time.Second,
+		helloEvery:   5 * time.Second,
+		rescan:       2 * time.Second,
+		debounce:     200 * time.Millisecond,
+		writeTimeout: 10 * time.Second,
+		otaReady:     60 * time.Second,
+		otaAck:       10 * time.Second,
+		otaDone:      30 * time.Second,
+		otaPickup:    5 * time.Second,
+		otaReboot:    60 * time.Second,
+		otaSettle:    5 * time.Second,
+		kick:         make(chan struct{}, 1),
+		flashReq:     make(chan flashJob),
+		opts:         opts,
+		status:       Status{State: StateSearching},
 	}
 }
 
@@ -145,13 +171,11 @@ func (m *Manager) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		opts := m.options()
 		if !opts.Enabled {
-			m.update(func(s *Status) { *s = Status{State: StateDisabled, Sent: s.Sent} })
+			m.update(func(s *Status) { *s = Status{State: StateDisabled, Sent: s.Sent, Flash: s.Flash} })
 			m.wait(ctx, 0)
 			continue
 		}
-		m.update(func(s *Status) {
-			s.State, s.Port, s.Firmware, s.Width, s.Height = StateSearching, "", "", 0, 0
-		})
+		m.update(unlinked)
 		name, err := m.pick(opts.Port)
 		if err != nil {
 			m.setError(err)
@@ -166,13 +190,16 @@ func (m *Manager) Run(ctx context.Context) {
 		}
 		kicked := m.serve(ctx, name, conn)
 		conn.Close()
-		m.update(func(s *Status) {
-			s.State, s.Port, s.Firmware, s.Width, s.Height = StateSearching, "", "", 0, 0
-		})
+		m.update(unlinked)
 		if !kicked {
 			m.wait(ctx, m.rescan)
 		}
 	}
+}
+
+// unlinked forgets the device while searching for one.
+func unlinked(s *Status) {
+	s.State, s.Port, s.Firmware, s.OTA, s.Incompatible, s.Width, s.Height = StateSearching, "", "", false, false, 0, 0
 }
 
 // wait sleeps for d (forever when d is 0) or until a reconnect request.
@@ -233,7 +260,7 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 		m.setError(fmt.Errorf("%s: %w", name, err))
 		return false
 	}
-	if _, err := conn.Write(EncodeHello(m.hostVersion)); err != nil {
+	if err := m.write(conn, EncodeHello(m.hostVersion)); err != nil {
 		return fail(err)
 	}
 	if err := m.sendSnapshot(conn); err != nil {
@@ -251,8 +278,15 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 			m.update(func(s *Status) { s.LastHeard = time.Now() })
 			switch msg.T {
 			case "hello":
+				if m.flashed(msg.FW) {
+					continue // the old firmware, about to restart
+				}
+				// Firmware and update support count even when the protocol
+				// does not match: that is what an update fixes.
+				m.update(func(s *Status) { s.Firmware, s.OTA = msg.FW, msg.OTA > 0 })
 				if msg.Proto != ProtoVersion {
 					incompatible = true
+					m.update(func(s *Status) { s.Incompatible = true })
 					m.setError(fmt.Errorf("设备协议版本 %d 与主机 %d 不兼容，已停止发送", msg.Proto, ProtoVersion))
 					continue
 				}
@@ -262,7 +296,7 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 				}
 				ready = true
 				m.update(func(s *Status) {
-					s.State, s.Firmware, s.Width, s.Height, s.Error = StateReady, msg.FW, msg.W, msg.H, ""
+					s.State, s.Incompatible, s.Width, s.Height, s.Error = StateReady, false, msg.W, msg.H, ""
 				})
 				if err := m.sendSnapshot(conn); err != nil {
 					return fail(err)
@@ -292,7 +326,28 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 			}
 		case <-hello.C:
 			if !ready && !incompatible {
-				if _, err := conn.Write(EncodeHello(m.hostVersion)); err != nil {
+				if err := m.write(conn, EncodeHello(m.hostVersion)); err != nil {
+					return fail(err)
+				}
+			}
+		case job := <-m.flashReq:
+			if !(ready || incompatible) || !m.Status().OTA {
+				m.flashFailed(errors.New("设备未就绪"))
+				continue
+			}
+			restarting, err := m.flash(sctx, conn, msgs, readErr, job)
+			switch {
+			case errors.Is(err, errKicked):
+				return true
+			case ctx.Err() != nil:
+				return false
+			case err != nil:
+				return fail(err)
+			case restarting:
+				// Say hello until the new firmware answers.
+				ready = false
+			case !incompatible:
+				if err := m.sendSnapshot(conn); err != nil {
 					return fail(err)
 				}
 			}
@@ -300,7 +355,7 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 	}
 }
 
-func (m *Manager) sendSnapshot(w io.Writer) error {
+func (m *Manager) sendSnapshot(conn io.WriteCloser) error {
 	m.mu.Lock()
 	seq := m.seq + 1
 	opts := m.opts
@@ -310,7 +365,7 @@ func (m *Manager) sendSnapshot(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, err := w.Write(line); err != nil {
+	if err := m.write(conn, line); err != nil {
 		return err
 	}
 	m.mu.Lock()

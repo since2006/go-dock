@@ -9,6 +9,7 @@
 #include "fonts.h"
 #include "link.h"
 #include "lvgl.h"
+#include "ota.h"
 #include "ui.h"
 
 #define W 600
@@ -37,6 +38,23 @@ bool link_take_snapshot(dock_snapshot_t *out, uint32_t *version, int64_t *receiv
 
 int64_t link_last_rx_us(void) { return s_last_rx_us; }
 bool link_incompatible(void) { return false; }
+
+static ota_state_t s_ota;
+static int s_ota_pct;
+
+ota_state_t ota_status(int *percent, const char **error)
+{
+    if (percent) {
+        *percent = s_ota_pct;
+    }
+    if (error) {
+        *error = "写入失败（ESP_ERR_FLASH_OP_FAIL）";
+    }
+    return s_ota;
+}
+
+const char *ota_version(void) { return "0.1.4"; }
+const char *ota_target(void) { return "0.1.5"; }
 
 // Fonts load from the TTF files instead of embedded binaries.
 static void *load(const char *name, size_t *size)
@@ -139,6 +157,12 @@ static dock_session_t *last(void) { return &s_snap.sessions[s_snap.count - 1]; }
 static void title(const char *t) { snprintf(last()->title, sizeof(last()->title), "%s", t); }
 static void detail(const char *t) { snprintf(last()->detail, sizeof(last()->detail), "%s", t); }
 static void msg(const char *t) { snprintf(last()->msg, sizeof(last()->msg), "%s", t); }
+
+static void turn(int secs, int64_t output)
+{
+    last()->turn_secs = secs;
+    last()->turn_output = output;
+}
 
 static void agent(dock_state_t st, const char *type, const char *text, int ago)
 {
@@ -271,6 +295,34 @@ int main(int argc, char **argv)
     send();
     run(2 * SEC);
     save(out, "6-message");
+
+    // Turn clock and output tokens on the project line: running counts on
+    // from turn_secs, approval holds it; a row with no text is centred.
+    reset();
+    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 41, 4 * 3600 + 33 * 60);
+    window(&s_snap.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 14 * 3600);
+    add(DOCK_APPROVAL, DOCK_CLAUDE, "api-svc", "需授权", "Bash: rm -rf dist", 15);
+    turn(42, 1200);
+    detail("Bash: rm -rf dist");
+    add(DOCK_RUNNING, DOCK_CLAUDE, "shellrs", "进行中", "Finding the red colon's color", 125);
+    title("detail");
+    turn(125, 6500);
+    msg("先把两张截图的像素颜色取出来，对比 ShellRS 和 iTerm2 的配色、字体渲染和行高。");
+    detail("Finding the red colon's color in both screenshots and comparing them");
+    add(DOCK_DONE, DOCK_CODEX, "notes", "已完成", "", 900);
+    send();
+    run(2 * SEC);
+    save(out, "7-turn");
+
+    // A firmware update from go-dock, then one that failed.
+    s_ota = OTA_RECEIVING;
+    s_ota_pct = 45;
+    run(1 * SEC);
+    save(out, "8-ota");
+    s_ota = OTA_FAILED;
+    run(1 * SEC);
+    save(out, "9-ota-failed");
+    s_ota = OTA_IDLE;
 
     // Host went away two minutes ago.
     reset();

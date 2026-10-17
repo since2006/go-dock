@@ -250,7 +250,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 func newTestManager(t *testing.T, src SnapshotSource, logs io.Writer) (*Manager, chan *fakeDevice) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	m := NewManager(src, Options{Enabled: true, Port: "auto", MaxSessions: 12}, "0.1.0", log)
+	m := NewManager(src, Options{Enabled: true, Port: "auto", MaxSessions: 12}, "0.1.0", log, nil)
 	devices := make(chan *fakeDevice, 4)
 	m.list = func() ([]PortInfo, error) {
 		return []PortInfo{

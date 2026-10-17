@@ -10,6 +10,7 @@
 #include "link.h"
 #include "lvgl.h"
 #include "model.h"
+#include "ota.h"
 #include "sdkconfig.h"
 
 #define SCR_W 600
@@ -61,10 +62,12 @@ static const struct {
 };
 
 // Task list layout, shared with the web preview (docs/protocol-v1.md
-// §7.1): the project line carries the session name; below it a session row
-// is 80 px with the assistant's latest text and an action line, 60 px with
-// one; each subagent adds a 32 px row under it; a session and its
-// subagents never split across pages.
+// §7.1): the project line carries the session name on the left and the
+// state, time and turn tokens on the right; the lines below span the full
+// width. A session row is 80 px with the assistant's latest text and an
+// action line, 60 px with one or none (then the project line is centred);
+// each subagent adds a 32 px row under it; a session and its subagents
+// never split across pages.
 #define MAIN_H 60
 #define MAIN_H_TALL 80
 #define SUB_H 32
@@ -76,15 +79,16 @@ static const struct {
 #define MAX_PAGES 32
 #define CHIP 40
 #define MID_X (12 + CHIP + 12)
-#define END_W 110 // state label and time column
-#define MID_W (LIST_W - 14 - END_W - 8 - MID_X) // project line
+#define END_X (LIST_W - 14)     // right edge of the row's text
+#define LINE_W (END_X - MID_X) // lines under the project line
 
 typedef struct {
     lv_obj_t *reset, *window, *pct, *bar;
 } meter_t;
 
 typedef struct {
-    lv_obj_t *obj, *chip, *icon, *spinner, *project, *name, *prov, *badge, *badge_text, *msg, *detail, *label, *time;
+    lv_obj_t *obj, *chip, *icon, *spinner, *project, *name, *prov, *badge, *badge_text, *label, *time, *tok, *msg,
+        *detail;
 } row_t;
 
 typedef struct {
@@ -103,7 +107,7 @@ static struct {
     sub_t subs[MAX_SUB];
     lv_obj_t *pager, *dots[MAX_DOTS];
     lv_obj_t *empty;
-    lv_obj_t *overlay, *ov_title, *ov_sub, *ov_note;
+    lv_obj_t *overlay, *ov_icon, *ov_title, *ov_sub, *ov_note, *ov_bar, *ov_ver;
 } ui;
 
 static dock_snapshot_t *s_snap;
@@ -167,6 +171,20 @@ static void set_color(lv_obj_t *l, uint32_t c)
     lv_obj_set_style_text_color(l, lv_color_hex(c), 0);
 }
 
+// Distance from a label's top to its text baseline.
+static int ascent(lv_obj_t *l)
+{
+    const lv_font_t *f = lv_obj_get_style_text_font(l, 0);
+    return lv_font_get_line_height(f) - f->base_line;
+}
+
+// Places a label at x with its baseline at y, so text of different sizes on
+// one line sits on the same baseline.
+static void on_baseline(lv_obj_t *l, int x, int y)
+{
+    lv_obj_set_pos(l, x, y - ascent(l));
+}
+
 static int64_t host_now(void)
 {
     if (!s_have) {
@@ -213,6 +231,17 @@ static bool is_active(dock_state_t st)
     return st == DOCK_APPROVAL || st == DOCK_INPUT || st == DOCK_ERROR || st == DOCK_RUNNING;
 }
 
+// "1:05", or "1h05m" from an hour on.
+static void fmt_duration(char *buf, size_t n, int64_t sec)
+{
+    if (sec >= 3600) {
+        snprintf(buf, n, "%dh%02dm", (int)(sec / 3600), (int)(sec % 3600 / 60));
+    } else {
+        snprintf(buf, n, "%d:%02d", (int)(sec / 60), (int)(sec % 60));
+    }
+}
+
+// Running states count up; finished ones say how long ago.
 static void fmt_elapsed(char *buf, size_t n, dock_state_t state, int64_t since, int64_t now)
 {
     int64_t sec = now - since;
@@ -220,11 +249,7 @@ static void fmt_elapsed(char *buf, size_t n, dock_state_t state, int64_t since, 
         sec = 0;
     }
     if (is_active(state)) {
-        if (sec >= 3600) {
-            snprintf(buf, n, "%dh%02dm", (int)(sec / 3600), (int)(sec % 3600 / 60));
-        } else {
-            snprintf(buf, n, "%d:%02d", (int)(sec / 60), (int)(sec % 60));
-        }
+        fmt_duration(buf, n, sec);
     } else if (sec < 60) {
         snprintf(buf, n, "刚刚");
     } else if (sec < 3600) {
@@ -254,9 +279,40 @@ static void fmt_tokens(char *buf, size_t n, int64_t v)
     }
 }
 
+// A session row's time: while the turn runs or waits for the user, its work
+// time as Claude Code's spinner counts it (ticking on from turn_secs while
+// running, held while waiting); otherwise fmt_elapsed.
+static void fmt_row_time(char *buf, size_t n, const dock_session_t *s, int64_t now)
+{
+    bool turn = s->state == DOCK_RUNNING || s->state == DOCK_APPROVAL || s->state == DOCK_INPUT;
+    if (!turn || s->turn_secs <= 0) {
+        fmt_elapsed(buf, n, s->state, s->since, now);
+        return;
+    }
+    int64_t sec = s->turn_secs;
+    if (s->state == DOCK_RUNNING && now > s_snap->now) {
+        sec += now - s_snap->now;
+    }
+    fmt_duration(buf, n, sec);
+}
+
 static bool is_tall(const dock_session_t *s)
 {
     return s->msg[0] && s->detail[0];
+}
+
+// The one line under the project line of a short row: msg or detail,
+// whichever there is; older hosts only send text, which may repeat the
+// session name. "" leaves the project line alone.
+static const char *only_line(const dock_session_t *s)
+{
+    if (s->msg[0]) {
+        return s->msg;
+    }
+    if (s->detail[0]) {
+        return s->detail;
+    }
+    return strcmp(s->text, s->title) ? s->text : "";
 }
 
 // Splits the sessions into pages by height, keeping each session together
@@ -405,15 +461,13 @@ static void build_row(lv_obj_t *p, row_t *r)
     lv_obj_set_style_pad_ver(r->badge, 1, 0);
     r->badge_text = text(r->badge, font_get(FONT_BOLD, 13), 0xC9C9C4);
 
-    r->msg = line(r->obj, font_get(FONT_REGULAR, 15), 0xC9C9C4, MID_W);
-    r->detail = line(r->obj, font_get(FONT_REGULAR, 16), C_TEXT2, MID_W);
-
+    // State, time and " ↓6.5K" at the right end of the project line.
     r->label = text(r->obj, font_get(FONT_BOLD, 18), C_TEXT);
-    lv_obj_set_width(r->label, END_W);
-    lv_obj_set_style_text_align(r->label, LV_TEXT_ALIGN_RIGHT, 0);
     r->time = text(r->obj, font_get(FONT_MONO, 15), C_TEXT3);
-    lv_obj_set_width(r->time, END_W);
-    lv_obj_set_style_text_align(r->time, LV_TEXT_ALIGN_RIGHT, 0);
+    r->tok = text(r->obj, font_get(FONT_MONO, 15), C_TEXT5);
+
+    r->msg = line(r->obj, font_get(FONT_REGULAR, 15), 0xC9C9C4, LINE_W);
+    r->detail = line(r->obj, font_get(FONT_REGULAR, 16), C_TEXT2, LINE_W);
 }
 
 // Subagent row, indented under its session.
@@ -500,21 +554,38 @@ static void build_tasks(lv_obj_t *p)
     }
 }
 
+// The card over the dimmed screen: why there is nothing current to show,
+// or a firmware update's progress; the firmware version at the bottom.
 static void build_overlay(lv_obj_t *p)
 {
-    ui.overlay = box(p, 0, 0, 380, 180, 0x161617, 22);
+    ui.overlay = box(p, 0, 0, 380, 204, 0x161617, 22);
     lv_obj_center(ui.overlay);
     lv_obj_set_style_border_width(ui.overlay, 1, 0);
     lv_obj_set_style_border_color(ui.overlay, lv_color_hex(0x2C2C2E), 0);
-    lv_obj_t *icon = text(ui.overlay, &lv_font_montserrat_28, C_RED);
-    lv_label_set_text(icon, LV_SYMBOL_USB);
-    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 18);
+    ui.ov_icon = text(ui.overlay, &lv_font_montserrat_28, C_RED);
+    lv_obj_align(ui.ov_icon, LV_ALIGN_TOP_MID, 0, 18);
     ui.ov_title = text(ui.overlay, font_get(FONT_BOLD, 28), C_TEXT);
     lv_obj_align(ui.ov_title, LV_ALIGN_TOP_MID, 0, 54);
-    ui.ov_sub = text(ui.overlay, font_get(FONT_REGULAR, 17), C_TEXT2);
+    ui.ov_sub = line(ui.overlay, font_get(FONT_REGULAR, 17), C_TEXT2, 340);
+    lv_obj_set_style_text_align(ui.ov_sub, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(ui.ov_sub, LV_ALIGN_TOP_MID, 0, 100);
     ui.ov_note = text(ui.overlay, font_get(FONT_REGULAR, 15), C_TEXT4);
     lv_obj_align(ui.ov_note, LV_ALIGN_TOP_MID, 0, 130);
+
+    ui.ov_bar = lv_bar_create(ui.overlay);
+    lv_obj_remove_style_all(ui.ov_bar);
+    lv_obj_set_size(ui.ov_bar, 300, 8);
+    lv_obj_align(ui.ov_bar, LV_ALIGN_TOP_MID, 0, 138);
+    lv_obj_set_style_bg_color(ui.ov_bar, lv_color_hex(C_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(ui.ov_bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(ui.ov_bar, 4, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(ui.ov_bar, lv_color_hex(C_GREEN), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(ui.ov_bar, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(ui.ov_bar, 4, LV_PART_INDICATOR);
+    lv_bar_set_range(ui.ov_bar, 0, 100);
+
+    ui.ov_ver = text(ui.overlay, font_get(FONT_REGULAR, 13), C_TEXT5);
+    lv_obj_align(ui.ov_ver, LV_ALIGN_BOTTOM_MID, 0, -14);
 }
 
 void ui_create(void)
@@ -606,6 +677,7 @@ static void show_state_icon(lv_obj_t *icon, lv_obj_t *spin, dock_state_t st, uin
 static int render_main(row_t *r, const dock_session_t *s, int y, int64_t now)
 {
     bool tall = is_tall(s);
+    const char *one = tall ? "" : only_line(s);
     int h = tall ? MAIN_H_TALL : MAIN_H;
     uint32_t color = STATE[s->state].color;
     char buf[32];
@@ -622,9 +694,11 @@ static int render_main(row_t *r, const dock_session_t *s, int y, int64_t now)
     show_state_icon(r->icon, r->spinner, s->state, color);
     lv_obj_center(r->icon);
 
-    // Project line: project name, session name in small type, provider tag,
-    // subagent badge. The tags stay whole; the session name gives way
-    // first, then the project name.
+    // Project line: project name, session name in small type, provider tag
+    // and subagent badge on the left; state, time and this turn's output
+    // tokens ("1:55 ↓6.5K", like Claude Code's spinner) on the right. All
+    // but the names stay whole; the session name gives way first, then the
+    // project name.
     set_text(r->prov, PROVIDER_NAME[s->provider]);
     set_color(r->prov, PROVIDER_COLOR[s->provider]);
     if (s->agents_total > 0) {
@@ -634,33 +708,59 @@ static int render_main(row_t *r, const dock_session_t *s, int y, int64_t now)
     } else {
         lv_obj_add_flag(r->badge, LV_OBJ_FLAG_HIDDEN);
     }
+    set_text(r->label, s->label[0] ? s->label : STATE[s->state].label);
+    set_color(r->label, color);
+    fmt_row_time(buf, sizeof(buf), s, now);
+    set_text(r->time, buf);
+    if (s->turn_output > 0) {
+        char n[16];
+        fmt_tokens(n, sizeof(n), s->turn_output);
+        snprintf(buf, sizeof(buf), " ↓%s", n);
+        set_text(r->tok, buf);
+        lv_obj_remove_flag(r->tok, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(r->tok, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_set_width(r->project, LV_SIZE_CONTENT);
     set_text(r->project, s->project[0] ? s->project : "-");
-    lv_obj_set_pos(r->project, MID_X, tall ? 5 : 4);
     lv_obj_set_width(r->name, LV_SIZE_CONTENT);
     set_text(r->name, s->title);
     lv_obj_update_layout(r->obj);
-    int room = MID_W - 8 - lv_obj_get_width(r->prov) - (s->agents_total > 0 ? 8 + lv_obj_get_width(r->badge) : 0);
-    if (lv_obj_get_width(r->project) > room) {
-        lv_obj_set_width(r->project, room);
+
+    int time_x = END_X - lv_obj_get_width(r->time) - (s->turn_output > 0 ? lv_obj_get_width(r->tok) : 0);
+    int label_x = time_x - 8 - lv_obj_get_width(r->label);
+    int room = label_x - 12 - MID_X - 8 - lv_obj_get_width(r->prov) -
+               (s->agents_total > 0 ? 8 + lv_obj_get_width(r->badge) : 0); // project and session name
+    int pw = lv_obj_get_width(r->project);
+    if (pw > room) {
+        pw = room > 1 ? room : 1;
+        lv_obj_set_width(r->project, pw);
     }
-    int left = room - lv_obj_get_width(r->project) - 8;
+    int py = tall ? 5 : one[0] ? 4 : (h - lv_obj_get_height(r->project)) / 2;
+    int base = py + ascent(r->project);
+    lv_obj_set_pos(r->project, MID_X, py);
+    int x = MID_X + pw + 8;
+    int left = room - pw - 8;
     if (s->title[0] && left >= 32) {
-        if (lv_obj_get_width(r->name) > left) {
-            lv_obj_set_width(r->name, left);
+        int nw = lv_obj_get_width(r->name);
+        if (nw > left) {
+            nw = left;
+            lv_obj_set_width(r->name, nw);
         }
         lv_obj_remove_flag(r->name, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_align_to(r->name, r->project, LV_ALIGN_OUT_RIGHT_BOTTOM, 8, -4);
-        lv_obj_align_to(r->prov, r->name, LV_ALIGN_OUT_RIGHT_BOTTOM, 8, 0);
+        on_baseline(r->name, x, base);
+        x += nw + 8;
     } else {
         lv_obj_add_flag(r->name, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_align_to(r->prov, r->project, LV_ALIGN_OUT_RIGHT_BOTTOM, 8, -4);
     }
+    on_baseline(r->prov, x, base);
     lv_obj_align_to(r->badge, r->prov, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    on_baseline(r->label, label_x, base);
+    on_baseline(r->time, time_x, base);
+    on_baseline(r->tok, time_x + lv_obj_get_width(r->time), base);
 
-    // Tall rows: the assistant's latest text, then what the session is
-    // doing. Short rows: one line, whichever there is (older hosts send
-    // only text, which may repeat the session name).
+    // Full-width lines below: in tall rows the assistant's latest text, then
+    // what the session is doing; in short rows whichever there is.
     if (tall) {
         lv_obj_remove_flag(r->msg, LV_OBJ_FLAG_HIDDEN);
         set_text(r->msg, s->msg);
@@ -673,18 +773,15 @@ static int render_main(row_t *r, const dock_session_t *s, int y, int64_t now)
         lv_obj_add_flag(r->msg, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_style_text_font(r->detail, font_get(FONT_REGULAR, 16), 0);
         set_color(r->detail, C_TEXT2);
-        const char *one = s->msg[0] ? s->msg : s->detail[0] ? s->detail : strcmp(s->text, s->title) ? s->text : "";
-        set_text(r->detail, one[0] ? one : " ");
+        set_text(r->detail, one);
         lv_obj_set_pos(r->detail, MID_X, 34);
     }
+    if (tall || one[0]) {
+        lv_obj_remove_flag(r->detail, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(r->detail, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_set_height(r->detail, lv_font_get_line_height(lv_obj_get_style_text_font(r->detail, 0)));
-
-    set_text(r->label, s->label[0] ? s->label : STATE[s->state].label);
-    set_color(r->label, color);
-    lv_obj_set_pos(r->label, LIST_W - 14 - END_W, tall ? 8 : 6);
-    fmt_elapsed(buf, sizeof(buf), s->state, s->since, now);
-    set_text(r->time, buf);
-    lv_obj_set_pos(r->time, LIST_W - 14 - END_W, tall ? 55 : 35);
     return h;
 }
 
@@ -782,10 +879,41 @@ static void render_rows(void)
 static void render_overlay(int64_t now_us)
 {
     int64_t last = link_last_rx_us();
-    const char *title = NULL;
-    char sub[64] = "", note[64] = "";
+    const char *title = NULL, *icon = LV_SYMBOL_USB;
+    uint32_t icon_color = C_RED;
+    char sub[112] = "", note[64] = "", ver[64];
+    int pct = -1; // progress bar, hidden when < 0
+    int progress;
+    const char *err;
+    ota_state_t ota = ota_status(&progress, &err);
 
-    if (link_incompatible()) {
+    snprintf(ver, sizeof(ver), "固件 %s", ota_version());
+    if (ota != OTA_IDLE) {
+        // An update outranks everything: the user must not unplug now.
+        icon = LV_SYMBOL_DOWNLOAD;
+        icon_color = C_GREEN;
+        snprintf(ver, sizeof(ver), "固件 %s → %s", ota_version(), ota_target());
+        if (ota == OTA_PREPARING) {
+            title = "正在升级固件";
+            snprintf(sub, sizeof(sub), "正在准备… 请勿拔线");
+            pct = 0;
+        } else if (ota == OTA_RECEIVING) {
+            title = "正在升级固件";
+            snprintf(sub, sizeof(sub), "%d%% · 请勿拔线", progress);
+            pct = progress;
+        } else if (ota == OTA_RESTARTING) {
+            title = "升级完成";
+            snprintf(sub, sizeof(sub), "正在重启…");
+            pct = 100;
+        } else {
+            title = "固件升级失败";
+            icon = LV_SYMBOL_WARNING;
+            icon_color = C_RED;
+            snprintf(sub, sizeof(sub), "%s", err);
+            snprintf(note, sizeof(note), "仍在使用原来的固件");
+            snprintf(ver, sizeof(ver), "固件 %s", ota_version());
+        }
+    } else if (link_incompatible()) {
         title = "版本不兼容";
         snprintf(sub, sizeof(sub), "请把 go-dock 和固件升级到同一版本");
     } else if (last == 0) {
@@ -812,12 +940,23 @@ static void render_overlay(int64_t now_us)
         lv_obj_set_style_bg_color(ui.link_dot, lv_color_hex(C_GREEN), 0);
         return;
     }
+    set_text(ui.ov_icon, icon);
+    set_color(ui.ov_icon, icon_color);
     set_text(ui.ov_title, title);
     set_text(ui.ov_sub, sub);
     set_text(ui.ov_note, note);
+    set_text(ui.ov_ver, ver);
+    lv_obj_align(ui.ov_icon, LV_ALIGN_TOP_MID, 0, 18);
     lv_obj_align(ui.ov_title, LV_ALIGN_TOP_MID, 0, 54);
     lv_obj_align(ui.ov_sub, LV_ALIGN_TOP_MID, 0, 100);
     lv_obj_align(ui.ov_note, LV_ALIGN_TOP_MID, 0, 130);
+    lv_obj_align(ui.ov_ver, LV_ALIGN_BOTTOM_MID, 0, -14);
+    if (pct >= 0) {
+        lv_bar_set_value(ui.ov_bar, pct, LV_ANIM_OFF);
+        lv_obj_remove_flag(ui.ov_bar, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(ui.ov_bar, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_remove_flag(ui.overlay, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_opa(ui.content, 90, 0); // about 35%
     lv_obj_set_style_bg_color(ui.link_dot, lv_color_hex(C_RED), 0);
@@ -875,6 +1014,16 @@ void ui_poll(void)
         render_summary();
         render_rows();
     }
+    // An update's progress shows at once, not on the next second.
+    static ota_state_t ota_shown;
+    static int pct_shown;
+    int pct;
+    ota_state_t ota = ota_status(&pct, NULL);
+    if (ota != ota_shown || pct != pct_shown) {
+        ota_shown = ota;
+        pct_shown = pct;
+        render_overlay(now_us);
+    }
     if (fresh || now_us - s_last_second_us >= 1000000) {
         s_last_second_us = now_us;
         int64_t now = host_now();
@@ -892,6 +1041,9 @@ uint8_t ui_brightness(void)
 {
     int64_t now_us = esp_timer_get_time();
     int64_t last = link_last_rx_us();
+    if (ota_status(NULL, NULL) != OTA_IDLE) {
+        return BRIGHT_FULL;
+    }
     if (last == 0 || now_us - last > OFFLINE_AFTER_US) {
         bool long_gone = last == 0 ? now_us > 10 * 60 * 1000000LL : now_us - last > 10 * 60 * 1000000LL;
         return now_us - s_touch_us < TOUCH_WAKE_US ? BRIGHT_FULL : (long_gone ? BRIGHT_ASLEEP : BRIGHT_OFFLINE);

@@ -114,6 +114,8 @@ esptool.py --chip esp32s3 write_flash 0x0 go-dock-firmware-v2.bin
 
 烧录前先退出 go-dock（或在设置里取消「启用 USB 屏幕」），否则串口被占用会烧录失败。从源码编译、硬件说明见 [firmware/README.md](firmware/README.md)。
 
+这样用 USB 刷一次之后，固件就能在网页上升级：固件版本跟着 go-dock 走，go-dock 升级后，如果设备上的固件更旧，网页顶部会提示「升级固件」，点一下就通过 USB 发给设备，约 1 分钟，屏幕上显示进度。出错或中途拔线时设备继续用原来的固件。详见 [firmware/README.md](firmware/README.md#在线升级)。
+
 ## 集成
 
 在网页「集成」页安装。每次修改前，原文件都会备份为 `<文件>.go-dock-<时间>.bak`；卸载会精确移除 go-dock 自己的条目，其他配置原样保留。

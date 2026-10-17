@@ -57,21 +57,27 @@ type fakeGitHub struct {
 	// list, when set, is what /releases returns: tag -> prerelease. The
 	// stable /releases/latest still answers with tag.
 	list map[string]bool
+	// firmware, when set, is attached as FirmwareAsset.
+	firmware []byte
 }
 
 func newFakeGitHub(t *testing.T, tag string, binary []byte) *fakeGitHub {
 	f := &fakeGitHub{tag: tag, binary: binary}
 	name := AssetName(runtime.GOOS, runtime.GOARCH)
 	rel := func(tag string, pre bool) map[string]any {
+		assets := []map[string]string{
+			{"name": name, "browser_download_url": f.URL + "/dl/" + name},
+			{"name": "SHA256SUMS", "browser_download_url": f.URL + "/dl/SHA256SUMS"},
+		}
+		if f.firmware != nil {
+			assets = append(assets, map[string]string{"name": FirmwareAsset, "browser_download_url": f.URL + "/dl/" + FirmwareAsset})
+		}
 		return map[string]any{
 			"tag_name":   tag,
 			"prerelease": pre,
 			"body":       "- 修复若干问题",
 			"html_url":   "https://example.test/release/" + tag,
-			"assets": []map[string]string{
-				{"name": name, "browser_download_url": f.URL + "/dl/" + name},
-				{"name": "SHA256SUMS", "browser_download_url": f.URL + "/dl/SHA256SUMS"},
-			},
+			"assets":     assets,
 		}
 	}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,13 +94,21 @@ func newFakeGitHub(t *testing.T, tag string, binary []byte) *fakeGitHub {
 				out = append(out, rel(tag, pre))
 			}
 			json.NewEncoder(w).Encode(out)
+		case "/releases/tags/" + f.tag:
+			json.NewEncoder(w).Encode(rel(f.tag, false))
 		case "/dl/" + name:
 			w.Write(f.binary)
+		case "/dl/" + FirmwareAsset:
+			w.Write(f.firmware)
 		case "/dl/SHA256SUMS":
 			sums := f.sums
 			if sums == "" {
 				h := sha256.Sum256(f.binary)
 				sums = hex.EncodeToString(h[:]) + "  go-dock_other_arch\n" + hex.EncodeToString(h[:]) + "  " + name + "\n"
+				if f.firmware != nil {
+					h := sha256.Sum256(f.firmware)
+					sums += hex.EncodeToString(h[:]) + "  " + FirmwareAsset + "\n"
+				}
 			}
 			io.WriteString(w, sums)
 		default:
@@ -265,5 +279,40 @@ func TestBetaChannel(t *testing.T) {
 	u2.Check(context.Background())
 	if st := u2.Status(); !st.Available || st.Latest != "0.2.0" || st.Prerelease {
 		t.Fatalf("beta user status = %+v", st)
+	}
+}
+
+func TestFirmware(t *testing.T) {
+	gh := newFakeGitHub(t, "v0.3.0", []byte("new binary"))
+	gh.firmware = []byte("firmware image")
+	u, _ := newTestUpdater(t, "0.3.0", gh.URL)
+	ctx := context.Background()
+
+	got, err := u.Firmware(ctx, "0.3.0")
+	if err != nil || string(got) != "firmware image" {
+		t.Fatalf("Firmware = %q, %v", got, err)
+	}
+	if st := u.Status(); st.State != "idle" || st.Error != "" {
+		t.Errorf("program update status changed: %+v", st)
+	}
+
+	if _, err := u.Firmware(ctx, "0.2.0"); err == nil || !strings.Contains(err.Error(), "没有找到版本 0.2.0") {
+		t.Errorf("unknown release: %v", err)
+	}
+
+	gh.sums = "0000  " + FirmwareAsset + "\n"
+	if _, err := u.Firmware(ctx, "0.3.0"); err == nil || !strings.Contains(err.Error(), "校验失败") {
+		t.Errorf("bad checksum: %v", err)
+	}
+	gh.sums = ""
+
+	gh.firmware = make([]byte, MaxFirmware+1)
+	if _, err := u.Firmware(ctx, "0.3.0"); err == nil || !strings.Contains(err.Error(), "过大") {
+		t.Errorf("oversized image: %v", err)
+	}
+
+	gh.firmware = nil
+	if _, err := u.Firmware(ctx, "0.3.0"); err == nil || !strings.Contains(err.Error(), "没有提供 "+FirmwareAsset) {
+		t.Errorf("missing asset: %v", err)
 	}
 }

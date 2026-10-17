@@ -39,6 +39,7 @@ type Backend interface {
 	DeviceFrame() any
 	DevicePorts() (any, error)
 	ReconnectDevice()
+	ApplyFirmware() error
 	UpdateStatus() any
 	CheckUpdate() error
 	ApplyUpdate() error
@@ -77,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/device/ports", s.getPorts)
 	mux.HandleFunc("GET /api/device/frame", s.getFrame)
 	mux.HandleFunc("POST /api/device/reconnect", s.postReconnect)
+	mux.HandleFunc("POST /api/device/firmware", s.postFirmware)
 	mux.HandleFunc("POST /api/ingest/{provider}/{kind}", s.postIngest)
 	mux.HandleFunc("GET /api/system", s.getSystem)
 	mux.HandleFunc("POST /api/autostart", s.postAutostart)
@@ -248,6 +250,16 @@ func (s *Server) getFrame(w http.ResponseWriter, r *http.Request) {
 func (s *Server) postReconnect(w http.ResponseWriter, r *http.Request) {
 	s.backend.ReconnectDevice()
 	writeJSON(w, http.StatusOK, s.backend.DeviceStatus())
+}
+
+// postFirmware starts a firmware update; progress shows up in the device
+// status.
+func (s *Server) postFirmware(w http.ResponseWriter, r *http.Request) {
+	if err := s.backend.ApplyFirmware(); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, s.backend.DeviceStatus())
 }
 
 func (s *Server) getSystem(w http.ResponseWriter, r *http.Request) {

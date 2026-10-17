@@ -22,6 +22,7 @@ type fakeBackend struct {
 	cfg       config.Config
 	ingests   []string
 	autostart bool
+	flashing  bool
 }
 
 func (f *fakeBackend) Snapshot() model.Snapshot             { return model.Snapshot{} }
@@ -44,10 +45,17 @@ func (f *fakeBackend) DeviceStatus() any         { return map[string]string{"sta
 func (f *fakeBackend) DeviceFrame() any          { return nil }
 func (f *fakeBackend) DevicePorts() (any, error) { return []string{}, nil }
 func (f *fakeBackend) ReconnectDevice()          {}
-func (f *fakeBackend) UpdateStatus() any         { return map[string]string{"state": "idle"} }
-func (f *fakeBackend) CheckUpdate() error        { return nil }
-func (f *fakeBackend) ApplyUpdate() error        { return errors.New("没有可用的新版本") }
-func (f *fakeBackend) System() any               { return map[string]any{"autostart": f.autostart} }
+func (f *fakeBackend) ApplyFirmware() error {
+	if f.flashing {
+		return errors.New("固件正在升级")
+	}
+	f.flashing = true
+	return nil
+}
+func (f *fakeBackend) UpdateStatus() any  { return map[string]string{"state": "idle"} }
+func (f *fakeBackend) CheckUpdate() error { return nil }
+func (f *fakeBackend) ApplyUpdate() error { return errors.New("没有可用的新版本") }
+func (f *fakeBackend) System() any        { return map[string]any{"autostart": f.autostart} }
 func (f *fakeBackend) SetAutostart(on bool) error {
 	f.autostart = on
 	return nil
@@ -144,6 +152,12 @@ func TestSystemEndpoints(t *testing.T) {
 	}
 	if w := do(h, "GET", "127.0.0.1:47321", "/api/state", "", ""); !strings.Contains(w.Body.String(), `"update":`) {
 		t.Fatalf("state lacks update: %s", w.Body.String())
+	}
+	if w := do(h, "POST", "127.0.0.1:47321", "/api/device/firmware", "application/json", `{}`); w.Code != http.StatusAccepted || !b.flashing {
+		t.Fatalf("firmware: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(h, "POST", "127.0.0.1:47321", "/api/device/firmware", "application/json", `{}`); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "正在升级") {
+		t.Fatalf("firmware again: %d %s", w.Code, w.Body.String())
 	}
 }
 

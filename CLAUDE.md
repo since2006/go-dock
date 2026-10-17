@@ -67,4 +67,6 @@ Firmware UI checks without hardware: `firmware/sim` compiles `main/ui.c` against
 
 ## Releases
 
-Pushing `vX.Y.Z` publishes a release; a tag with a suffix (`v0.1.2-beta.2`) is published as a prerelease and only offered to users who enabled "接收测试版". The release also attaches `go-dock-firmware-v2.bin` (merged image, flash at `0x0`).
+Pushing `vX.Y.Z` publishes a release; a tag with a suffix (`v0.1.2-beta.2`) is published as a prerelease and only offered to users who enabled "接收测试版". The release also attaches the firmware, built with the tag as its version: `go-dock-firmware-v2.bin` (merged image, flash at `0x0` by hand) and `go-dock-firmware-v2-app.bin` (app only).
+
+Firmware updates over USB (`docs/protocol-v1.md` §3.4): `app.ApplyFirmware` → `update.Updater.Firmware` downloads the app image of go-dock's own version → `device.Manager.StartFlash` checks it and hands it to the serve loop, which streams it chunk by chunk (no snapshots meanwhile) → `firmware/main/ota.c` writes the spare OTA slot and restarts → the manager waits for a hello with the new version. Progress is `device.Status.Flash`; the web banner reads it from `state.device`.

@@ -100,6 +100,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.ghost { background: none; }
 .btn.danger { color: var(--error); }
+.btn.small { padding: 2px 10px; font-size: 12px; }
 .btn:disabled { opacity: .5; cursor: default; }
 
 /* Usage cards */
@@ -322,6 +323,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .banner .msg { flex: 1; min-width: 200px; }
 .banner a { color: var(--accent); }
 .banner.err { border-color: var(--error); }
+.banner:not([hidden]) + .banner { margin-top: 8px; }
 @media (max-width: 1180px) { .banner { margin: 16px 20px 0; } }
 
 /* System panel */

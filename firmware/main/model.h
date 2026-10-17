@@ -52,6 +52,8 @@ typedef struct {
     char msg[152];    // first line of the assistant's latest text (optional)
     char detail[152]; // what the session is doing now (optional)
     int64_t since;    // unix seconds
+    int64_t turn_output; // output tokens of the current turn (optional)
+    int64_t turn_secs;   // work time of the current turn as of snapshot.now (optional)
     int agents_total;  // subagents (child tasks) of this session
     int agents_active; // of which still working
     int agent_count;   // entries in agents

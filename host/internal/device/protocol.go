@@ -355,6 +355,45 @@ func EncodeHello(hostVersion string) []byte {
 	return line
 }
 
+// Firmware update messages (docs/protocol-v1.md §3.4). Unlike the rest of
+// the protocol they never change with proto, so a device too old to talk to
+// this host can still be updated.
+type otaBegin struct {
+	T    string `json:"t"`
+	Size int    `json:"size"`
+	Ver  string `json:"ver"`
+}
+
+type otaData struct {
+	T    string `json:"t"`
+	Off  int    `json:"off"`
+	Data []byte `json:"data"` // base64
+}
+
+// OTAChunk is the image bytes per ota_data message; base64 keeps the line
+// well under MaxLine.
+const OTAChunk = 2048
+
+// EncodeOTABegin starts an update with an image of size bytes.
+func EncodeOTABegin(size int, version string) []byte {
+	line, _ := encodeLine(otaBegin{T: "ota_begin", Size: size, Ver: version})
+	return line
+}
+
+// EncodeOTAData carries the image bytes b at offset off.
+func EncodeOTAData(off int, b []byte) []byte {
+	line, _ := encodeLine(otaData{T: "ota_data", Off: off, Data: b})
+	return line
+}
+
+// EncodeOTA encodes a message without fields: "ota_end" or "ota_abort".
+func EncodeOTA(t string) []byte {
+	line, _ := encodeLine(struct {
+		T string `json:"t"`
+	}{t})
+	return line
+}
+
 // DeviceMsg is any message the device sends; T selects which fields apply.
 type DeviceMsg struct {
 	T string `json:"t"`
@@ -364,11 +403,15 @@ type DeviceMsg struct {
 	W       int    `json:"w"`
 	H       int    `json:"h"`
 	MaxLine int    `json:"max_line"`
+	OTA     int    `json:"ota"` // 1: can be updated over the link
 	// ack
 	Seq uint64 `json:"seq"`
-	// log
+	// log; also the error text of ota
 	Level string `json:"level"`
 	Msg   string `json:"msg"`
+	// ota: the device's answer during an update
+	State string `json:"state"` // ready, ack, done, error
+	Off   int    `json:"off"`   // ack: bytes written so far
 }
 
 var errNotMessage = errors.New("不是协议消息")

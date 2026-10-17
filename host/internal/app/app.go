@@ -58,6 +58,11 @@ type App struct {
 	restart    func()
 	restarting atomic.Bool
 
+	// upgradeMu keeps a program update and a firmware update from starting
+	// together; hostUpdating stays set until the restart.
+	upgradeMu    sync.Mutex
+	hostUpdating atomic.Bool
+
 	mu         sync.Mutex
 	claude     *claude.Provider
 	codex      *codex.Provider
@@ -98,7 +103,7 @@ func Run(ctx context.Context, o Options) error {
 		ctx:     ctx,
 	}
 	a.restart = func() { a.restarting.Store(true); stop() }
-	a.device = device.NewManager(a.hub, deviceOptions(cfg), o.Version, lg.Logger)
+	a.device = device.NewManager(a.hub, deviceOptions(cfg), o.Version, lg.Logger, a.hub.Touch)
 	a.updater = update.New(o.Version, lg.Logger, a.hub.Touch)
 	a.updater.SetBeta(cfg.Update.Prerelease)
 	a.applyProviders(cfg)
@@ -212,7 +217,7 @@ func (a *App) Snapshot() model.Snapshot             { return a.hub.Snapshot() }
 func (a *App) Subscribe() (<-chan struct{}, func()) { return a.hub.Subscribe() }
 func (a *App) Config() config.Config                { return a.store.Get() }
 func (a *App) SetConfig(c config.Config) error      { return a.store.Set(c) }
-func (a *App) DeviceStatus() any                    { return a.device.Status() }
+func (a *App) DeviceStatus() any                    { return a.deviceStatus() }
 func (a *App) ReconnectDevice()                     { a.device.Reconnect() }
 func (a *App) DevicePorts() (any, error)            { return device.ListPorts() }
 
@@ -223,6 +228,8 @@ func (a *App) CheckUpdate() error { return a.updater.Check(a.ctx) }
 // ApplyUpdate validates synchronously, then downloads in the background;
 // progress shows up in UpdateStatus and the process restarts when done.
 func (a *App) ApplyUpdate() error {
+	a.upgradeMu.Lock()
+	defer a.upgradeMu.Unlock()
 	switch st := a.updater.Status(); {
 	case st.Dev:
 		return errors.New("开发版本不支持在线升级，请下载发布版本")
@@ -230,9 +237,13 @@ func (a *App) ApplyUpdate() error {
 		return errors.New("没有可用的新版本")
 	case st.State == "downloading" || st.State == "restarting":
 		return errors.New("正在升级，请稍候")
+	case a.device.Status().Flash.Busy():
+		return errors.New("设备固件正在升级，请等它完成")
 	}
+	a.hostUpdating.Store(true)
 	go func() {
 		if err := a.updater.Apply(a.ctx); err != nil {
+			a.hostUpdating.Store(false)
 			return
 		}
 		time.Sleep(500 * time.Millisecond) // let the UI see "restarting"

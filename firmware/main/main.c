@@ -4,6 +4,7 @@
 #include "freertos/task.h"
 #include "link.h"
 #include "lvgl.h"
+#include "ota.h"
 #include "ui.h"
 
 // All LVGL calls happen in this task.
@@ -31,6 +32,7 @@ static void lvgl_task(void *arg)
 
 void app_main(void)
 {
+    ota_init();
     link_start();
     xTaskCreatePinnedToCore(lvgl_task, "lvgl", 8192, NULL, 4, NULL, 1);
 }

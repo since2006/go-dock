@@ -9,10 +9,12 @@
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "ota.h"
 
 #define MAX_LINE 4096
 
@@ -26,6 +28,7 @@ static uint32_t s_version;
 static int64_t s_received_us;
 static volatile int64_t s_last_rx_us;
 static volatile bool s_incompatible;
+static bool s_ota; // can be updated over the link
 
 static void send_line(const char *json)
 {
@@ -38,10 +41,10 @@ static void send_line(const char *json)
 
 static void send_hello(void)
 {
-    char buf[160];
+    char buf[176];
     snprintf(buf, sizeof(buf),
-             "{\"t\":\"hello\",\"proto\":%d,\"fw\":\"%s\",\"w\":600,\"h\":450,\"max_line\":%d}",
-             DOCK_PROTO, esp_app_get_description()->version, MAX_LINE);
+             "{\"t\":\"hello\",\"proto\":%d,\"fw\":\"%s\",\"w\":600,\"h\":450,\"max_line\":%d%s}",
+             DOCK_PROTO, esp_app_get_description()->version, MAX_LINE, s_ota ? ",\"ota\":1" : "");
     send_line(buf);
 }
 
@@ -139,6 +142,8 @@ static void parse_snapshot(const cJSON *root, dock_snapshot_t *s)
         copy_str(d->title, sizeof(d->title), cJSON_GetObjectItem(item, "title"));
         copy_str(d->msg, sizeof(d->msg), cJSON_GetObjectItem(item, "msg"));
         copy_str(d->detail, sizeof(d->detail), cJSON_GetObjectItem(item, "detail"));
+        d->turn_output = num(cJSON_GetObjectItem(item, "turn_output"));
+        d->turn_secs = num(cJSON_GetObjectItem(item, "turn_secs"));
         d->agents_total = (int)num(cJSON_GetObjectItem(item, "agents_total"));
         d->agents_active = (int)num(cJSON_GetObjectItem(item, "agents_active"));
         const cJSON *ag;
@@ -163,6 +168,57 @@ static void parse_snapshot(const cJSON *root, dock_snapshot_t *s)
     }
 }
 
+static void send_ota_error(const char *err)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "t", "ota");
+    cJSON_AddStringToObject(o, "state", "error");
+    cJSON_AddStringToObject(o, "msg", err);
+    char *line = cJSON_PrintUnformatted(o);
+    if (line) {
+        send_line(line);
+        cJSON_free(line);
+    }
+    cJSON_Delete(o);
+}
+
+// Firmware update messages work whatever the protocol version: they are
+// how a device too old for its host gets fixed.
+static void handle_ota(const char *t, const cJSON *root)
+{
+    char reply[64];
+    const char *err;
+    if (strcmp(t, "ota_begin") == 0) {
+        const cJSON *ver = cJSON_GetObjectItem(root, "ver");
+        err = ota_begin((size_t)num(cJSON_GetObjectItem(root, "size")), cJSON_IsString(ver) ? ver->valuestring : "");
+        snprintf(reply, sizeof(reply), "{\"t\":\"ota\",\"state\":\"ready\"}");
+    } else if (strcmp(t, "ota_data") == 0) {
+        const cJSON *data = cJSON_GetObjectItem(root, "data");
+        size_t written = 0;
+        err = ota_write((size_t)num(cJSON_GetObjectItem(root, "off")), cJSON_IsString(data) ? data->valuestring : "",
+                        &written);
+        snprintf(reply, sizeof(reply), "{\"t\":\"ota\",\"state\":\"ack\",\"off\":%u}", (unsigned)written);
+    } else if (strcmp(t, "ota_end") == 0) {
+        err = ota_finish();
+        if (!err) {
+            send_line("{\"t\":\"ota\",\"state\":\"done\"}");
+            usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(200));
+            vTaskDelay(pdMS_TO_TICKS(1000)); // the screen shows the restart
+            esp_restart();
+        }
+    } else if (strcmp(t, "ota_abort") == 0) {
+        ota_abort();
+        return;
+    } else {
+        return;
+    }
+    if (err) {
+        send_ota_error(err);
+    } else {
+        send_line(reply);
+    }
+}
+
 static void handle_line(char *line)
 {
     cJSON *root = cJSON_Parse(line);
@@ -180,10 +236,14 @@ static void handle_line(char *line)
         int proto = (int)num(cJSON_GetObjectItem(root, "proto"));
         s_incompatible = proto != DOCK_PROTO;
         send_hello();
+        ota_confirm(); // reached go-dock: a freshly updated image stays
         if (s_incompatible) {
             link_log("warn", "host speaks protocol %d, firmware speaks %d", proto, DOCK_PROTO);
         }
+    } else if (strncmp(t->valuestring, "ota_", 4) == 0) {
+        handle_ota(t->valuestring, root);
     } else if (strcmp(t->valuestring, "snapshot") == 0) {
+        ota_confirm();
         parse_snapshot(root, s_scratch);
         uint32_t seq = s_scratch->seq;
         xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -211,6 +271,7 @@ static void reader_task(void *arg)
     send_hello();
     for (;;) {
         int n = usb_serial_jtag_read_bytes(chunk, sizeof(chunk), pdMS_TO_TICKS(100));
+        ota_tick();
         for (int i = 0; i < n; i++) {
             char c = (char)chunk[i];
             if (c == '\n') {
@@ -239,6 +300,7 @@ void link_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
     s_tx_lock = xSemaphoreCreateMutex();
+    s_ota = ota_supported();
     s_shared = heap_caps_calloc(1, sizeof(dock_snapshot_t), MALLOC_CAP_SPIRAM);
     s_scratch = heap_caps_calloc(1, sizeof(dock_snapshot_t), MALLOC_CAP_SPIRAM);
 
@@ -247,7 +309,8 @@ void link_start(void)
         .tx_buffer_size = 4096,
     };
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&cfg));
-    xTaskCreatePinnedToCore(reader_task, "link", 6144, NULL, 5, NULL, 0);
+    // Room for flash writes during an update.
+    xTaskCreatePinnedToCore(reader_task, "link", 8192, NULL, 5, NULL, 0);
 }
 
 bool link_take_snapshot(dock_snapshot_t *out, uint32_t *version, int64_t *received_us)

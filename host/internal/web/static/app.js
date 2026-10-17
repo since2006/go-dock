@@ -414,10 +414,14 @@ function renderScreen(frame) {
 
 function renderDeviceDetail(dev) {
   const dl = $("#device-detail");
+  const fw = el("span", {}, dev.firmware || "—");
+  if (FLASH_BUSY.includes(dev.flash && dev.flash.state)) fw.append(" · 正在升级");
+  else if (dev.upgradable) fw.append(" ", el("button", { class: "btn small", onclick: applyFirmware }, `升级到 ${dev.target}`));
+  else if (dev.manual) fw.append(" · 需要用 USB 刷一次才能在线升级");
   const rows = [
     ["状态", { disabled: "已禁用", searching: "查找中", connected: "已打开串口，等待设备握手", ready: "已连接" }[dev.state] || dev.state],
     ["串口", dev.port || "—"],
-    ["固件", dev.firmware || "—"],
+    ["固件", fw],
     ["分辨率", dev.width ? `${dev.width}×${dev.height}` : "—"],
     ["已发送", `${dev.sent || 0} 帧`],
     ["最后发送", ago(dev.last_sent)],
@@ -437,6 +441,7 @@ function render() {
   if (!state) return;
   $("#version").textContent = state.version;
   renderBanner(state.update);
+  renderFirmwareBanner(state.device || {});
   renderUsage(state.snapshot);
   renderSessions(state.snapshot);
   renderDevicePill(state.device);
@@ -515,6 +520,76 @@ async function applyUpdate() {
     if (state) { state.update = u; render(); }
   } catch (e) {
     applying = false;
+    alert(e.message);
+  }
+}
+
+// ---------- device firmware ----------
+
+const FLASH_BUSY = ["downloading", "preparing", "sending", "restarting"];
+const FIRMWARE_HELP = "https://github.com/since2006/go-dock/blob/main/firmware/README.md#方式一直接烧录发布的固件";
+let firmwareClosed = null; // the finished update whose banner was closed
+
+function firmwareDismissed(key) { try { return localStorage.getItem("dismissFirmware") === key; } catch { return false; } }
+
+function firmwareLater(key) {
+  return el("button", { class: "btn ghost", onclick: () => {
+    try { localStorage.setItem("dismissFirmware", key); } catch {}
+    render();
+  } }, "稍后");
+}
+
+// The firmware banner follows an update's progress, then offers the
+// firmware that goes with this go-dock.
+function renderFirmwareBanner(dev) {
+  const box = $("#firmware-banner");
+  const f = dev.flash || {};
+  const finished = f.state === "done" || f.state === "error" ? `${f.state}:${f.version}:${f.error || ""}` : null;
+  const msg = (...c) => el("span", { class: "msg" }, ...c);
+  let parts = null;
+  let cls = "banner";
+  if (f.state === "downloading") {
+    parts = [msg(`正在下载固件 ${dev.target || ""}…`)];
+  } else if (f.state === "preparing") {
+    parts = [msg(`正在准备升级固件 ${f.version}，设备在擦除存储，约需 10 秒…`)];
+  } else if (f.state === "sending") {
+    const pct = f.total ? Math.floor((f.sent * 100) / f.total) : 0;
+    parts = [msg(`正在升级固件 ${f.version}：${pct}%，请勿拔 USB 线`)];
+  } else if (f.state === "restarting") {
+    parts = [msg("固件已写入，设备正在重启…")];
+  } else if (finished && firmwareClosed !== finished) {
+    const close = el("button", { class: "btn ghost", onclick: () => { firmwareClosed = finished; render(); } }, "关闭");
+    if (f.state === "done") {
+      parts = [msg(`设备固件已升级到 ${f.version}`), close];
+    } else {
+      cls += " err";
+      parts = [msg(`固件升级失败：${f.error}`), dev.upgradable ? el("button", { class: "btn primary", onclick: applyFirmware }, "重试") : null, close];
+    }
+  } else if (dev.upgradable && !firmwareDismissed(dev.target)) {
+    parts = [
+      msg(`设备固件可以升级到 ${dev.target}（当前 ${dev.firmware}）`),
+      el("button", { class: "btn primary", onclick: applyFirmware }, "升级固件"),
+      firmwareLater(dev.target),
+    ];
+  } else if (dev.manual && !firmwareDismissed(`manual:${dev.target}`)) {
+    parts = [
+      msg(`设备固件 ${dev.firmware} 还不支持在线升级，需要用 USB 刷一次新固件，以后就能在这里升级`),
+      el("a", { href: FIRMWARE_HELP, target: "_blank", rel: "noopener" }, "刷写说明"),
+      firmwareLater(`manual:${dev.target}`),
+    ];
+  }
+  box.hidden = !parts;
+  if (parts) { box.className = cls; box.replaceChildren(...parts); }
+}
+
+async function applyFirmware() {
+  const dev = (state && state.device) || {};
+  if (!confirm(`把设备固件升级到 ${dev.target}？大约需要 1 分钟，屏幕会显示进度，期间不要拔 USB 线。`)) return;
+  firmwareClosed = null;
+  try {
+    const d = await api("/api/device/firmware", { method: "POST", body: {} });
+    if (state) { state.device = d; render(); }
+  } catch (e) {
     alert(e.message);
   }
 }

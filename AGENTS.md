@@ -15,7 +15,7 @@ Guidance for AI coding agents working in this repository.
   - `internal/autostart/` — login item per OS (LaunchAgent / systemd user unit or XDG / HKCU Run).
   - `internal/update/` — checks GitHub Releases, verifies and replaces the executable; `cmd/go-dock/restart_*.go` restarts it.
   - `internal/config/`, `internal/logx/`, `internal/ingest/`, `internal/procutil/`, `internal/selfexe/` — support packages.
-- `firmware/` — ESP-IDF 5.5 + LVGL 9 firmware for the **V2** board only (pins differ from V1). `main/display.c` is the board bring-up, `link.c` the protocol, `ui.c` the Agent screen. `sim/` renders `ui.c` on the desktop to PNG-able PPM files for layout checks without hardware.
+- `firmware/` — ESP-IDF 5.5 + LVGL 9 firmware for the **V2** board only (pins differ from V1). `main/display.c` is the board bring-up, `link.c` the protocol, `ota.c` updates over the link, `ui.c` the Agent screen. `sim/` renders `ui.c` on the desktop to PNG-able PPM files for layout checks without hardware.
 - `docs/protocol-v1.md` — host ↔ device protocol. `docs/plans/` — implementation plans.
 
 ## Commands
@@ -41,5 +41,6 @@ cmake -B build-sim -S sim && cmake --build build-sim && build-sim/dock_sim out  
 - **Undocumented sources** (`~/.claude/sessions/*.json`, Codex rollout files) can change between versions: parse defensively, every field optional.
 - UI text and docs are Chinese; code, identifiers and comments are English.
 - **Releases**: pushing a `v*` tag runs `.github/workflows/release.yml`. The updater expects assets named `go-dock_<os>_<arch>[.exe]` plus `SHA256SUMS`, and `go-dock version` printing the tag without `v`; change both sides together. Builds without `-X main.version` report `dev` and never self-update. `GO_DOCK_UPDATE_API` points the updater at a fake GitHub API for testing.
+- **Firmware updates**: the firmware version follows the tag (CI writes it into `firmware/version.txt`; local builds say `dev`), and go-dock offers the device the `go-dock-firmware-v2-app.bin` of its own release. Keep that asset name, the image checks in `device.CheckImage` and the OTA partition layout in `firmware/partitions.csv` in step. The partition table and bootloader cannot change over the link, only by flashing the merged image by hand. `GO_DOCK_FIRMWARE_FILE=<app image>` offers a local build instead, for testing on hardware.
 - **Autostart** never starts a second instance immediately (the running one owns the port); it only registers for the next login.
 - New behavior needs tests; providers keep fixtures in their `testdata/`.

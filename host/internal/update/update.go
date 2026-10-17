@@ -3,11 +3,14 @@
 //
 // A release carries one raw binary per platform, named by AssetName, and a
 // SHA256SUMS file. The download is verified against SHA256SUMS and by
-// running "<new binary> version" before it replaces the current one.
+// running "<new binary> version" before it replaces the current one. The
+// release also carries the screen firmware (FirmwareAsset), fetched by
+// Firmware for an update over USB.
 package update
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -36,6 +39,14 @@ const (
 	maxBinary   = 200 << 20
 	maxNotes    = 4000
 	checkPeriod = 24 * time.Hour
+)
+
+// FirmwareAsset is the release file holding the screen's app image, the
+// part an over-the-USB update writes; MaxFirmware is the size of the
+// device's app partition.
+const (
+	FirmwareAsset = "go-dock-firmware-v2-app.bin"
+	MaxFirmware   = 0x7F0000
 )
 
 // AssetName is the release file holding the binary for a platform.
@@ -319,7 +330,7 @@ func (u *Updater) Apply(ctx context.Context) (err error) {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath) // no-op once renamed into place
-	got, err := u.download(ctx, binURL, tmp)
+	got, err := u.download(ctx, binURL, tmp, maxBinary)
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
@@ -341,6 +352,37 @@ func (u *Updater) Apply(ctx context.Context) (err error) {
 	u.log.Info("已升级，即将重启", "from", u.current, "to", version)
 	u.set(func(s *Status) { s.State = "restarting" })
 	return nil
+}
+
+// Firmware downloads the screen firmware of release v<version> and checks
+// it against the release's SHA256SUMS. It is independent of Check and
+// Apply, which concern the program itself.
+func (u *Updater) Firmware(ctx context.Context, version string) ([]byte, error) {
+	var rel release
+	found, err := u.apiGet(ctx, "/releases/tags/v"+version, &rel)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("没有找到版本 %s 的发布", version)
+	}
+	binURL, sumsURL := rel.asset(FirmwareAsset), rel.asset("SHA256SUMS")
+	if binURL == "" || sumsURL == "" {
+		return nil, fmt.Errorf("版本 %s 没有提供 %s", version, FirmwareAsset)
+	}
+	want, err := u.checksum(ctx, sumsURL, FirmwareAsset)
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	got, err := u.download(ctx, binURL, &buf, MaxFirmware)
+	if err != nil {
+		return nil, err
+	}
+	if got != want {
+		return nil, fmt.Errorf("校验失败：%s 的 SHA-256 与 SHA256SUMS 不一致", FirmwareAsset)
+	}
+	return buf.Bytes(), nil
 }
 
 func (u *Updater) get(ctx context.Context, url string) (*http.Response, error) {
@@ -377,19 +419,20 @@ func (u *Updater) checksum(ctx context.Context, url, name string) (string, error
 	return "", fmt.Errorf("SHA256SUMS 中没有 %s", name)
 }
 
-// download writes url to w and returns the hex SHA-256 of the content.
-func (u *Updater) download(ctx context.Context, url string, w io.Writer) (string, error) {
+// download writes url to w and returns the hex SHA-256 of the content,
+// failing when it is longer than limit bytes.
+func (u *Updater) download(ctx context.Context, url string, w io.Writer, limit int64) (string, error) {
 	resp, err := u.get(ctx, url)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(w, h), io.LimitReader(resp.Body, maxBinary+1))
+	n, err := io.Copy(io.MultiWriter(w, h), io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return "", fmt.Errorf("下载失败: %w", err)
 	}
-	if n > maxBinary {
+	if n > limit {
 		return "", errors.New("下载的文件过大")
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil

@@ -69,17 +69,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # The firmware reports the release's version; go-dock offers it the
+      # firmware of its own version.
+      - name: version
+        run: echo "${GITHUB_REF_NAME#v}" > firmware/version.txt
       - uses: espressif/esp-idf-ci-action@v1.2.0
         with:
           esp_idf_version: v5.5.4
           target: esp32s3
           path: firmware
-          # One image from address 0x0: bootloader, partition table, app.
-          command: idf.py build && idf.py merge-bin -o go-dock-firmware-v2.bin
+          # go-dock-firmware-v2.bin: one image from address 0x0 (bootloader,
+          # partition table, app) for flashing over USB by hand.
+          # go-dock-firmware-v2-app.bin: the app alone, which go-dock sends
+          # to the device to update it.
+          command: >-
+            idf.py build && idf.py merge-bin -o go-dock-firmware-v2.bin &&
+            cp build/go-dock-firmware.bin build/go-dock-firmware-v2-app.bin
       - uses: actions/upload-artifact@v7
         with:
           name: go-dock-firmware-v2
-          path: firmware/build/go-dock-firmware-v2.bin
+          path: |
+            firmware/build/go-dock-firmware-v2.bin
+            firmware/build/go-dock-firmware-v2-app.bin
 
   release:
     needs: [build, firmware]
