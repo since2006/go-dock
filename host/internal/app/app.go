@@ -1,0 +1,283 @@
+// Package app wires config, collectors, the hub, the device link and the
+// web server into the go-dock daemon.
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sync"
+
+	"github.com/since2006/go-dock/host/internal/config"
+	"github.com/since2006/go-dock/host/internal/device"
+	"github.com/since2006/go-dock/host/internal/hub"
+	"github.com/since2006/go-dock/host/internal/logx"
+	"github.com/since2006/go-dock/host/internal/model"
+	"github.com/since2006/go-dock/host/internal/providers"
+	"github.com/since2006/go-dock/host/internal/providers/claude"
+	"github.com/since2006/go-dock/host/internal/providers/codex"
+	"github.com/since2006/go-dock/host/internal/providers/pricing"
+	"github.com/since2006/go-dock/host/internal/web"
+)
+
+type Options struct {
+	Version     string
+	OpenBrowser bool      // false disables the configured browser launch
+	Console     io.Writer // also log here; nil for file only
+}
+
+// App implements web.Backend.
+type App struct {
+	version string
+	store   *config.Store
+	log     *logx.Logger
+	hub     *hub.Hub
+	device  *device.Manager
+	listen  string // loopback-reachable address hooks call back to
+
+	ctx context.Context
+
+	mu         sync.Mutex
+	claude     *claude.Provider
+	codex      *codex.Provider
+	stopClaude context.CancelFunc
+	stopCodex  context.CancelFunc
+	claudeHome string
+	codexHome  string
+}
+
+// Run starts the daemon and blocks until ctx ends.
+func Run(ctx context.Context, o Options) error {
+	dir, err := config.Dir()
+	if err != nil {
+		return err
+	}
+	store, err := config.Load(filepath.Join(dir, "config.json"))
+	if err != nil {
+		return err
+	}
+	cfg := store.Get()
+	lg := logx.New(filepath.Join(dir, "logs", "go-dock.log"), o.Console, logx.ParseLevel(cfg.Log.Level))
+	defer lg.Close()
+
+	ln, err := net.Listen("tcp", cfg.Web.Listen)
+	if err != nil {
+		return fmt.Errorf("监听 %s 失败（是否已有 go-dock 在运行？）: %w", cfg.Web.Listen, err)
+	}
+
+	a := &App{
+		version: o.Version,
+		store:   store,
+		log:     lg,
+		hub:     hub.New(hubOptions(cfg)),
+		listen:  browserAddr(ln.Addr().String()),
+		ctx:     ctx,
+	}
+	a.device = device.NewManager(a.hub, deviceOptions(cfg), o.Version, lg.Logger)
+	a.applyProviders(cfg)
+	store.OnChange(a.onConfigChange)
+
+	url := "http://" + browserAddr(ln.Addr().String())
+	lg.Info("go-dock 启动", "version", o.Version, "管理台", url, "config", store.Path())
+
+	go a.hub.Run(ctx)
+	go a.device.Run(ctx)
+	if o.OpenBrowser && cfg.Web.OpenBrowser {
+		openBrowser(url)
+	}
+	srv := web.New(cfg.Web.Listen, a, lg.Ring, lg.Logger, o.Version)
+	err = srv.Serve(ctx, ln)
+	a.mu.Lock()
+	for _, stop := range []context.CancelFunc{a.stopClaude, a.stopCodex} {
+		if stop != nil {
+			stop()
+		}
+	}
+	a.mu.Unlock()
+	lg.Info("go-dock 已退出")
+	return err
+}
+
+func hubOptions(c config.Config) hub.Options {
+	return hub.Options{DoneTTL: c.Display.DoneTTL.D(), StaleAfter: c.Display.StaleAfter.D()}
+}
+
+func deviceOptions(c config.Config) device.Options {
+	return device.Options{Enabled: c.Device.Enabled, Port: c.Device.Port, MaxSessions: c.Display.MaxSessions, ShowIdle: c.Display.ShowIdle}
+}
+
+func codexOptions(c config.Config) codex.Options {
+	return codex.Options{AppServerPoll: c.Codex.AppServerPoll, AppServerInterval: c.Codex.AppServerInterval.D()}
+}
+
+// applyProviders starts, stops or restarts collectors to match cfg.
+func (a *App) applyProviders(cfg config.Config) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	prices := pricing.New(cfg.Pricing)
+
+	home := claude.Home(cfg.Claude.Home)
+	if a.claude != nil && (!cfg.Claude.Enabled || home != a.claudeHome) {
+		a.stopClaude()
+		a.claude, a.stopClaude = nil, nil
+		a.hub.RemoveProvider(model.ProviderClaude)
+	}
+	if cfg.Claude.Enabled && a.claude == nil {
+		a.claudeHome = home
+		a.claude = claude.New(home, a.hub, prices, a.log.Logger)
+		ctx, cancel := context.WithCancel(a.ctx)
+		a.stopClaude = cancel
+		go a.claude.Run(ctx)
+	} else if a.claude != nil {
+		a.claude.SetPrices(prices)
+	}
+
+	home = codex.Home(cfg.Codex.Home)
+	if a.codex != nil && (!cfg.Codex.Enabled || home != a.codexHome) {
+		a.stopCodex()
+		a.codex, a.stopCodex = nil, nil
+		a.hub.RemoveProvider(model.ProviderCodex)
+	}
+	if cfg.Codex.Enabled && a.codex == nil {
+		a.codexHome = home
+		a.codex = codex.New(home, a.hub, codexOptions(cfg), a.log.Logger)
+		ctx, cancel := context.WithCancel(a.ctx)
+		a.stopCodex = cancel
+		go a.codex.Run(ctx)
+	} else if a.codex != nil {
+		a.codex.SetOptions(codexOptions(cfg))
+	}
+}
+
+func (a *App) onConfigChange(old, cur config.Config) {
+	a.log.Level.Set(logx.ParseLevel(cur.Log.Level))
+	a.hub.SetOptions(hubOptions(cur))
+	a.device.SetOptions(deviceOptions(cur))
+	a.applyProviders(cur)
+	if old.Web.Listen != cur.Web.Listen {
+		a.log.Warn("监听地址修改将在重启 go-dock 后生效，届时请重新安装集成", "listen", cur.Web.Listen)
+	}
+}
+
+// ---- web.Backend ----
+
+func (a *App) Snapshot() model.Snapshot             { return a.hub.Snapshot() }
+func (a *App) Subscribe() (<-chan struct{}, func()) { return a.hub.Subscribe() }
+func (a *App) Config() config.Config                { return a.store.Get() }
+func (a *App) SetConfig(c config.Config) error      { return a.store.Set(c) }
+func (a *App) DeviceStatus() any                    { return a.device.Status() }
+func (a *App) ReconnectDevice()                     { a.device.Reconnect() }
+func (a *App) DevicePorts() (any, error)            { return device.ListPorts() }
+
+func (a *App) DeviceFrame() any {
+	return device.BuildFrame(a.hub.Snapshot(), deviceOptions(a.store.Get()), 0)
+}
+
+func (a *App) Ingest(provider, kind string, body []byte) error {
+	a.mu.Lock()
+	cl, cx := a.claude, a.codex
+	a.mu.Unlock()
+	switch provider + "/" + kind {
+	case "claude/hook":
+		if cl != nil {
+			return cl.HandleHook(body)
+		}
+	case "claude/statusline":
+		if cl != nil {
+			return cl.HandleStatusline(body)
+		}
+	case "codex/hook":
+		if cx != nil {
+			return cx.HandleHook(body)
+		}
+	default:
+		return fmt.Errorf("unknown ingest %s/%s", provider, kind)
+	}
+	return nil // provider disabled: drop silently
+}
+
+func (a *App) homes() (string, string) {
+	cfg := a.store.Get()
+	return claude.Home(cfg.Claude.Home), codex.Home(cfg.Codex.Home)
+}
+
+func (a *App) Integrations() []providers.Status {
+	t, terr := providers.CurrentTarget(a.listen)
+	ch, xh := a.homes()
+	list := []providers.Status{
+		claude.HooksStatus(ch, t),
+		claude.StatuslineStatus(ch, t),
+		codex.HooksStatus(xh, t),
+	}
+	if terr != nil {
+		for i := range list {
+			if list[i].Error == "" {
+				list[i].Error = terr.Error()
+			}
+		}
+	}
+	return list
+}
+
+func (a *App) Integration(name, action string) error {
+	ch, xh := a.homes()
+	if action == "uninstall" {
+		switch name {
+		case "claude-hooks":
+			return claude.UninstallHooks(ch)
+		case "claude-statusline":
+			return claude.UninstallStatusline(ch)
+		case "codex-hooks":
+			return codex.UninstallHooks(xh)
+		}
+		return errors.New("未知集成 " + name)
+	}
+	t, err := providers.CurrentTarget(a.listen)
+	if err != nil {
+		return err
+	}
+	switch name {
+	case "claude-hooks":
+		return claude.InstallHooks(ch, t)
+	case "claude-statusline":
+		return claude.InstallStatusline(ch, t)
+	case "codex-hooks":
+		return codex.InstallHooks(xh, t)
+	}
+	return errors.New("未知集成 " + name)
+}
+
+// browserAddr turns a wildcard listen address into one a browser can open.
+func browserAddr(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	if err := cmd.Start(); err != nil {
+		slog.Debug("打开浏览器失败", "err", err)
+		return
+	}
+	go cmd.Wait()
+}

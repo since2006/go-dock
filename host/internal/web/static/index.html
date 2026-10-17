@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>go-dock 管理台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='6' width='26' height='20' rx='4' fill='%23d97757'/%3E%3Crect x='7' y='10' width='18' height='4' rx='2' fill='white'/%3E%3Crect x='7' y='17' width='12' height='4' rx='2' fill='white' opacity='.7'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <span class="name">go-dock</span>
+      <span class="version" id="version"></span>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="overview" aria-selected="true">概览</button>
+      <button role="tab" data-tab="preview">设备预览</button>
+      <button role="tab" data-tab="integrations">集成</button>
+      <button role="tab" data-tab="settings">设置</button>
+      <button role="tab" data-tab="logs">日志</button>
+    </nav>
+    <div class="status">
+      <span class="pill" id="device-pill">设备：—</span>
+      <span class="pill" id="conn-pill">连接中…</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="tab-overview" class="tab">
+      <div class="usage-grid" id="usage"></div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>任务</h2>
+          <div class="counts" id="counts"></div>
+          <label class="check"><input type="checkbox" id="show-idle"> 显示空闲会话</label>
+        </div>
+        <div id="sessions" class="sessions"></div>
+      </div>
+    </section>
+
+    <section id="tab-preview" class="tab" hidden>
+      <div class="preview-wrap">
+        <div class="screen-frame">
+          <div class="screen" id="screen"></div>
+        </div>
+        <div class="preview-side">
+          <div class="panel">
+            <h2>设备状态</h2>
+            <dl class="kv" id="device-detail"></dl>
+            <div class="row">
+              <button class="btn" id="reconnect">重新连接</button>
+            </div>
+          </div>
+          <div class="panel">
+            <h2>下发数据</h2>
+            <p class="muted">发给屏幕的 snapshot 消息，格式见 docs/protocol-v1.md。</p>
+            <pre class="code" id="frame-json"></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-integrations" class="tab" hidden>
+      <p class="lead">安装后，Claude Code 和 Codex 会在状态变化时立即通知 go-dock。修改前会自动备份原文件（<code>*.go-dock-时间.bak</code>），卸载可恢复。</p>
+      <div class="cards" id="integrations"></div>
+    </section>
+
+    <section id="tab-settings" class="tab" hidden>
+      <form id="settings" class="panel settings" autocomplete="off">
+        <fieldset>
+          <legend>设备</legend>
+          <label class="check"><input type="checkbox" name="device.enabled"> 启用 USB 屏幕</label>
+          <label>串口
+            <div class="row">
+              <input name="device.port" list="port-list" placeholder="auto">
+              <button type="button" class="btn ghost" id="scan-ports">扫描</button>
+            </div>
+            <datalist id="port-list"></datalist>
+            <small>填 <code>auto</code> 自动查找 ESP32-S3（VID 303A），或指定如 <code>/dev/cu.usbmodem1101</code>、<code>COM3</code>。</small>
+          </label>
+          <div id="ports" class="ports"></div>
+        </fieldset>
+        <fieldset>
+          <legend>显示</legend>
+          <label>完成后保留时长<input name="display.done_ttl" placeholder="30m"><small>「已完成」状态显示多久后转为空闲，如 <code>30m</code>、<code>1h</code>。</small></label>
+          <label>会话过期<input name="display.stale_after" placeholder="12h"><small>超过此时间没有任何动静的会话会被移除。</small></label>
+          <label>屏幕最多显示<input name="display.max_sessions" type="number" min="1" max="32"><small>每屏 4 条，超出部分滑动翻页。</small></label>
+          <label class="check"><input type="checkbox" name="display.show_idle"> 屏幕上也显示空闲会话</label>
+        </fieldset>
+        <fieldset>
+          <legend>Claude Code</legend>
+          <label class="check"><input type="checkbox" name="claude.enabled"> 启用</label>
+          <label>配置目录<input name="claude.home" placeholder="默认：$CLAUDE_CONFIG_DIR 或 ~/.claude"></label>
+        </fieldset>
+        <fieldset>
+          <legend>Codex</legend>
+          <label class="check"><input type="checkbox" name="codex.enabled"> 启用</label>
+          <label>CODEX_HOME<input name="codex.home" placeholder="默认：$CODEX_HOME 或 ~/.codex"></label>
+          <label class="check"><input type="checkbox" name="codex.app_server_poll"> 定期通过 <code>codex app-server</code> 刷新额度</label>
+          <label>刷新间隔<input name="codex.app_server_interval" placeholder="10m"></label>
+        </fieldset>
+        <fieldset>
+          <legend>管理台与日志</legend>
+          <label>监听地址<input name="web.listen"><small>修改后需重启 go-dock，已安装的集成也要重新安装。</small></label>
+          <label class="check"><input type="checkbox" name="web.open_browser"> 启动时打开浏览器</label>
+          <label>日志级别
+            <select name="log.level">
+              <option value="debug">debug</option>
+              <option value="info">info</option>
+              <option value="warn">warn</option>
+              <option value="error">error</option>
+            </select>
+          </label>
+        </fieldset>
+        <div class="row end">
+          <span class="form-msg" id="settings-msg" role="status"></span>
+          <button type="submit" class="btn primary">保存</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="tab-logs" class="tab" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>日志</h2>
+          <select id="log-level" aria-label="日志级别">
+            <option value="DEBUG">debug 及以上</option>
+            <option value="INFO" selected>info 及以上</option>
+            <option value="WARN">warn 及以上</option>
+            <option value="ERROR">error</option>
+          </select>
+          <label class="check"><input type="checkbox" id="log-follow" checked> 自动滚动</label>
+          <button class="btn ghost" id="log-clear">清空视图</button>
+        </div>
+        <div class="logs" id="logs"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

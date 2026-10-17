@@ -1,0 +1,12 @@
+{
+  "description": "my hooks",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "say done", "timeout": 5 }
+        ]
+      }
+    ]
+  }
+}
