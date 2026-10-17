@@ -343,7 +343,6 @@ function scrGroup(s, now) {
       el("div", { class: "l1" }, el("span", { class: "project" }, s.project || "—"),
         s.title ? el("span", { class: "sname" }, s.title) : null,
         el("span", { class: `prov ${s.p}` }, PROVIDER_NAME[s.p] || s.p),
-        s.agents_total ? el("span", { class: "subs" }, `子任务 ${s.agents_active || s.agents_total}`) : null,
         el("span", { class: "end" },
           el("span", { class: "label" }, s.label),
           el("span", { class: "time mono" }, scrRowTime(s, now),

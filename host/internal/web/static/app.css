@@ -231,7 +231,6 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .scr-row .prov { flex: none; font-size: 13px; font-weight: 700; }
 .scr-row .prov.claude { color: var(--scr-claude); }
 .scr-row .prov.codex { color: var(--scr-codex); }
-.scr-row .subs { flex: none; font-size: 13px; font-weight: 700; color: #C9C9C4; background: #232325; border-radius: 7px; padding: 1px 7px; align-self: center; }
 .scr-row .detail { font-size: 16px; color: var(--scr-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .scr-row .end { flex: none; margin-left: auto; padding-left: 4px; display: flex; align-items: baseline; gap: 8px; }
 .scr-row .label { font-size: 18px; font-weight: 700; color: var(--c); white-space: nowrap; }
