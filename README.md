@@ -33,9 +33,11 @@ go-dock **不读取任何登录凭据**，也不调用非公开接口。
 
 ```sh
 mkdir -p ~/.local/bin
-mv go-dock_darwin_arm64 ~/.local/bin/go-dock
+curl -L -o ~/.local/bin/go-dock https://github.com/since2006/go-dock/releases/latest/download/go-dock_darwin_arm64
 chmod +x ~/.local/bin/go-dock
 ```
+
+> **macOS 请用上面的 `curl` 命令下载。** 浏览器下载的文件会被 macOS 打上隔离标记，运行时提示无法验证开发者、可能不安全，并拒绝打开。如果用浏览器下载，运行 `xattr -d com.apple.quarantine <文件路径>` 去掉标记即可。之后的在线升级由程序自己下载，不会再出现这个提示。
 
 hooks 和开机自启记录的都是程序的绝对路径，所以装好后不要再挪动它。如果挪了，到网页上重新安装集成、重新开启开机自启即可。
 
