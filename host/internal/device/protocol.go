@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/since2006/go-dock/host/internal/model"
 )
@@ -21,7 +22,11 @@ const (
 	projectLen = 24
 	textLen    = 48
 	titleLen   = 32
-	msgLen     = 48
+	// msg and detail fill a whole line under the project line: lineWidth
+	// columns, wide (CJK) characters counting two, and at most lineBytes
+	// bytes so the firmware's 152-byte buffers never cut a character.
+	lineWidth = 64
+	lineBytes = 148
 	// maxAgents bounds the subagents listed per session.
 	maxAgents    = 3
 	agentTypeLen = 16
@@ -185,8 +190,8 @@ func sessionFrame(ss model.Session, st model.State, from *model.Agent) SessionFr
 		Text:    model.Truncate(text, textLen),
 		Since:   unix(since),
 		Title:   model.Truncate(ss.Title, titleLen),
-		Msg:     model.Truncate(ss.Message, msgLen),
-		Detail:  model.Truncate(ss.Detail, textLen),
+		Msg:     fitLine(ss.Message),
+		Detail:  fitLine(ss.Detail),
 
 		TurnOutput: ss.TurnOutput,
 		TurnSecs:   ss.TurnSecs,
@@ -224,6 +229,37 @@ func sessionFrame(ss model.Session, st model.State, from *model.Agent) SessionFr
 		}
 	}
 	return sf
+}
+
+// fitLine cuts s to its first line and to one screen line (lineWidth,
+// lineBytes), ending in "…" when cut.
+func fitLine(s string) string {
+	s = model.Truncate(s, len(s)+1) // first line, trimmed
+	w, n, cut := 0, 0, 0
+	for i, r := range s {
+		rw, rn := 1, utf8.RuneLen(r)
+		if wide(r) {
+			rw = 2
+		}
+		if w+rw <= lineWidth-1 && n+rn <= lineBytes-len("…") {
+			cut = i + rn // the longest prefix that still has room for "…"
+		}
+		if w += rw; w > lineWidth {
+			return s[:cut] + "…"
+		}
+		if n += rn; n > lineBytes {
+			return s[:cut] + "…"
+		}
+	}
+	return s
+}
+
+// wide reports characters drawn two columns wide: CJK, Hangul, full-width
+// forms and emoji.
+func wide(r rune) bool {
+	return r >= 0x1100 && (r <= 0x115F || (r >= 0x2E80 && r <= 0xA4CF) || (r >= 0xAC00 && r <= 0xD7A3) ||
+		(r >= 0xF900 && r <= 0xFAFF) || (r >= 0xFE30 && r <= 0xFE4F) || (r >= 0xFF00 && r <= 0xFF60) ||
+		(r >= 0xFFE0 && r <= 0xFFE6) || r >= 0x1F300)
 }
 
 func usageFrame(u model.Usage) UsageFrame {

@@ -509,12 +509,33 @@ func TestFrameMessage(t *testing.T) {
 	}
 }
 
+func TestFitLine(t *testing.T) {
+	ascii := strings.Repeat("a", 70)
+	cases := []struct{ in, want string }{
+		{"Finding the red colon's color in both screenshots", "Finding the red colon's color in both screenshots"},
+		{ascii, strings.Repeat("a", 63) + "…"},
+		{strings.Repeat("长", 40), strings.Repeat("长", 31) + "…"},
+		{"先把两张截图的像素颜色取出来，对比 ShellRS 的配色和渲染。", "先把两张截图的像素颜色取出来，对比 ShellRS 的配色和渲染。"},
+		{strings.Repeat("→", 60), strings.Repeat("→", 48) + "…"}, // narrow but 3 bytes each
+		{"first line\nsecond", "first line"},
+	}
+	for _, c := range cases {
+		got := fitLine(c.in)
+		if got != c.want {
+			t.Errorf("fitLine(%q) = %q, want %q", c.in, got, c.want)
+		}
+		if len(got) > lineBytes {
+			t.Errorf("fitLine(%q) is %d bytes", c.in, len(got))
+		}
+	}
+}
+
 func TestEncodeTrimsMessagesBeforeSessions(t *testing.T) {
 	t0 := time.Unix(1792200000, 0)
 	var ss []model.Session
 	for i := 0; i < 12; i++ {
 		ss = append(ss, model.Session{ID: fmt.Sprint("claude:", i), Provider: model.ProviderClaude, Project: "p", State: model.StateRunning,
-			Title: "fix tests", Message: strings.Repeat("长", 48), Detail: "Bash: go test ./...", Since: t0})
+			Title: "fix tests", Message: strings.Repeat("→", 60), Detail: "Bash: go test ./...", Since: t0})
 	}
 	line, err := EncodeSnapshot(BuildFrame(model.Snapshot{Now: t0, Sessions: ss}, Options{MaxSessions: 12}, 1))
 	if err != nil || len(line) > MaxLine {
