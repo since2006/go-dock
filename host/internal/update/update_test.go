@@ -32,6 +32,14 @@ func TestNewer(t *testing.T) {
 		{"0.2.0-rc1", "0.2.0", false},
 		{"0.2.0", "dev", true},
 		{"garbage", "0.1.0", false},
+		{"0.2.0-beta.2", "0.2.0-beta.1", true},
+		{"0.2.0-beta.10", "0.2.0-beta.2", true},
+		{"0.2.0-rc.1", "0.2.0-beta.9", true},
+		{"0.2.0-beta.1", "0.2.0-beta", true},
+		{"0.2.0-beta.1", "0.2.0-1", true}, // text sorts after numbers
+		{"0.2.0-beta.1", "0.1.1", true},
+		{"0.1.1", "0.2.0-beta.1", false},
+		{"v0.2.0+build.5", "0.2.0", false},
 	}
 	for _, c := range cases {
 		if got := Newer(c.a, c.b); got != c.want {
@@ -46,11 +54,26 @@ type fakeGitHub struct {
 	binary []byte
 	sums   string // SHA256SUMS content; computed when empty
 	noRel  bool
+	// list, when set, is what /releases returns: tag -> prerelease. The
+	// stable /releases/latest still answers with tag.
+	list map[string]bool
 }
 
 func newFakeGitHub(t *testing.T, tag string, binary []byte) *fakeGitHub {
 	f := &fakeGitHub{tag: tag, binary: binary}
 	name := AssetName(runtime.GOOS, runtime.GOARCH)
+	rel := func(tag string, pre bool) map[string]any {
+		return map[string]any{
+			"tag_name":   tag,
+			"prerelease": pre,
+			"body":       "- 修复若干问题",
+			"html_url":   "https://example.test/release/" + tag,
+			"assets": []map[string]string{
+				{"name": name, "browser_download_url": f.URL + "/dl/" + name},
+				{"name": "SHA256SUMS", "browser_download_url": f.URL + "/dl/SHA256SUMS"},
+			},
+		}
+	}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/releases/latest":
@@ -58,15 +81,13 @@ func newFakeGitHub(t *testing.T, tag string, binary []byte) *fakeGitHub {
 				http.NotFound(w, r)
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{
-				"tag_name": f.tag,
-				"body":     "- 修复若干问题",
-				"html_url": "https://example.test/release",
-				"assets": []map[string]string{
-					{"name": name, "browser_download_url": f.URL + "/dl/" + name},
-					{"name": "SHA256SUMS", "browser_download_url": f.URL + "/dl/SHA256SUMS"},
-				},
-			})
+			json.NewEncoder(w).Encode(rel(f.tag, false))
+		case "/releases":
+			var out []map[string]any
+			for tag, pre := range f.list {
+				out = append(out, rel(tag, pre))
+			}
+			json.NewEncoder(w).Encode(out)
 		case "/dl/" + name:
 			w.Write(f.binary)
 		case "/dl/SHA256SUMS":
@@ -208,5 +229,41 @@ func TestRunVersion(t *testing.T) {
 	os.WriteFile(path, []byte("not a binary"), 0o755)
 	if err := runVersion(context.Background(), path, "0.2.0"); err == nil {
 		t.Fatal("non-executable accepted")
+	}
+}
+
+func TestBetaChannel(t *testing.T) {
+	gh := newFakeGitHub(t, "v0.1.1", []byte("beta binary"))
+	gh.list = map[string]bool{"v0.1.1": false, "v0.2.0-beta.1": true, "v0.2.0-beta.2": true, "v0.1.0": false}
+	u, exe := newTestUpdater(t, "0.1.1", gh.URL)
+
+	// Stable channel: only /releases/latest counts.
+	u.Check(context.Background())
+	if st := u.Status(); st.Available || st.Latest != "0.1.1" || st.Prerelease {
+		t.Fatalf("stable status = %+v", st)
+	}
+
+	u.SetBeta(true)
+	if err := u.Check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st := u.Status()
+	if !st.Available || st.Latest != "0.2.0-beta.2" || !st.Prerelease || !st.Beta {
+		t.Fatalf("beta status = %+v", st)
+	}
+	if err := u.Apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(exe); string(b) != "beta binary" {
+		t.Fatalf("exe = %q", b)
+	}
+
+	// A stable release newer than the betas wins on the beta channel too.
+	gh.list["v0.2.0"] = false
+	u2, _ := newTestUpdater(t, "0.2.0-beta.2", gh.URL)
+	u2.SetBeta(true)
+	u2.Check(context.Background())
+	if st := u2.Status(); !st.Available || st.Latest != "0.2.0" || st.Prerelease {
+		t.Fatalf("beta user status = %+v", st)
 	}
 }

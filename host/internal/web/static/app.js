@@ -423,7 +423,7 @@ function renderBanner(u) {
       el("button", { class: "btn ghost", onclick: () => { applying = false; render(); } }, "关闭")];
   } else if (u.available && !dismissed(u.latest)) {
     parts = [
-      el("span", { class: "msg" }, `发现新版本 ${u.latest}（当前 ${u.current}）`,
+      el("span", { class: "msg" }, `发现新${u.prerelease ? "测试版" : "版本"} ${u.latest}（当前 ${u.current}）`,
         u.dev ? "。开发版本不能在线升级，请到发布页下载。" : ""),
       u.url ? el("a", { href: u.url, target: "_blank", rel: "noopener" }, u.dev ? "发布页" : "更新说明") : null,
       u.dev ? null : el("button", { class: "btn primary", onclick: applyUpdate }, "升级并重启"),
@@ -458,8 +458,8 @@ function renderSystem(info) {
   else if (u.state === "error" && u.error) { desc.textContent = u.error; desc.className = "sys-desc err"; }
   else if (!u.checked_at) desc.textContent = "尚未检查更新";
   else if (!u.latest) desc.textContent = `还没有发布版本（检查于 ${ago(u.checked_at)}）`;
-  else if (u.available) desc.textContent = `有新版本 ${u.latest}` + (u.dev ? "，开发版本请到发布页下载" : "");
-  else desc.textContent = `已是最新版本（检查于 ${ago(u.checked_at)}）`;
+  else if (u.available) desc.textContent = `有新${u.prerelease ? "测试版" : "版本"} ${u.latest}` + (u.dev ? "，开发版本请到发布页下载" : "");
+  else desc.textContent = `已是最新${u.beta ? "版本（含测试版）" : "版本"}（检查于 ${ago(u.checked_at)}）`;
   const apply = $("#apply-update");
   apply.hidden = !(u.available && !u.dev);
   apply.textContent = `升级到 ${u.latest}`;

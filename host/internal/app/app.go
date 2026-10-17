@@ -100,6 +100,7 @@ func Run(ctx context.Context, o Options) error {
 	a.restart = func() { a.restarting.Store(true); stop() }
 	a.device = device.NewManager(a.hub, deviceOptions(cfg), o.Version, lg.Logger)
 	a.updater = update.New(o.Version, lg.Logger, a.hub.Touch)
+	a.updater.SetBeta(cfg.Update.Prerelease)
 	a.applyProviders(cfg)
 	store.OnChange(a.onConfigChange)
 
@@ -196,6 +197,10 @@ func (a *App) onConfigChange(old, cur config.Config) {
 	a.hub.SetOptions(hubOptions(cur))
 	a.device.SetOptions(deviceOptions(cur))
 	a.applyProviders(cur)
+	if old.Update.Prerelease != cur.Update.Prerelease {
+		a.updater.SetBeta(cur.Update.Prerelease)
+		go a.updater.Check(a.ctx) // show the right latest version right away
+	}
 	if old.Web.Listen != cur.Web.Listen {
 		a.log.Warn("监听地址修改将在重启 go-dock 后生效，届时请重新安装集成", "listen", cur.Web.Listen)
 	}

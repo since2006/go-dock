@@ -49,10 +49,14 @@ func AssetName(goos, goarch string) string {
 
 // Status is what the web UI shows about updates.
 type Status struct {
-	Current   string    `json:"current"`
-	Dev       bool      `json:"dev"` // development build: cannot update itself
-	Latest    string    `json:"latest,omitempty"`
-	Available bool      `json:"available"`
+	Current   string `json:"current"`
+	Dev       bool   `json:"dev"` // development build: cannot update itself
+	Latest    string `json:"latest,omitempty"`
+	Available bool   `json:"available"`
+	// Prerelease marks Latest as a test (beta) release.
+	Prerelease bool `json:"prerelease"`
+	// Beta reports whether test releases are offered at all.
+	Beta      bool      `json:"beta"`
 	Notes     string    `json:"notes,omitempty"`
 	URL       string    `json:"url,omitempty"`
 	CheckedAt time.Time `json:"checked_at,omitzero"`
@@ -62,10 +66,12 @@ type Status struct {
 }
 
 type release struct {
-	Tag    string `json:"tag_name"`
-	Body   string `json:"body"`
-	URL    string `json:"html_url"`
-	Assets []struct {
+	Tag        string `json:"tag_name"`
+	Body       string `json:"body"`
+	URL        string `json:"html_url"`
+	Prerelease bool   `json:"prerelease"`
+	Draft      bool   `json:"draft"`
+	Assets     []struct {
 		Name string `json:"name"`
 		URL  string `json:"browser_download_url"`
 	} `json:"assets"`
@@ -122,6 +128,12 @@ func New(current string, log *slog.Logger, onChange func()) *Updater {
 		goarch:   runtime.GOARCH,
 		st:       Status{Current: current, Dev: !ok, State: "idle"},
 	}
+}
+
+// SetBeta chooses whether pre-releases (tags like v0.3.0-beta.1) are
+// offered. Off, only GitHub's latest stable release counts.
+func (u *Updater) SetBeta(on bool) {
+	u.set(func(s *Status) { s.Beta = on })
 }
 
 func (u *Updater) Status() Status {
@@ -181,10 +193,11 @@ func (u *Updater) Check(ctx context.Context) error {
 	u.set(func(s *Status) {
 		s.State, s.CheckedAt = "idle", time.Now()
 		if rel == nil {
-			s.Latest, s.Available, s.Notes, s.URL = "", false, "", ""
+			s.Latest, s.Available, s.Notes, s.URL, s.Prerelease = "", false, "", "", false
 			return
 		}
 		s.Latest = strings.TrimPrefix(rel.Tag, "v")
+		s.Prerelease = rel.Prerelease
 		s.Available = Newer(s.Latest, s.Current)
 		s.Notes = truncate(rel.Body, maxNotes)
 		s.URL = rel.URL
@@ -196,34 +209,65 @@ func (u *Updater) Check(ctx context.Context) error {
 	return nil
 }
 
-// latest returns the newest published release, or nil when there is none.
+// latest returns the release to offer, or nil when there is none: GitHub's
+// latest stable release, or with beta on the highest version among all
+// releases, pre-releases included.
 func (u *Updater) latest(ctx context.Context) (*release, error) {
+	if !u.Status().Beta {
+		var rel release
+		found, err := u.apiGet(ctx, "/releases/latest", &rel)
+		if !found || err != nil {
+			return nil, err
+		}
+		return &rel, nil
+	}
+	var list []release
+	if found, err := u.apiGet(ctx, "/releases?per_page=30", &list); !found || err != nil {
+		return nil, err
+	}
+	var best *release
+	for i := range list {
+		r := &list[i]
+		if r.Draft {
+			continue
+		}
+		if _, ok := parseVersion(r.Tag); !ok {
+			continue
+		}
+		if best == nil || Newer(r.Tag, best.Tag) {
+			best = r
+		}
+	}
+	return best, nil
+}
+
+// apiGet decodes a GitHub API response into v. found is false on 404.
+func (u *Updater) apiGet(ctx context.Context, path string, v any) (found bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.api+"/releases/latest", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.api+path, nil)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "go-dock/"+u.current)
 	resp, err := u.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("连接 GitHub 失败: %w", err)
+		return false, fmt.Errorf("连接 GitHub 失败: %w", err)
 	}
 	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
-		return nil, nil
+		return false, nil
 	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests:
-		return nil, errors.New("GitHub 接口请求过于频繁，请稍后再试")
+		return false, errors.New("GitHub 接口请求过于频繁，请稍后再试")
 	case resp.StatusCode != http.StatusOK:
-		return nil, fmt.Errorf("GitHub 返回 %s", resp.Status)
+		return false, fmt.Errorf("GitHub 返回 %s", resp.Status)
 	}
-	var rel release
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&rel); err != nil {
-		return nil, fmt.Errorf("解析版本信息: %w", err)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(v); err != nil {
+		return false, fmt.Errorf("解析版本信息: %w", err)
 	}
-	return &rel, nil
+	return true, nil
 }
 
 // Apply downloads the latest release, verifies it and replaces the running
@@ -399,37 +443,101 @@ func truncate(s string, n int) string {
 	return s
 }
 
-// parseVersion reads "1.2.3" or "v1.2.3", optionally with a "-pre" suffix.
-func parseVersion(s string) (v [4]int, ok bool) {
+// version is a parsed "1.2.3" or "1.2.3-beta.1" (a leading "v" and any
+// "+build" suffix are ignored).
+type version struct {
+	core [3]int
+	pre  []string // pre-release identifiers; empty for a release
+}
+
+func parseVersion(s string) (version, bool) {
+	var v version
 	s = strings.TrimPrefix(strings.TrimSpace(s), "v")
+	s, _, _ = strings.Cut(s, "+")
 	core, pre, hasPre := strings.Cut(s, "-")
 	parts := strings.Split(core, ".")
 	if len(parts) != 3 {
 		return v, false
 	}
 	for i, p := range parts {
-		n := 0
-		if p == "" {
+		n, ok := number(p)
+		if !ok {
 			return v, false
 		}
-		for _, c := range p {
-			if c < '0' || c > '9' {
-				return v, false
-			}
-			n = n*10 + int(c-'0')
-		}
-		v[i] = n
+		v.core[i] = n
 	}
-	// A release sorts after its pre-releases.
-	v[3] = 1
-	if hasPre && pre != "" {
-		v[3] = 0
+	if hasPre {
+		if pre == "" {
+			return v, false
+		}
+		v.pre = strings.Split(pre, ".")
 	}
 	return v, true
 }
 
+func number(s string) (int, bool) {
+	if s == "" {
+		return 0, false
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, true
+}
+
+// compare orders versions by semver precedence: a release is newer than
+// its pre-releases, and pre-release identifiers compare numerically when
+// both are numbers (beta.10 > beta.2), otherwise as text, numbers first.
+func compare(a, b version) int {
+	for i := range a.core {
+		if a.core[i] != b.core[i] {
+			return cmpInt(a.core[i], b.core[i])
+		}
+	}
+	switch {
+	case len(a.pre) == 0 && len(b.pre) == 0:
+		return 0
+	case len(a.pre) == 0:
+		return 1
+	case len(b.pre) == 0:
+		return -1
+	}
+	for i := 0; i < len(a.pre) && i < len(b.pre); i++ {
+		x, y := a.pre[i], b.pre[i]
+		nx, okx := number(x)
+		ny, oky := number(y)
+		switch {
+		case okx && oky:
+			if nx != ny {
+				return cmpInt(nx, ny)
+			}
+		case okx:
+			return -1
+		case oky:
+			return 1
+		case x != y:
+			return strings.Compare(x, y)
+		}
+	}
+	return cmpInt(len(a.pre), len(b.pre))
+}
+
+func cmpInt(a, b int) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
 // Newer reports whether version a is newer than b. Unparseable versions
-// are never newer.
+// are never newer, and any version is newer than an unparseable one.
 func Newer(a, b string) bool {
 	va, ok := parseVersion(a)
 	if !ok {
@@ -439,10 +547,5 @@ func Newer(a, b string) bool {
 	if !ok {
 		return true
 	}
-	for i := range va {
-		if va[i] != vb[i] {
-			return va[i] > vb[i]
-		}
-	}
-	return false
+	return compare(va, vb) > 0
 }

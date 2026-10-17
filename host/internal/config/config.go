@@ -99,6 +99,8 @@ type DisplayConfig struct {
 type UpdateConfig struct {
 	// AutoCheck looks for a new release once a day.
 	AutoCheck bool `json:"auto_check"`
+	// Prerelease also offers test releases (tags like v0.3.0-beta.1).
+	Prerelease bool `json:"prerelease"`
 }
 
 type LogConfig struct {
