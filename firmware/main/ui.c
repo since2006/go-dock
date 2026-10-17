@@ -87,7 +87,7 @@ typedef struct {
 } meter_t;
 
 typedef struct {
-    lv_obj_t *obj, *chip, *icon, *spinner, *project, *name, *prov, *badge, *badge_text, *label, *time, *tok, *msg,
+    lv_obj_t *obj, *chip, *icon, *spinner, *project, *name, *prov, *label, *time, *tok, *msg,
         *detail;
 } row_t;
 
@@ -454,13 +454,6 @@ static void build_row(lv_obj_t *p, row_t *r)
     lv_obj_set_height(r->name, lv_font_get_line_height(fn));
     r->prov = text(r->obj, font_get(FONT_BOLD, 13), C_TEXT);
 
-    // "子任务 N" when the session has subagents.
-    r->badge = box(r->obj, 0, 0, 10, 10, C_TRACK, 7);
-    lv_obj_set_size(r->badge, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_pad_hor(r->badge, 7, 0);
-    lv_obj_set_style_pad_ver(r->badge, 1, 0);
-    r->badge_text = text(r->badge, font_get(FONT_BOLD, 13), 0xC9C9C4);
-
     // State, time and " ↓6.5K" at the right end of the project line.
     r->label = text(r->obj, font_get(FONT_BOLD, 18), C_TEXT);
     r->time = text(r->obj, font_get(FONT_MONO, 15), C_TEXT3);
@@ -694,20 +687,13 @@ static int render_main(row_t *r, const dock_session_t *s, int y, int64_t now)
     show_state_icon(r->icon, r->spinner, s->state, color);
     lv_obj_center(r->icon);
 
-    // Project line: project name, session name in small type, provider tag
-    // and subagent badge on the left; state, time and this turn's output
+    // Project line: project name, session name in small type and provider
+    // tag on the left; state, time and this turn's output
     // tokens ("1:55 ↓6.5K", like Claude Code's spinner) on the right. All
     // but the names stay whole; the session name gives way first, then the
     // project name.
     set_text(r->prov, PROVIDER_NAME[s->provider]);
     set_color(r->prov, PROVIDER_COLOR[s->provider]);
-    if (s->agents_total > 0) {
-        snprintf(buf, sizeof(buf), "子任务 %d", s->agents_active > 0 ? s->agents_active : s->agents_total);
-        set_text(r->badge_text, buf);
-        lv_obj_remove_flag(r->badge, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(r->badge, LV_OBJ_FLAG_HIDDEN);
-    }
     set_text(r->label, s->label[0] ? s->label : STATE[s->state].label);
     set_color(r->label, color);
     fmt_row_time(buf, sizeof(buf), s, now);
@@ -729,8 +715,7 @@ static int render_main(row_t *r, const dock_session_t *s, int y, int64_t now)
 
     int time_x = END_X - lv_obj_get_width(r->time) - (s->turn_output > 0 ? lv_obj_get_width(r->tok) : 0);
     int label_x = time_x - 8 - lv_obj_get_width(r->label);
-    int room = label_x - 12 - MID_X - 8 - lv_obj_get_width(r->prov) -
-               (s->agents_total > 0 ? 8 + lv_obj_get_width(r->badge) : 0); // project and session name
+    int room = label_x - 12 - MID_X - 8 - lv_obj_get_width(r->prov); // project and session name
     int pw = lv_obj_get_width(r->project);
     if (pw > room) {
         pw = room > 1 ? room : 1;
@@ -754,7 +739,6 @@ static int render_main(row_t *r, const dock_session_t *s, int y, int64_t now)
         lv_obj_add_flag(r->name, LV_OBJ_FLAG_HIDDEN);
     }
     on_baseline(r->prov, x, base);
-    lv_obj_align_to(r->badge, r->prov, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
     on_baseline(r->label, label_x, base);
     on_baseline(r->time, time_x, base);
     on_baseline(r->tok, time_x + lv_obj_get_width(r->time), base);
