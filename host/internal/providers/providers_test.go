@@ -22,6 +22,20 @@ func TestToolSummary(t *testing.T) {
 	}
 }
 
+func TestToolAction(t *testing.T) {
+	cases := []struct{ tool, input, want string }{
+		{"Bash", `{"command":"grep -c go-dock settings.json","description":"Check hooks install"}`, "Check hooks install"},
+		{"Bash", `{"command":"ls","description":"  "}`, "Bash: ls"},
+		{"Read", `{"file_path":"/a/b/main.go"}`, "Read: main.go"},
+		{"Agent", `{"description":"Explore toolbar","subagent_type":"Explore"}`, "Agent: Explore toolbar"},
+	}
+	for _, c := range cases {
+		if got := ToolAction(c.tool, json.RawMessage(c.input)); got != c.want {
+			t.Errorf("%s %s = %q, want %q", c.tool, c.input, got, c.want)
+		}
+	}
+}
+
 func TestMergeHookKeepsPositions(t *testing.T) {
 	ours := func(h map[string]any) bool { return h["command"] == "go-dock old" || h["command"] == "go-dock new" }
 	var groups []HookGroup

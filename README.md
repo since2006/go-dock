@@ -20,11 +20,11 @@ go-dock/
 |---|---|
 | Claude 5 小时 / 7 天额度与重置时间 | Claude Code 状态栏数据中的官方 `rate_limits`（需安装「状态栏」集成） |
 | Codex 5 小时 / 7 天额度 | Codex 会话日志中的 `rate_limits`，以及定期调用 `codex app-server` |
-| 今日 / 近 7 天 token、API 等价费用 | 本地会话记录（Claude 按官方价格估算费用；Codex 只统计 token） |
+| 今日 / 近 7 天 token、API 等价费用 | 本地会话记录。token 数 = 输入 + 缓存写入 + 输出，不含缓存读取（每轮重复读取同一段上下文，算进去会虚高上百倍）；费用按官方价格估算，包含缓存读取。Codex 只统计 token |
 | 每个会话的状态 | hooks 实时上报；没装 hooks 时读取 Claude 的会话状态文件和 Codex 的会话日志兜底 |
 | 子代理（子任务） | Claude Code 用 Agent 工具派出的子代理、Codex 派生的子线程，分组显示在所属会话下面：类型、任务描述、当前动作、状态、已运行时间；子代理等待授权时整个会话显示「需授权」 |
 
-同时运行多个任务时，屏幕和网页按 **需授权 > 等待输入 > 出错 > 进行中 > 已完成** 排序；屏幕每页 4 条，滑动翻页。
+同时运行多个任务时，屏幕和网页按 **需授权 > 等待输入 > 出错 > 进行中 > 已完成** 排序，子 agent 缩进显示在所属会话下面；屏幕一页放不下时上下滑动翻页。主会话派出后台子 agent 后自己先停下时，显示「进行中 · 等待 N 个子任务完成」，而不是「已完成」。
 
 go-dock **不读取任何登录凭据**，也不调用非公开接口。
 
@@ -119,7 +119,7 @@ esptool.py --chip esp32s3 write_flash 0x0 go-dock-firmware-v2.bin
 
 | 集成 | 修改的文件 | 作用 |
 |---|---|---|
-| Claude Code hooks | `~/.claude/settings.json` 的 `hooks` | 会话开始、提问、工具调用、授权请求、完成、出错、子代理开始与结束时立即上报。「需授权」能立刻显示，并带出工具名和命令 |
+| Claude Code hooks | `~/.claude/settings.json` 的 `hooks` | 会话开始、提问、工具调用、授权请求、完成、出错、子代理开始与结束时立即上报。「需授权」能立刻显示，并带出工具名和命令；运行中的命令显示 Claude 为它写的说明（和 Claude Code 界面里命令上方那行一样） |
 | Claude Code 状态栏 | `~/.claude/settings.json` 的 `statusLine` | 读取官方 5h / 7d 额度。原有状态栏命令（例如 claude-hud）会被包装起来继续调用，显示效果不变 |
 | Codex hooks | `~/.codex/hooks.json` | 提问、工具调用、授权请求、完成、中断时立即上报。**安装后需在 Codex 里运行 `/hooks`，信任这些 hooks 才会生效** |
 

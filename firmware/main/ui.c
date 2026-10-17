@@ -19,7 +19,6 @@
 #define TASKS_Y 178
 #define TASKS_H 258
 #define LIST_W 540
-#define MAX_ROWS 4
 #define MAX_DOTS 8
 
 #define OFFLINE_AFTER_US (15 * 1000000LL)
@@ -61,35 +60,35 @@ static const struct {
     [DOCK_IDLE] = {0x9A9A94, C_CARD, false, LV_SYMBOL_BULLET, "空闲"},
 };
 
-#if CONFIG_DOCK_THREE_ROWS
-#define ROWS 3
-#define ROW_H 80
-#define CHIP 48
-#define F_PROJECT 26
-#define F_DETAIL 18
-#define F_LABEL 21
-#define F_TIME 18
-#else
-#define ROWS 4
-#define ROW_H 60
+// Task list layout, shared with the web preview (docs/protocol-v1.md
+// §7.1): a session row is 80 px with a title and an action line, 60 px
+// with one; each subagent adds a 32 px row under it; a session and its
+// subagents never split across pages.
+#define MAIN_H 60
+#define MAIN_H_TALL 80
+#define SUB_H 32
+#define SUB_GAP 4
+#define GROUP_GAP 6
+#define SUB_X 52
+#define MAX_MAIN 4 // session rows that fit on a page
+#define MAX_SUB 6  // subagent rows that fit on a page
+#define MAX_PAGES 32
 #define CHIP 40
-#define F_PROJECT 22
-#define F_DETAIL 16
-#define F_LABEL 18
-#define F_TIME 16
-#endif
-#define ROW_GAP ((TASKS_H - ROWS * ROW_H) / (ROWS - 1))
 #define MID_X (12 + CHIP + 12)
-#define END_W 110                         // state label and time column
+#define END_W 110 // state label and time column
 #define MID_W (LIST_W - 14 - END_W - 8 - MID_X) // project line
 
 typedef struct {
-    lv_obj_t *lbl, *reset_icon, *reset, *pct, *bar;
+    lv_obj_t *reset, *window, *pct, *bar;
 } meter_t;
 
 typedef struct {
-    lv_obj_t *obj, *chip, *icon, *spinner, *project, *prov, *badge, *badge_text, *detail, *label, *time;
+    lv_obj_t *obj, *chip, *icon, *spinner, *project, *prov, *badge, *badge_text, *title, *detail, *label, *time;
 } row_t;
+
+typedef struct {
+    lv_obj_t *obj, *icon, *spinner, *type, *text, *label, *time;
+} sub_t;
 
 static struct {
     lv_obj_t *root;    // shifted a few px now and then against burn-in
@@ -99,7 +98,8 @@ static struct {
         meter_t m[2];
         lv_obj_t *today;
     } usage[2];
-    row_t rows[MAX_ROWS];
+    row_t rows[MAX_MAIN];
+    sub_t subs[MAX_SUB];
     lv_obj_t *pager, *dots[MAX_DOTS];
     lv_obj_t *empty;
     lv_obj_t *overlay, *ov_title, *ov_sub, *ov_note;
@@ -110,7 +110,9 @@ static uint32_t s_version;
 static int64_t s_rx_us;
 static bool s_have;
 static int s_page;
-static char s_first_id[96]; // first session on the current page
+static int s_page_count = 1;
+static int s_page_start[MAX_PAGES + 1]; // first session index of each page
+static char s_first_id[96];             // first session on the current page
 static int64_t s_last_second_us;
 static int64_t s_touch_us;
 static int64_t s_active_us;
@@ -180,20 +182,28 @@ static void fmt_clock(char *buf, size_t n, int64_t unix)
     snprintf(buf, n, "%02d:%02d", tm.tm_hour, tm.tm_min);
 }
 
+// Time left in a usage window, as claude-hud prints it: "33m", "4h 33m", "4d 14h".
 static void fmt_reset(char *buf, size_t n, const dock_window_t *w, int64_t now)
 {
     if (!w->present || w->resets_at == 0) {
-        snprintf(buf, n, "-");
+        snprintf(buf, n, "—");
         return;
     }
     int64_t sec = w->resets_at - now;
-    if (sec < 0) {
-        sec = 0;
-    }
-    if (sec >= 86400) {
-        snprintf(buf, n, "%dd", (int)((sec + 43200) / 86400));
+    int mins = sec > 0 ? (int)((sec + 59) / 60) : 0;
+    int h = mins / 60, m = mins % 60;
+    if (mins < 60) {
+        snprintf(buf, n, "%dm", mins);
+    } else if (h >= 24) {
+        if (h % 24) {
+            snprintf(buf, n, "%dd %dh", h / 24, h % 24);
+        } else {
+            snprintf(buf, n, "%dd", h / 24);
+        }
+    } else if (m) {
+        snprintf(buf, n, "%dh %dm", h, m);
     } else {
-        snprintf(buf, n, "%d:%02d", (int)(sec / 3600), (int)(sec % 3600 / 60));
+        snprintf(buf, n, "%dh", h);
     }
 }
 
@@ -202,13 +212,13 @@ static bool is_active(dock_state_t st)
     return st == DOCK_APPROVAL || st == DOCK_INPUT || st == DOCK_ERROR || st == DOCK_RUNNING;
 }
 
-static void fmt_elapsed(char *buf, size_t n, const dock_session_t *s, int64_t now)
+static void fmt_elapsed(char *buf, size_t n, dock_state_t state, int64_t since, int64_t now)
 {
-    int64_t sec = now - s->since;
+    int64_t sec = now - since;
     if (sec < 0) {
         sec = 0;
     }
-    if (is_active(s->state)) {
+    if (is_active(state)) {
         if (sec >= 3600) {
             snprintf(buf, n, "%dh%02dm", (int)(sec / 3600), (int)(sec % 3600 / 60));
         } else {
@@ -243,11 +253,42 @@ static void fmt_tokens(char *buf, size_t n, int64_t v)
     }
 }
 
-static int pages(void)
+static bool is_tall(const dock_session_t *s)
+{
+    return s->title[0] && s->detail[0];
+}
+
+// Splits the sessions into pages by height, keeping each session together
+// with its subagents.
+static void layout_pages(void)
 {
     int n = s_have ? s_snap->count : 0;
-    int p = (n + ROWS - 1) / ROWS;
-    return p < 1 ? 1 : p;
+    int used = 0, mains = 0, subs = 0;
+    s_page_count = 1;
+    s_page_start[0] = 0;
+    for (int i = 0; i < n; i++) {
+        const dock_session_t *s = &s_snap->sessions[i];
+        int h = (is_tall(s) ? MAIN_H_TALL : MAIN_H) + s->agent_count * (SUB_H + SUB_GAP);
+        bool fits = mains == 0 || (used + GROUP_GAP + h <= TASKS_H && mains < MAX_MAIN && subs + s->agent_count <= MAX_SUB);
+        if (!fits && s_page_count < MAX_PAGES) {
+            s_page_start[s_page_count++] = i;
+            used = mains = subs = 0;
+        }
+        used += (mains ? GROUP_GAP : 0) + h;
+        mains++;
+        subs += s->agent_count;
+    }
+    s_page_start[s_page_count] = n;
+}
+
+static int page_of(int index)
+{
+    for (int p = s_page_count - 1; p > 0; p--) {
+        if (index >= s_page_start[p]) {
+            return p;
+        }
+    }
+    return 0;
 }
 
 // ---------- building ----------
@@ -269,19 +310,17 @@ static void build_strip(lv_obj_t *p)
     lv_obj_align_to(ui.link_dot, ui.clock, LV_ALIGN_OUT_LEFT_MID, -8, 0);
 }
 
+// "4h 33m / 5h" on the left, the percentage on the right, the bar below.
 static void build_meter(lv_obj_t *row, meter_t *m, int x, const char *name)
 {
-    const int w = 178;
-    m->lbl = text(row, font_get(FONT_REGULAR, 14), C_TEXT3);
-    lv_label_set_text(m->lbl, name);
-    lv_obj_set_pos(m->lbl, x, 6);
+    const int w = 182;
+    m->reset = text(row, font_get(FONT_MONO, 13), C_TEXT2);
+    lv_obj_set_pos(m->reset, x, 7);
 
-    m->reset_icon = text(row, &lv_font_montserrat_12, C_TEXT5);
-    lv_label_set_text(m->reset_icon, LV_SYMBOL_REFRESH);
-    lv_obj_align_to(m->reset_icon, m->lbl, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
-
-    m->reset = text(row, font_get(FONT_MONO, 13), C_TEXT5);
-    lv_obj_align_to(m->reset, m->reset_icon, LV_ALIGN_OUT_RIGHT_MID, 2, 0);
+    m->window = text(row, font_get(FONT_MONO, 13), C_TEXT5);
+    char buf[16];
+    snprintf(buf, sizeof(buf), " / %s", name);
+    lv_label_set_text(m->window, buf);
 
     m->pct = text(row, font_get(FONT_MONO_BOLD, 21), C_TEXT);
     lv_obj_set_width(m->pct, 80);
@@ -308,8 +347,8 @@ static void build_usage(lv_obj_t *p)
         lv_obj_t *name = text(row, font_get(FONT_BOLD, 19), PROVIDER_COLOR[i]);
         lv_label_set_text(name, PROVIDER_NAME[i]);
         lv_obj_align(name, LV_ALIGN_LEFT_MID, 0, 0);
-        build_meter(row, &ui.usage[i].m[0], 86, "5h");
-        build_meter(row, &ui.usage[i].m[1], 280, "7d");
+        build_meter(row, &ui.usage[i].m[0], 84, "5h");
+        build_meter(row, &ui.usage[i].m[1], 280, "Weekly");
 
         ui.usage[i].today = text(row, font_get(FONT_MONO, 17), C_TEXT);
         lv_obj_set_width(ui.usage[i].today, 58);
@@ -321,34 +360,37 @@ static void build_usage(lv_obj_t *p)
     }
 }
 
-static void build_row(lv_obj_t *p, row_t *r, int y)
+static lv_obj_t *spinner(lv_obj_t *parent, int size, int width)
 {
-    r->obj = box(p, 0, y, LIST_W, ROW_H, C_CARD, 14);
+    lv_obj_t *sp = lv_spinner_create(parent);
+    lv_spinner_set_anim_params(sp, 1200, 270);
+    lv_obj_set_size(sp, size, size);
+    lv_obj_set_style_arc_width(sp, width, LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(sp, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(sp, width, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(sp, lv_color_hex(C_GREEN), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(sp, true, LV_PART_INDICATOR);
+    return sp;
+}
+
+// Session row; positions depend on its height and are set when rendered.
+static void build_row(lv_obj_t *p, row_t *r)
+{
+    r->obj = box(p, 0, 0, LIST_W, MAIN_H, C_CARD, 14);
     lv_obj_set_style_border_width(r->obj, 2, 0);
     lv_obj_set_style_border_opa(r->obj, LV_OPA_TRANSP, 0);
 
-    r->chip = box(r->obj, 12, (ROW_H - CHIP) / 2, CHIP, CHIP, 0, LV_RADIUS_CIRCLE);
+    r->chip = box(r->obj, 12, 0, CHIP, CHIP, 0, LV_RADIUS_CIRCLE);
     lv_obj_set_style_bg_opa(r->chip, 41, 0); // ~16% of the state color
     r->icon = text(r->chip, &lv_font_montserrat_20, C_TEXT);
     lv_obj_center(r->icon);
-    r->spinner = lv_spinner_create(r->chip);
-    lv_spinner_set_anim_params(r->spinner, 1200, 270);
-    lv_obj_set_size(r->spinner, 22, 22);
+    r->spinner = spinner(r->chip, 22, 3);
     lv_obj_center(r->spinner);
-    lv_obj_set_style_arc_width(r->spinner, 3, LV_PART_MAIN);
-    lv_obj_set_style_arc_opa(r->spinner, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(r->spinner, 3, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(r->spinner, lv_color_hex(C_GREEN), LV_PART_INDICATOR);
-    lv_obj_set_style_arc_rounded(r->spinner, true, LV_PART_INDICATOR);
 
-    const lv_font_t *fp = font_get(FONT_BOLD, F_PROJECT);
-    const lv_font_t *fd = font_get(FONT_REGULAR, F_DETAIL);
-    int mid_x = MID_X;
-    int mid_y = (ROW_H - lv_font_get_line_height(fp) - lv_font_get_line_height(fd) + 4) / 2;
+    const lv_font_t *fp = font_get(FONT_BOLD, 22);
     r->project = text(r->obj, fp, C_TEXT);
     lv_label_set_long_mode(r->project, LV_LABEL_LONG_DOT);
     lv_obj_set_height(r->project, lv_font_get_line_height(fp)); // one line, "..." when cut
-    lv_obj_set_pos(r->project, mid_x, mid_y);
     r->prov = text(r->obj, font_get(FONT_BOLD, 13), C_TEXT);
 
     // "子任务 N" when the session has subagents.
@@ -357,23 +399,43 @@ static void build_row(lv_obj_t *p, row_t *r, int y)
     lv_obj_set_style_pad_hor(r->badge, 7, 0);
     lv_obj_set_style_pad_ver(r->badge, 1, 0);
     r->badge_text = text(r->badge, font_get(FONT_BOLD, 13), 0xC9C9C4);
-    r->detail = line(r->obj, fd, C_TEXT2, MID_W);
-    lv_obj_set_pos(r->detail, mid_x, mid_y + lv_font_get_line_height(fp) - 4);
 
-    const lv_font_t *fl = font_get(FONT_BOLD, F_LABEL);
-    r->label = text(r->obj, fl, C_TEXT);
+    r->title = line(r->obj, font_get(FONT_REGULAR, 15), 0xC9C9C4, MID_W);
+    r->detail = line(r->obj, font_get(FONT_REGULAR, 16), C_TEXT2, MID_W);
+
+    r->label = text(r->obj, font_get(FONT_BOLD, 18), C_TEXT);
     lv_obj_set_width(r->label, END_W);
     lv_obj_set_style_text_align(r->label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(r->label, LIST_W - 14 - END_W, mid_y + 2);
-    r->time = text(r->obj, font_get(FONT_MONO, F_TIME), C_TEXT3);
+    r->time = text(r->obj, font_get(FONT_MONO, 15), C_TEXT3);
     lv_obj_set_width(r->time, END_W);
     lv_obj_set_style_text_align(r->time, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(r->time, LIST_W - 14 - END_W, mid_y + lv_font_get_line_height(fp));
+}
+
+// Subagent row, indented under its session.
+static void build_sub(lv_obj_t *p, sub_t *u)
+{
+    const int w = LIST_W - SUB_X;
+    u->obj = box(p, SUB_X, 0, w, SUB_H, 0x0B0B0C, 10);
+    u->icon = text(u->obj, &lv_font_montserrat_12, C_TEXT);
+    lv_obj_align(u->icon, LV_ALIGN_LEFT_MID, 11, 0);
+    u->spinner = spinner(u->obj, 14, 2);
+    lv_obj_align(u->spinner, LV_ALIGN_LEFT_MID, 9, 0);
+    u->type = text(u->obj, font_get(FONT_BOLD, 15), C_TEXT);
+    lv_obj_align(u->type, LV_ALIGN_LEFT_MID, 32, 0);
+    u->text = line(u->obj, font_get(FONT_REGULAR, 14), C_TEXT2, 200);
+    u->time = text(u->obj, font_get(FONT_MONO, 13), C_TEXT3);
+    lv_obj_set_width(u->time, 56);
+    lv_obj_set_style_text_align(u->time, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(u->time, LV_ALIGN_RIGHT_MID, -12, 0);
+    u->label = text(u->obj, font_get(FONT_BOLD, 14), C_TEXT);
+    lv_obj_set_width(u->label, 64);
+    lv_obj_set_style_text_align(u->label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(u->label, LV_ALIGN_RIGHT_MID, -12 - 56 - 6, 0);
 }
 
 static void go_page(int delta)
 {
-    int n = pages();
+    int n = s_page_count;
     s_page = ((s_page + delta) % n + n) % n;
     s_first_id[0] = '\0'; // keep the page the user chose
 }
@@ -405,8 +467,11 @@ static void on_gesture(lv_event_t *e)
 static void build_tasks(lv_obj_t *p)
 {
     lv_obj_t *list = box(p, PAD_X, TASKS_Y, LIST_W, TASKS_H, 0, -1);
-    for (int i = 0; i < ROWS; i++) {
-        build_row(list, &ui.rows[i], i * (ROW_H + ROW_GAP));
+    for (int i = 0; i < MAX_MAIN; i++) {
+        build_row(list, &ui.rows[i]);
+    }
+    for (int i = 0; i < MAX_SUB; i++) {
+        build_sub(list, &ui.subs[i]);
     }
 
     ui.empty = box(p, PAD_X, TASKS_Y, SCR_W - 2 * PAD_X, TASKS_H, 0x0B0B0C, 18);
@@ -512,83 +577,162 @@ static void render_usage(int64_t now)
             }
             fmt_reset(buf, sizeof(buf), w[k], now);
             set_text(m->reset, buf);
-            lv_obj_align_to(m->reset, m->reset_icon, LV_ALIGN_OUT_RIGHT_MID, 2, 0);
+            lv_obj_align_to(m->window, m->reset, LV_ALIGN_OUT_RIGHT_MID, 0, 0);
         }
         fmt_tokens(buf, sizeof(buf), s_have ? u->today_tokens : 0);
         set_text(ui.usage[i].today, buf);
     }
 }
 
+static void show_state_icon(lv_obj_t *icon, lv_obj_t *spin, dock_state_t st, uint32_t color)
+{
+    if (STATE[st].icon) {
+        lv_obj_add_flag(spin, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(icon, LV_OBJ_FLAG_HIDDEN);
+        set_text(icon, STATE[st].icon);
+        set_color(icon, color);
+    } else {
+        lv_obj_add_flag(icon, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(spin, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// Lays out one session row at y and returns its height.
+static int render_main(row_t *r, const dock_session_t *s, int y, int64_t now)
+{
+    bool tall = is_tall(s);
+    int h = tall ? MAIN_H_TALL : MAIN_H;
+    uint32_t color = STATE[s->state].color;
+    char buf[32];
+
+    lv_obj_remove_flag(r->obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_pos(r->obj, 0, y);
+    lv_obj_set_height(r->obj, h);
+    lv_obj_set_style_bg_color(r->obj, lv_color_hex(STATE[s->state].row_bg), 0);
+    lv_obj_set_style_border_color(r->obj, lv_color_hex(color), 0);
+    lv_obj_set_style_border_opa(r->obj, STATE[s->state].ring ? 115 : LV_OPA_TRANSP, 0);
+
+    lv_obj_set_y(r->chip, (h - CHIP) / 2);
+    lv_obj_set_style_bg_color(r->chip, lv_color_hex(color), 0);
+    show_state_icon(r->icon, r->spinner, s->state, color);
+    lv_obj_center(r->icon);
+
+    // The project name gets whatever the provider tag and the subagent
+    // badge leave; it is cut first, the tags stay whole.
+    set_text(r->prov, PROVIDER_NAME[s->provider]);
+    set_color(r->prov, PROVIDER_COLOR[s->provider]);
+    if (s->agents_total > 0) {
+        snprintf(buf, sizeof(buf), "子任务 %d", s->agents_active > 0 ? s->agents_active : s->agents_total);
+        set_text(r->badge_text, buf);
+        lv_obj_remove_flag(r->badge, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(r->badge, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_set_width(r->project, LV_SIZE_CONTENT);
+    set_text(r->project, s->project[0] ? s->project : "-");
+    lv_obj_set_pos(r->project, MID_X, tall ? 5 : 4);
+    lv_obj_update_layout(r->obj);
+    int tags = 8 + lv_obj_get_width(r->prov) + (s->agents_total > 0 ? 8 + lv_obj_get_width(r->badge) : 0);
+    if (lv_obj_get_width(r->project) > MID_W - tags) {
+        lv_obj_set_width(r->project, MID_W - tags);
+    }
+    lv_obj_align_to(r->prov, r->project, LV_ALIGN_OUT_RIGHT_BOTTOM, 8, -4);
+    lv_obj_align_to(r->badge, r->prov, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+
+    // Tall rows: title, then what the session is doing. Short rows: one
+    // line, whichever there is (older hosts only send text).
+    if (tall) {
+        lv_obj_remove_flag(r->title, LV_OBJ_FLAG_HIDDEN);
+        set_text(r->title, s->title);
+        lv_obj_set_pos(r->title, MID_X, 35);
+        lv_obj_set_style_text_font(r->detail, font_get(FONT_REGULAR, 15), 0);
+        set_color(r->detail, C_TEXT3);
+        set_text(r->detail, s->detail);
+        lv_obj_set_pos(r->detail, MID_X, 56);
+    } else {
+        lv_obj_add_flag(r->title, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_text_font(r->detail, font_get(FONT_REGULAR, 16), 0);
+        set_color(r->detail, C_TEXT2);
+        const char *one = s->detail[0] ? s->detail : s->title[0] ? s->title : s->text;
+        set_text(r->detail, one[0] ? one : " ");
+        lv_obj_set_pos(r->detail, MID_X, 34);
+    }
+    lv_obj_set_height(r->detail, lv_font_get_line_height(lv_obj_get_style_text_font(r->detail, 0)));
+
+    set_text(r->label, s->label[0] ? s->label : STATE[s->state].label);
+    set_color(r->label, color);
+    lv_obj_set_pos(r->label, LIST_W - 14 - END_W, tall ? 8 : 6);
+    fmt_elapsed(buf, sizeof(buf), s->state, s->since, now);
+    set_text(r->time, buf);
+    lv_obj_set_pos(r->time, LIST_W - 14 - END_W, tall ? 55 : 35);
+    return h;
+}
+
+static void render_sub(sub_t *u, const dock_agent_t *a, int y, int64_t now)
+{
+    static const uint32_t bg[DOCK_STATE_COUNT] = {
+        [DOCK_APPROVAL] = 0x1C1305, [DOCK_INPUT] = 0x0B0B0C, [DOCK_ERROR] = 0x1A0A08,
+        [DOCK_RUNNING] = 0x0B0B0C, [DOCK_DONE] = 0x0B0B0C, [DOCK_IDLE] = 0x0B0B0C,
+    };
+    uint32_t color = STATE[a->state].color;
+    char buf[32];
+
+    lv_obj_remove_flag(u->obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_y(u->obj, y);
+    lv_obj_set_style_bg_color(u->obj, lv_color_hex(bg[a->state]), 0);
+    show_state_icon(u->icon, u->spinner, a->state, color);
+
+    set_text(u->type, a->type[0] ? a->type : "agent");
+    fmt_elapsed(buf, sizeof(buf), a->state, a->since, now);
+    set_text(u->time, buf);
+    // Running subagents show only the spinner; others name their state.
+    bool labelled = a->state != DOCK_RUNNING;
+    if (labelled) {
+        set_text(u->label, STATE[a->state].label);
+        set_color(u->label, color);
+        lv_obj_remove_flag(u->label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(u->label, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_update_layout(u->obj);
+    int x = lv_obj_get_x(u->type) + lv_obj_get_width(u->type) + 8;
+    int end = LIST_W - SUB_X - 12 - 56 - 6 - (labelled ? 64 + 6 : 0);
+    lv_obj_set_width(u->text, end > x ? end - x : 1);
+    set_text(u->text, a->text);
+    lv_obj_align(u->text, LV_ALIGN_LEFT_MID, x, 0);
+}
+
 static void render_rows(void)
 {
     int n = s_have ? s_snap->count : 0;
-    int total = pages();
-    if (s_page >= total) {
-        s_page = total - 1;
+    layout_pages();
+    if (s_page >= s_page_count) {
+        s_page = s_page_count - 1;
     }
     int64_t now = host_now();
-    char buf[32];
+    int from = s_page_start[s_page], to = s_page_start[s_page + 1];
+    int y = 0, mains = 0, subs = 0;
 
-    for (int i = 0; i < ROWS; i++) {
-        row_t *r = &ui.rows[i];
-        int idx = s_page * ROWS + i;
-        if (idx >= n) {
-            lv_obj_add_flag(r->obj, LV_OBJ_FLAG_HIDDEN);
-            continue;
-        }
-        const dock_session_t *s = &s_snap->sessions[idx];
-        if (i == 0) {
+    for (int i = from; i < to && mains < MAX_MAIN; i++) {
+        const dock_session_t *s = &s_snap->sessions[i];
+        if (i == from) {
             snprintf(s_first_id, sizeof(s_first_id), "%s", s->id);
         }
-        lv_obj_remove_flag(r->obj, LV_OBJ_FLAG_HIDDEN);
-        uint32_t color = STATE[s->state].color;
-
-        lv_obj_set_style_bg_color(r->obj, lv_color_hex(STATE[s->state].row_bg), 0);
-        lv_obj_set_style_border_color(r->obj, lv_color_hex(color), 0);
-        lv_obj_set_style_border_opa(r->obj, STATE[s->state].ring ? 115 : LV_OPA_TRANSP, 0);
-        lv_obj_set_style_bg_color(r->chip, lv_color_hex(color), 0);
-
-        if (STATE[s->state].icon) {
-            lv_obj_add_flag(r->spinner, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(r->icon, LV_OBJ_FLAG_HIDDEN);
-            set_text(r->icon, STATE[s->state].icon);
-            set_color(r->icon, color);
-            lv_obj_center(r->icon);
-        } else {
-            lv_obj_add_flag(r->icon, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(r->spinner, LV_OBJ_FLAG_HIDDEN);
+        if (mains > 0) {
+            y += GROUP_GAP;
         }
-
-        // The project name gets whatever the provider tag and the subagent
-        // badge leave; it is cut first, the tags stay whole.
-        set_text(r->prov, PROVIDER_NAME[s->provider]);
-        set_color(r->prov, PROVIDER_COLOR[s->provider]);
-        int agents = s->agents_active > 0 ? s->agents_active : s->agents_total;
-        if (s->agents_total > 0) {
-            snprintf(buf, sizeof(buf), "子任务 %d", agents);
-            set_text(r->badge_text, buf);
-            lv_obj_remove_flag(r->badge, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(r->badge, LV_OBJ_FLAG_HIDDEN);
+        y += render_main(&ui.rows[mains++], s, y, now);
+        for (int k = 0; k < s->agent_count && subs < MAX_SUB; k++) {
+            y += SUB_GAP;
+            render_sub(&ui.subs[subs++], &s->agents[k], y, now);
+            y += SUB_H;
         }
-        lv_obj_set_width(r->project, LV_SIZE_CONTENT);
-        set_text(r->project, s->project[0] ? s->project : "-");
-        lv_obj_update_layout(r->obj);
-        int tags = 8 + lv_obj_get_width(r->prov);
-        if (s->agents_total > 0) {
-            tags += 8 + lv_obj_get_width(r->badge);
-        }
-        if (lv_obj_get_width(r->project) > MID_W - tags) {
-            lv_obj_set_width(r->project, MID_W - tags);
-        }
-        lv_obj_align_to(r->prov, r->project, LV_ALIGN_OUT_RIGHT_BOTTOM, 8, -4);
-        lv_obj_align_to(r->badge, r->prov, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
-
-        set_text(r->detail, s->text[0] ? s->text : " ");
-        set_text(r->label, s->label[0] ? s->label : STATE[s->state].label);
-        set_color(r->label, color);
-        fmt_elapsed(buf, sizeof(buf), s, now);
-        set_text(r->time, buf);
+    }
+    for (int i = mains; i < MAX_MAIN; i++) {
+        lv_obj_add_flag(ui.rows[i].obj, LV_OBJ_FLAG_HIDDEN);
+    }
+    for (int i = subs; i < MAX_SUB; i++) {
+        lv_obj_add_flag(ui.subs[i].obj, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (n == 0) {
@@ -597,10 +741,10 @@ static void render_rows(void)
         lv_obj_add_flag(ui.empty, LV_OBJ_FLAG_HIDDEN);
     }
 
-    if (total > 1) {
+    if (s_page_count > 1) {
         lv_obj_remove_flag(ui.pager, LV_OBJ_FLAG_HIDDEN);
         for (int i = 0; i < MAX_DOTS; i++) {
-            if (i >= total) {
+            if (i >= s_page_count) {
                 lv_obj_add_flag(ui.dots[i], LV_OBJ_FLAG_HIDDEN);
                 continue;
             }
@@ -700,7 +844,8 @@ void ui_poll(void)
                 break;
             }
         }
-        s_page = keep >= 0 ? keep / ROWS : (s_first_id[0] ? 0 : s_page);
+        layout_pages();
+        s_page = keep >= 0 ? page_of(keep) : (s_first_id[0] ? 0 : s_page);
         for (int i = 0; i < s_snap->count; i++) {
             if (is_active(s_snap->sessions[i].state)) {
                 s_active_us = now_us;

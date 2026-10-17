@@ -135,6 +135,24 @@ static void add(dock_state_t st, dock_provider_t p, const char *project, const c
     s_snap.counts[st]++;
 }
 
+static dock_session_t *last(void) { return &s_snap.sessions[s_snap.count - 1]; }
+static void title(const char *t) { snprintf(last()->title, sizeof(last()->title), "%s", t); }
+static void detail(const char *t) { snprintf(last()->detail, sizeof(last()->detail), "%s", t); }
+
+static void agent(dock_state_t st, const char *type, const char *text, int ago)
+{
+    dock_session_t *s = last();
+    dock_agent_t *a = &s->agents[s->agent_count++];
+    snprintf(a->type, sizeof(a->type), "%s", type);
+    snprintf(a->text, sizeof(a->text), "%s", text);
+    a->state = st;
+    a->since = NOW - ago;
+    s->agents_total++;
+    if (st != DOCK_DONE) {
+        s->agents_active++;
+    }
+}
+
 static void window(dock_window_t *w, float pct, int resets_in)
 {
     w->present = true;
@@ -170,17 +188,21 @@ int main(int argc, char **argv)
 
     // Everyday mix, two pages of tasks.
     reset();
-    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 62, 2 * 3600 + 13 * 60);
-    window(&s_snap.usage[DOCK_CLAUDE].seven_day, 31, 3 * 86400);
+    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 62, 4 * 3600 + 33 * 60);
+    window(&s_snap.usage[DOCK_CLAUDE].seven_day, 31, 4 * 86400 + 14 * 3600);
     s_snap.usage[DOCK_CLAUDE].today_tokens = 1840000;
     window(&s_snap.usage[DOCK_CODEX].five_hour, 28, 3 * 3600 + 5 * 60);
     window(&s_snap.usage[DOCK_CODEX].seven_day, 12, 5 * 86400);
     s_snap.usage[DOCK_CODEX].today_tokens = 402000;
     add(DOCK_APPROVAL, DOCK_CLAUDE, "go-dock", "需授权", "Explore · Bash: cat ~/.ssh/config", 42);
-    s_snap.sessions[s_snap.count - 1].agents_total = 3;
-    s_snap.sessions[s_snap.count - 1].agents_active = 3;
+    agent(DOCK_APPROVAL, "Explore", "Bash: cat ~/.ssh/config", 18);
+    agent(DOCK_RUNNING, "Explore", "Explore host tree toolbar & store", 186);
+    agent(DOCK_RUNNING, "Explore", "Explore tables, dialogs, checkboxes", 178);
+    detail("AskUserQuestion");
     add(DOCK_INPUT, DOCK_CLAUDE, "infra", "等待输入", "请选择部署区域", 65);
     add(DOCK_RUNNING, DOCK_CODEX, "api-svc", "进行中", "pytest -q tests/auth", 192);
+    title("重构登录模块，拆分 token 校验");
+    detail("Bash: pytest -q tests/auth");
     add(DOCK_RUNNING, DOCK_CLAUDE, "另一个项目", "进行中", "Edit: launch.md", 45);
     add(DOCK_DONE, DOCK_CODEX, "scripts", "已完成", "迁移数据库脚本", 120);
     add(DOCK_DONE, DOCK_CLAUDE, "dotfiles", "已完成", "整理 zsh 配置", 540);
@@ -199,7 +221,8 @@ int main(int argc, char **argv)
     add(DOCK_APPROVAL, DOCK_CODEX, "api-svc", "需授权", "Bash: rm -rf dist", 15);
     add(DOCK_RUNNING, DOCK_CODEX, "a-very-long-project-name-that-overflows", "进行中",
         "Edit: src/components/navigation/HeaderWithAVeryLongName.tsx", 288);
-    s_snap.sessions[s_snap.count - 1].agents_total = 2;
+    agent(DOCK_RUNNING, "general-purpose", "迁移导航组件到新版路由", 120);
+    agent(DOCK_DONE, "Explore", "查找旧路由用法", 300);
     send();
     run(2 * SEC);
     save(out, "2-limit");
@@ -212,6 +235,20 @@ int main(int argc, char **argv)
     send();
     run(2 * SEC);
     save(out, "3-empty");
+
+    // Main turn ended while background subagents still work.
+    reset();
+    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 41, 3 * 3600 + 20 * 60);
+    window(&s_snap.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 15 * 3600);
+    add(DOCK_RUNNING, DOCK_CLAUDE, "host-app", "进行中", "Explore · Explore toolbar", 18);
+    title("规划 host 端工具栏");
+    detail("等待 2 个子任务完成");
+    agent(DOCK_RUNNING, "Explore", "Explore toolbar & store", 18);
+    agent(DOCK_RUNNING, "Explore", "Explore tables, dialogs", 18);
+    add(DOCK_DONE, DOCK_CODEX, "scripts", "已完成", "迁移数据库脚本", 300);
+    send();
+    run(2 * SEC);
+    save(out, "5-background");
 
     // Host went away two minutes ago.
     reset();

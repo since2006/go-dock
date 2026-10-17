@@ -45,7 +45,7 @@ func hookObservations(body []byte, now time.Time) ([]model.Observation, error) {
 			o.State = model.StateRunning
 		case "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionDenied":
 			o.State = model.StateRunning
-			o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+			o.Detail = providers.ToolAction(h.ToolName, h.ToolInput)
 		case "PermissionRequest":
 			o.State = model.StateApproval
 			o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
@@ -73,14 +73,23 @@ func hookObservations(body []byte, now time.Time) ([]model.Observation, error) {
 		o.NewTurn = true
 	case "PreToolUse", "PermissionDenied":
 		o.State = model.StateRunning
-		o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+		o.Detail = providers.ToolAction(h.ToolName, h.ToolInput)
+		if h.Event == "PreToolUse" {
+			// These tools stop and wait for the user to answer.
+			switch h.ToolName {
+			case "AskUserQuestion":
+				o.State, o.Detail = model.StateInput, "等待回答问题"
+			case "ExitPlanMode":
+				o.State, o.Detail = model.StateInput, "等待确认计划"
+			}
+		}
 		if h.Event == "PreToolUse" && providers.AgentTool(h.ToolName) {
 			o.AgentLaunch = true
 			o.AgentType, o.AgentDesc = providers.AgentLaunch(h.ToolInput)
 		}
 	case "PostToolUse", "PostToolUseFailure":
 		o.State = model.StateRunning
-		o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+		o.Detail = providers.ToolAction(h.ToolName, h.ToolInput)
 		o.ToolDone = h.ToolName
 		if providers.AgentTool(h.ToolName) {
 			// The response names the agent the call started.

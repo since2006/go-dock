@@ -136,8 +136,23 @@ static void parse_snapshot(const cJSON *root, dock_snapshot_t *s)
         copy_str(d->label, sizeof(d->label), cJSON_GetObjectItem(item, "label"));
         copy_str(d->text, sizeof(d->text), cJSON_GetObjectItem(item, "text"));
         d->since = num(cJSON_GetObjectItem(item, "since"));
+        copy_str(d->title, sizeof(d->title), cJSON_GetObjectItem(item, "title"));
+        copy_str(d->detail, sizeof(d->detail), cJSON_GetObjectItem(item, "detail"));
         d->agents_total = (int)num(cJSON_GetObjectItem(item, "agents_total"));
         d->agents_active = (int)num(cJSON_GetObjectItem(item, "agents_active"));
+        const cJSON *ag;
+        cJSON_ArrayForEach(ag, cJSON_GetObjectItem(item, "agents"))
+        {
+            if (d->agent_count >= DOCK_MAX_AGENTS) {
+                break;
+            }
+            dock_agent_t *a = &d->agents[d->agent_count++];
+            copy_str(a->type, sizeof(a->type), cJSON_GetObjectItem(ag, "type"));
+            copy_str(a->text, sizeof(a->text), cJSON_GetObjectItem(ag, "text"));
+            const cJSON *ast = cJSON_GetObjectItem(ag, "state");
+            a->state = parse_state(cJSON_IsString(ast) ? ast->valuestring : NULL);
+            a->since = num(cJSON_GetObjectItem(ag, "since"));
+        }
     }
 
     const cJSON *counts = cJSON_GetObjectItem(root, "counts");

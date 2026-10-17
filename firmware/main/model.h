@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #define DOCK_MAX_SESSIONS 32
+#define DOCK_MAX_AGENTS 3 // subagents listed per session
 
 typedef enum {
     DOCK_APPROVAL = 0,
@@ -34,15 +35,26 @@ typedef enum {
 } dock_provider_t;
 
 typedef struct {
+    char type[52]; // Explore, general-purpose, ...
+    char text[104];
+    dock_state_t state;
+    int64_t since;
+} dock_agent_t;
+
+typedef struct {
     char id[96];
     dock_provider_t provider;
     dock_state_t state;
     char project[104]; // <= 24 runes of UTF-8
     char label[32];
-    char text[200]; // <= 48 runes of UTF-8
-    int64_t since;  // unix seconds
+    char text[200];   // one-line summary, <= 48 runes of UTF-8
+    char title[104];  // what the task is (optional)
+    char detail[152]; // what the session is doing now (optional)
+    int64_t since;    // unix seconds
     int agents_total;  // subagents (child tasks) of this session
     int agents_active; // of which still working
+    int agent_count;   // entries in agents
+    dock_agent_t agents[DOCK_MAX_AGENTS];
 } dock_session_t;
 
 typedef struct {

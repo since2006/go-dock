@@ -16,9 +16,10 @@ type Sink interface {
 	UpdateUsage(model.Provider, func(*model.Usage))
 }
 
-// DetailLen and TitleLen bound strings shown on the 600x450 screen.
+// DetailLen and TitleLen bound what the web UI shows; the device protocol
+// cuts them further for the 600x450 screen.
 const (
-	DetailLen = 48
+	DetailLen = 80
 	TitleLen  = 48
 )
 
@@ -120,6 +121,23 @@ func ToolSummary(tool string, input json.RawMessage) string {
 		return model.Truncate(tool, DetailLen)
 	}
 	return model.Truncate(tool+": "+arg, DetailLen)
+}
+
+// ToolAction is what a running tool call is doing: the description Claude
+// writes for a command ("Check hooks install"), as Claude Code shows it
+// above the command, else ToolSummary. Approvals keep ToolSummary so the
+// screen shows the command actually being approved.
+func ToolAction(tool string, input json.RawMessage) string {
+	if !AgentTool(tool) { // an agent's description is its task, shown as "Agent: …"
+		var in struct {
+			Description string `json:"description"`
+		}
+		_ = json.Unmarshal(input, &in)
+		if d := strings.TrimSpace(in.Description); d != "" {
+			return model.Truncate(d, DetailLen)
+		}
+	}
+	return ToolSummary(tool, input)
 }
 
 // ResolveHome returns override, else $env, else ~/def.

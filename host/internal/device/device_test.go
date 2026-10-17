@@ -32,7 +32,7 @@ func sampleSnapshot() model.Snapshot {
 			model.ProviderClaude: {
 				FiveHour:      &model.Window{UsedPct: 62, ResetsAt: t0.Add(2 * time.Hour), WindowMinutes: 300},
 				LimitsUpdated: t0.Add(-time.Minute),
-				Today:         model.Tokens{Input: 100, Output: 50, CostUSD: 1.5, HasCost: true},
+				Today:         model.Tokens{Input: 100, Output: 50, CacheCreate: 30, CacheRead: 90000, CostUSD: 1.5, HasCost: true},
 			},
 			model.ProviderCodex: {
 				SevenDay: &model.Window{UsedPct: 12, WindowMinutes: 10080},
@@ -59,7 +59,7 @@ func TestBuildFrame(t *testing.T) {
 		t.Fatalf("session 1 text = %q", f.Sessions[1].Text)
 	}
 	c := f.Usage.Claude
-	if c.FiveHour.Pct != 62 || c.FiveHour.ResetsAt != t0.Unix()+7200 || c.SevenDay != nil || c.TodayTokens != 150 || c.TodayCost == nil || *c.TodayCost != 1.5 {
+	if c.FiveHour.Pct != 62 || c.FiveHour.ResetsAt != t0.Unix()+7200 || c.SevenDay != nil || c.TodayTokens != 180 || c.TodayCost == nil || *c.TodayCost != 1.5 {
 		t.Fatalf("claude usage = %+v", c)
 	}
 	x := f.Usage.Codex
@@ -417,7 +417,8 @@ func TestFrameAgents(t *testing.T) {
 	if a.State != "approval" || a.Label != "需授权" || a.Text != "Explore · Bash: rm -rf dist" || a.Since != t0.Add(time.Minute).Unix() {
 		t.Fatalf("row a = %+v", a)
 	}
-	if len(a.Agents) != 3 || a.AgentsTotal != 4 || a.AgentsActive != 3 || a.Agents[0].Text != "清理构建目录" || a.Agents[0].State != "approval" {
+	// A subagent waiting for approval shows the command, not its task.
+	if len(a.Agents) != 3 || a.AgentsTotal != 4 || a.AgentsActive != 3 || a.Agents[0].Text != "Bash: rm -rf dist" || a.Agents[0].State != "approval" || a.Agents[1].Text != "查找接口" {
 		t.Fatalf("agents a = %+v", a)
 	}
 	b := f.Sessions[1]
@@ -473,5 +474,42 @@ func TestEncodeTrimsAgentsBeforeSessions(t *testing.T) {
 	// The caller's frame is untouched.
 	if len(f.Sessions[7].Agents) != 3 {
 		t.Fatal("EncodeSnapshot modified its input")
+	}
+}
+
+func TestFrameTitleAndDetail(t *testing.T) {
+	t0 := time.Unix(1792200000, 0)
+	mk := func(title, detail string) model.Session {
+		return model.Session{ID: "claude:x", Provider: model.ProviderClaude, SessionID: "x", Project: "go-dock",
+			State: model.StateRunning, Title: title, Detail: detail, Since: t0, Updated: t0}
+	}
+	f := BuildFrame(model.Snapshot{Now: t0, Sessions: []model.Session{
+		mk("实现设备预览新设计", "Bash: go test ./..."),
+		mk("same", "same"),
+		mk("只有标题", ""),
+	}}, Options{MaxSessions: 12}, 1)
+	if s := f.Sessions[0]; s.Title != "实现设备预览新设计" || s.Detail != "Bash: go test ./..." || s.Text != "Bash: go test ./..." {
+		t.Fatalf("both = %+v", s)
+	}
+	if s := f.Sessions[1]; s.Title != "" || s.Detail != "same" {
+		t.Fatalf("duplicate title kept: %+v", s)
+	}
+	if s := f.Sessions[2]; s.Title != "只有标题" || s.Detail != "" || s.Text != "只有标题" {
+		t.Fatalf("title only = %+v", s)
+	}
+}
+
+// Background subagents keep a session busy after its own turn ended.
+func TestFrameWaitsForBackgroundAgents(t *testing.T) {
+	t0 := time.Unix(1792200000, 0)
+	ss := agentSession("bg", model.StateDone,
+		model.Agent{ID: "1", Type: "Explore", Desc: "看代码", State: model.StateRunning, Since: t0},
+		model.Agent{ID: "2", Type: "Explore", Desc: "看文档", State: model.StateRunning, Since: t0},
+		model.Agent{ID: "3", Type: "Explore", Desc: "看配置", State: model.StateDone, Since: t0})
+	ss.Title = "规划 host 端"
+	f := BuildFrame(model.Snapshot{Now: t0, Sessions: []model.Session{ss}}, Options{MaxSessions: 12}, 1)
+	s := f.Sessions[0]
+	if s.State != "running" || s.Label != "进行中" || s.Detail != "等待 2 个子任务完成" || s.Title != "规划 host 端" {
+		t.Fatalf("row = %+v", s)
 	}
 }

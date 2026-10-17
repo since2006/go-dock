@@ -20,6 +20,7 @@ const (
 
 	projectLen = 24
 	textLen    = 48
+	titleLen   = 32
 	// maxAgents bounds the subagents listed per session.
 	maxAgents    = 3
 	agentTypeLen = 16
@@ -78,8 +79,14 @@ type SessionFrame struct {
 	Project string `json:"project"`
 	State   string `json:"state"`
 	Label   string `json:"label"`
-	Text    string `json:"text"`
-	Since   int64  `json:"since"`
+	// Text is one line for simple screens: the current action, else the
+	// title; when a subagent decides the row's state, "Type · action".
+	Text  string `json:"text"`
+	Since int64  `json:"since"`
+	// Title (what the task is) and Detail (what the session itself is
+	// doing now) let a screen show both on separate lines.
+	Title  string `json:"title,omitempty"`
+	Detail string `json:"detail,omitempty"`
 	// Agents lists up to three subagents, most urgent first. AgentsTotal
 	// and AgentsActive count all of them; all three are omitted when the
 	// session has none.
@@ -90,7 +97,7 @@ type SessionFrame struct {
 
 type AgentFrame struct {
 	Type  string `json:"type"`  // Explore, general-purpose, ...
-	Text  string `json:"text"`  // its task, else what it is doing
+	Text  string `json:"text"`  // its task; what it waits on when it needs the user
 	State string `json:"state"` // running, approval, input, error, done
 	Since int64  `json:"since"`
 }
@@ -169,6 +176,21 @@ func sessionFrame(ss model.Session, st model.State, from *model.Agent) SessionFr
 		Label:   st.Label(),
 		Text:    model.Truncate(text, textLen),
 		Since:   unix(since),
+		Title:   model.Truncate(ss.Title, titleLen),
+		Detail:  model.Truncate(ss.Detail, textLen),
+	}
+	if from != nil && (ss.State == model.StateDone || ss.State == model.StateIdle) {
+		// The session's own turn ended while background subagents work.
+		active := 0
+		for _, a := range ss.Agents {
+			if a.State.Active() {
+				active++
+			}
+		}
+		sf.Detail = fmt.Sprintf("等待 %d 个子任务完成", active)
+	}
+	if sf.Title == sf.Detail {
+		sf.Title = "" // nothing new on a second line
 	}
 	for _, a := range ss.Agents {
 		sf.AgentsTotal++
@@ -176,8 +198,9 @@ func sessionFrame(ss model.Session, st model.State, from *model.Agent) SessionFr
 			sf.AgentsActive++
 		}
 		if len(sf.Agents) < maxAgents {
+			// Its task, unless it is stuck on the user: then what it asks.
 			t := a.Desc
-			if t == "" {
+			if t == "" || (a.State != model.StateRunning && a.State != model.StateDone && a.Detail != "") {
 				t = a.Detail
 			}
 			sf.Agents = append(sf.Agents, AgentFrame{
@@ -195,7 +218,7 @@ func usageFrame(u model.Usage) UsageFrame {
 	f := UsageFrame{
 		FiveHour:    windowFrame(u.FiveHour),
 		SevenDay:    windowFrame(u.SevenDay),
-		TodayTokens: u.Today.Total(),
+		TodayTokens: u.Today.Fresh(),
 		UpdatedAt:   unix(u.LimitsUpdated),
 	}
 	if u.Today.HasCost {

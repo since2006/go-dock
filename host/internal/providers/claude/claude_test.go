@@ -27,6 +27,10 @@ func TestHookObservation(t *testing.T) {
 		{body: `{"hook_event_name":"UserPromptSubmit","session_id":"s","cwd":"/w/p","prompt":"secret"}`, state: model.StateRunning},
 		{body: `{"hook_event_name":"PermissionRequest","session_id":"s","tool_name":"Bash","tool_input":{"command":"npm install\nnpm test"}}`, state: model.StateApproval, detail: "Bash: npm install"},
 		{body: `{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Edit","tool_input":{"file_path":"/w/p/main.go"}}`, state: model.StateRunning, detail: "Edit: main.go"},
+		// A running command shows the description Claude wrote for it; an
+		// approval shows the command itself.
+		{body: `{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Bash","tool_input":{"command":"grep -c go-dock settings.json","description":"Check hooks install"}}`, state: model.StateRunning, detail: "Check hooks install"},
+		{body: `{"hook_event_name":"PermissionRequest","session_id":"s","tool_name":"Bash","tool_input":{"command":"rm -rf dist","description":"Clean build output"}}`, state: model.StateApproval, detail: "Bash: rm -rf dist"},
 		{body: `{"hook_event_name":"Notification","session_id":"s","notification_type":"idle_prompt"}`, skip: true},
 		{body: `{"hook_event_name":"Notification","session_id":"s","notification_type":"elicitation_dialog","message":"Pick one"}`, state: model.StateInput, detail: "Pick one"},
 		{body: `{"hook_event_name":"Stop","session_id":"s"}`, state: model.StateDone},
@@ -407,5 +411,20 @@ func TestHooksStaleWithoutNewEvents(t *testing.T) {
 	InstallHooks(home, tg)
 	if st := HooksStatus(home, tg); st.Stale {
 		t.Fatalf("reinstall still stale: %+v", st)
+	}
+}
+
+func TestHookQuestionsWaitForUser(t *testing.T) {
+	now := time.Unix(1792200000, 0)
+	for tool, detail := range map[string]string{"AskUserQuestion": "等待回答问题", "ExitPlanMode": "等待确认计划"} {
+		obs, err := hookObservations([]byte(`{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"`+tool+`","tool_input":{}}`), now)
+		if err != nil || len(obs) != 1 || obs[0].State != model.StateInput || obs[0].Detail != detail {
+			t.Fatalf("%s: %+v %v", tool, obs, err)
+		}
+		// The answer arrives as PostToolUse: back to running.
+		obs, _ = hookObservations([]byte(`{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"`+tool+`","tool_input":{}}`), now)
+		if obs[0].State != model.StateRunning {
+			t.Fatalf("%s after answer: %+v", tool, obs)
+		}
 	}
 }

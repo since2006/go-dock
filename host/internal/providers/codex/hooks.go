@@ -42,7 +42,7 @@ func hookObservation(body []byte, now time.Time) (model.Observation, bool, error
 			o.AgentDesc = model.Truncate(h.Prompt, providers.DetailLen)
 		case "PreToolUse", "PostToolUse":
 			o.State = model.StateRunning
-			o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+			o.Detail = providers.ToolAction(h.ToolName, h.ToolInput)
 		case "PermissionRequest":
 			o.State = model.StateApproval
 			o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
@@ -62,10 +62,10 @@ func hookObservation(body []byte, now time.Time) (model.Observation, bool, error
 		o.NewTurn = true
 	case "PreToolUse":
 		o.State = model.StateRunning
-		o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+		o.Detail = providers.ToolAction(h.ToolName, h.ToolInput)
 	case "PostToolUse":
 		o.State = model.StateRunning
-		o.Detail = providers.ToolSummary(h.ToolName, h.ToolInput)
+		o.Detail = providers.ToolAction(h.ToolName, h.ToolInput)
 		o.ToolDone = h.ToolName
 	case "PermissionRequest":
 		o.State = model.StateApproval

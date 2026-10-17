@@ -168,6 +168,11 @@ type Tokens struct {
 
 func (t Tokens) Total() int64 { return t.Input + t.Output + t.CacheRead + t.CacheCreate }
 
+// Fresh counts what was new to the model: uncached input, cache writes and
+// output. Cache reads re-send the same context every turn and make up ~99%
+// of a Claude Code day, so they are left out of the numbers users see.
+func (t Tokens) Fresh() int64 { return t.Input + t.Output + t.CacheCreate }
+
 func (t *Tokens) Add(o Tokens) {
 	t.Input += o.Input
 	t.Output += o.Output

@@ -72,7 +72,7 @@ func (a *agentTrack) toolUse(at time.Time, content json.RawMessage) {
 	}
 	for _, b := range blocks {
 		if b.Type == "tool_use" {
-			a.detail = providers.ToolSummary(b.Name, b.Input)
+			a.detail = providers.ToolAction(b.Name, b.Input)
 		}
 	}
 	if at.After(a.at) {
