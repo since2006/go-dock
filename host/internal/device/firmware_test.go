@@ -95,7 +95,11 @@ func newFlashTest(t *testing.T, hello string, tune func(m *Manager)) *flashTest 
 	ft.dev = <-ft.devices
 	ft.dev.next(t, "snapshot")
 	ft.dev.send(t, hello)
-	waitFor(t, "device hello", func() bool { return ft.m.Status().Firmware != "" })
+	// The firmware version shows before the handshake completes.
+	waitFor(t, "device hello", func() bool {
+		st := ft.m.Status()
+		return st.Firmware != "" && (st.State == StateReady || st.Incompatible)
+	})
 	return ft
 }
 

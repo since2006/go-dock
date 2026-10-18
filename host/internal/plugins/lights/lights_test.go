@@ -147,7 +147,9 @@ func newMultiPlugin(t *testing.T, buses map[string]*fakeBus, ls ...config.Light)
 		}
 		return b
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)), func() { changes.Add(1) })
-	p.pendingTimeout, p.tapGap = 30*time.Millisecond, 0
+	// Long enough never to fire on a slow CI machine; the tests of the
+	// timeout shorten it.
+	p.pendingTimeout, p.tapGap = time.Minute, 0
 	p.SetOptions(opts(true, ls...))
 	return p, changes
 }
@@ -278,6 +280,7 @@ func TestFastReportBeforePublishReturns(t *testing.T) {
 	bus := newFakeBus()
 	bus.echo = func(b *fakeBus, topic, payload string) { b.deliver("office/main/state", payload) }
 	p, _ := newTestPlugin(t, bus, mainLight())
+	p.pendingTimeout = 30 * time.Millisecond
 	if err := p.Do(context.Background(), "main", model.ActOn); err != nil {
 		t.Fatal(err)
 	}
@@ -290,17 +293,17 @@ func TestFastReportBeforePublishReturns(t *testing.T) {
 func TestNoReply(t *testing.T) {
 	bus := newFakeBus()
 	p, changes := newTestPlugin(t, bus, mainLight())
+	p.pendingTimeout = 30 * time.Millisecond
 	before := changes.Load()
 	_ = p.Do(context.Background(), "main", model.ActOn)
+	// Busy, published, timed out: the timer notifies just after the
+	// page says so.
 	deadline := time.Now().Add(time.Second)
-	for item(t, p, "main").Text != textNoReply {
+	for item(t, p, "main").Text != textNoReply || changes.Load() < before+3 {
 		if time.Now().After(deadline) {
-			t.Fatalf("still %+v", item(t, p, "main"))
+			t.Fatalf("still %+v, changes %d -> %d", item(t, p, "main"), before, changes.Load())
 		}
 		time.Sleep(5 * time.Millisecond)
-	}
-	if changes.Load() < before+3 { // busy, published, timed out
-		t.Fatalf("changes %d -> %d", before, changes.Load())
 	}
 	// A late report clears it.
 	bus.deliver("office/main/state", "ON")
