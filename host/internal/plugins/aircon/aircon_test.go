@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -282,7 +283,8 @@ func TestStateSurvivesRestart(t *testing.T) {
 	f := newFixture(t, Options{})
 	f.do(t, "power", model.ActOn)
 	f.do(t, "mode", model.ActNext)
-	if fi, err := os.Stat(f.path); err != nil || fi.Mode().Perm() != 0o600 {
+	fi, err := os.Stat(f.path)
+	if err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) { // Windows has no such bits
 		t.Fatalf("state file: %v %v", fi, err)
 	}
 	again := New(&fakeRemote{}, f.path, slog.New(slog.NewTextHandler(f.logs, nil)), nil)
