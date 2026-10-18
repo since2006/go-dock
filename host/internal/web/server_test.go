@@ -25,6 +25,7 @@ type fakeBackend struct {
 	autostart bool
 	flashing  bool
 	actions   []model.Action
+	beeps     []string
 }
 
 func (f *fakeBackend) Snapshot() model.Snapshot             { return model.Snapshot{} }
@@ -64,6 +65,16 @@ func (f *fakeBackend) SetAutostart(on bool) error {
 }
 func (f *fakeBackend) DevicePages() any { return map[string]any{"t": "pages", "n": len(f.actions)} }
 func (f *fakeBackend) MQTTStatus() any  { return map[string]string{"state": "disabled"} }
+func (f *fakeBackend) DeviceSounds() any {
+	return []map[string]string{{"id": "chime", "name": "叮咚"}}
+}
+func (f *fakeBackend) DeviceBeep(sound string) error {
+	if sound == "" {
+		return errors.New("设备未连接")
+	}
+	f.beeps = append(f.beeps, sound)
+	return nil
+}
 func (f *fakeBackend) PluginAction(ctx context.Context, a model.Action) error {
 	switch {
 	case a.Page != "lights" || a.Item != "main":
@@ -204,6 +215,23 @@ func TestPluginAction(t *testing.T) {
 	w = do(h, "GET", host, "/api/state", "", "")
 	if !strings.Contains(w.Body.String(), `"pages":{`) || !strings.Contains(w.Body.String(), `"mqtt":{"state":"disabled"}`) {
 		t.Fatalf("state: %s", w.Body.String())
+	}
+}
+
+func TestBeep(t *testing.T) {
+	b, h := newTestServer("127.0.0.1:47321")
+	host := "127.0.0.1:47321"
+	if w := do(h, "GET", host, "/api/device/sounds", "", ""); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"chime"`) {
+		t.Fatalf("sounds: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(h, "POST", host, "/api/device/beep", "application/json", `{"sound":"rise"}`); w.Code != http.StatusOK || len(b.beeps) != 1 || b.beeps[0] != "rise" {
+		t.Fatalf("beep: %d %s %v", w.Code, w.Body.String(), b.beeps)
+	}
+	if w := do(h, "POST", host, "/api/device/beep", "application/json", `{}`); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "设备未连接") {
+		t.Fatalf("no device: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(h, "POST", host, "/api/device/beep", "application/json", `nope`); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad body: %d", w.Code)
 	}
 }
 

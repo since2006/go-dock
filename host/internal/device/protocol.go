@@ -508,6 +508,7 @@ type DeviceMsg struct {
 	MaxLine int    `json:"max_line"`
 	OTA     int    `json:"ota"`   // 1: can be updated over the link
 	Pages   int    `json:"pages"` // 1: shows function pages (§3.5)
+	Beep    int    `json:"beep"`  // 1: plays beep messages (§3.6)
 	// ack
 	Seq uint64 `json:"seq"`
 	// log; also the error text of ota

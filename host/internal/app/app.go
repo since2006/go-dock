@@ -164,7 +164,11 @@ func hubOptions(c config.Config) hub.Options {
 }
 
 func deviceOptions(c config.Config) device.Options {
-	return device.Options{Enabled: c.Device.Enabled, Port: c.Device.Port, MaxSessions: c.Display.MaxSessions, ShowIdle: c.Display.ShowIdle}
+	o := device.Options{Enabled: c.Device.Enabled, Port: c.Device.Port, MaxSessions: c.Display.MaxSessions, ShowIdle: c.Display.ShowIdle}
+	if c.Device.Beep {
+		o.Beep = device.SoundByID(c.Device.BeepSound).ID
+	}
+	return o
 }
 
 func mqttOptions(c config.Config) []mqtt.BrokerOptions {
@@ -330,6 +334,10 @@ func (a *App) DeviceFrame() any {
 }
 
 func (a *App) DevicePages() any { return device.BuildPages(a.plugins.Pages()) }
+
+func (a *App) DeviceSounds() any { return device.Sounds }
+
+func (a *App) DeviceBeep(sound string) error { return a.device.Beep(sound) }
 
 func (a *App) MQTTStatus() any { return a.mqtt.Status() }
 

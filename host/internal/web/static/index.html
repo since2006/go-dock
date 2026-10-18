@@ -162,6 +162,14 @@
             <small>填 <code>auto</code> 自动查找 ESP32-S3（VID 303A），或指定如 <code>/dev/cu.usbmodem1101</code>、<code>COM3</code>。</small>
           </label>
           <div id="ports" class="ports"></div>
+          <label class="check"><input type="checkbox" name="device.beep"> 有任务等你授权或回答时，屏幕响铃提醒</label>
+          <label>提示音
+            <div class="row">
+              <select name="device.beep_sound"></select>
+              <button type="button" class="btn ghost" id="beep-test">试听</button>
+            </div>
+            <small>屏幕本身没有喇叭，需要在 34 针排针的 1 脚（GND）和 3 脚（GPIO1）上接一个无源蜂鸣器，接法见固件说明。设备暂时放不了时，试听改在浏览器里模拟。</small>
+          </label>
         </fieldset>
         <fieldset>
           <legend>显示</legend>

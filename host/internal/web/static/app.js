@@ -856,6 +856,7 @@ function showMsg(sel, text, err) {
 
 async function loadSettings() {
   try {
+    await loadSounds(); // the select needs its options before it can show the value
     loadedConfig = await api("/api/config");
     fillForm(form, loadedConfig);
     showMsg("#settings-msg", "");
@@ -871,6 +872,47 @@ form.addEventListener("submit", async (ev) => {
     showMsg("#settings-msg", "已保存");
   } catch (e) {
     showMsg("#settings-msg", `保存失败：${e.message}`, true);
+  }
+});
+
+// Alert sounds come from the host, so the list and the browser preview
+// play the same notes as the device.
+let sounds = null;
+async function loadSounds() {
+  if (sounds) return;
+  sounds = (await api("/api/device/sounds")) || [];
+  form.elements["device.beep_sound"].replaceChildren(...sounds.map((s) => el("option", { value: s.id }, s.name)));
+}
+
+// playNotes stands in for the buzzer with a quiet square wave.
+let audio = null;
+function playNotes(notes) {
+  audio = audio || new AudioContext();
+  let t = audio.currentTime + 0.05;
+  for (const [hz, ms] of notes) {
+    if (hz > 0) {
+      const osc = audio.createOscillator();
+      const gain = audio.createGain();
+      osc.type = "square";
+      osc.frequency.value = hz;
+      gain.gain.value = 0.05;
+      osc.connect(gain).connect(audio.destination);
+      osc.start(t);
+      osc.stop(t + ms / 1000);
+    }
+    t += ms / 1000;
+  }
+}
+
+$("#beep-test").addEventListener("click", async () => {
+  const id = form.elements["device.beep_sound"].value;
+  try {
+    await api("/api/device/beep", { method: "POST", body: { sound: id } });
+    showMsg("#settings-msg", "已发到设备播放");
+  } catch (e) {
+    const s = (sounds || []).find((x) => x.id === id);
+    if (s) playNotes(s.notes);
+    showMsg("#settings-msg", `${e.message}（已在浏览器里模拟播放）`);
   }
 });
 

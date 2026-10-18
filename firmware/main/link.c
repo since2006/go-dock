@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "beep.h"
 #include "cJSON.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
@@ -43,7 +44,7 @@ static void send_hello(void)
 {
     char buf[176];
     snprintf(buf, sizeof(buf),
-             "{\"t\":\"hello\",\"proto\":%d,\"fw\":\"%s\",\"w\":600,\"h\":450,\"max_line\":%d%s}",
+             "{\"t\":\"hello\",\"proto\":%d,\"fw\":\"%s\",\"w\":600,\"h\":450,\"max_line\":%d%s,\"beep\":1}",
              DOCK_PROTO, esp_app_get_description()->version, MAX_LINE, s_ota ? ",\"ota\":1" : "");
     send_line(buf);
 }
@@ -168,6 +169,29 @@ static void parse_snapshot(const cJSON *root, dock_snapshot_t *s)
     }
 }
 
+// beep: {"notes":[[hz,ms],...]}; a frequency out of range plays as a rest.
+static void handle_beep(const cJSON *root)
+{
+    beep_note_t notes[BEEP_MAX_NOTES];
+    int n = 0;
+    const cJSON *note;
+    cJSON_ArrayForEach(note, cJSON_GetObjectItem(root, "notes"))
+    {
+        if (n == BEEP_MAX_NOTES) {
+            break;
+        }
+        int64_t hz = num(cJSON_GetArrayItem(note, 0));
+        int64_t ms = num(cJSON_GetArrayItem(note, 1));
+        if (ms <= 0) {
+            continue;
+        }
+        notes[n].hz = (hz >= 100 && hz <= 8000) ? (uint16_t)hz : 0;
+        notes[n].ms = ms > 1000 ? 1000 : (uint16_t)ms;
+        n++;
+    }
+    beep_play(notes, n);
+}
+
 static void send_ota_error(const char *err)
 {
     cJSON *o = cJSON_CreateObject();
@@ -257,6 +281,8 @@ static void handle_line(char *line)
         char ack[48];
         snprintf(ack, sizeof(ack), "{\"t\":\"ack\",\"seq\":%lu}", (unsigned long)seq);
         send_line(ack);
+    } else if (strcmp(t->valuestring, "beep") == 0) {
+        handle_beep(root);
     }
     cJSON_Delete(root);
 }

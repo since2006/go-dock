@@ -41,6 +41,10 @@ type Backend interface {
 	// DevicePages is the pages message the device gets now.
 	DevicePages() any
 	DevicePorts() (any, error)
+	// DeviceSounds lists the alert sounds; DeviceBeep plays one on the
+	// device to try it out.
+	DeviceSounds() any
+	DeviceBeep(sound string) error
 	ReconnectDevice()
 	ApplyFirmware() error
 	UpdateStatus() any
@@ -85,6 +89,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/device/ports", s.getPorts)
 	mux.HandleFunc("GET /api/device/frame", s.getFrame)
 	mux.HandleFunc("GET /api/device/pages", s.getPages)
+	mux.HandleFunc("GET /api/device/sounds", s.getSounds)
+	mux.HandleFunc("POST /api/device/beep", s.postBeep)
 	mux.HandleFunc("POST /api/device/reconnect", s.postReconnect)
 	mux.HandleFunc("POST /api/device/firmware", s.postFirmware)
 	mux.HandleFunc("POST /api/ingest/{provider}/{kind}", s.postIngest)
@@ -258,6 +264,27 @@ func (s *Server) getPorts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getFrame(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.backend.DeviceFrame())
+}
+
+func (s *Server) getSounds(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.backend.DeviceSounds())
+}
+
+// postBeep plays a sound on the device; 409 means the device cannot play
+// it now (not connected, firmware without a buzzer).
+func (s *Server) postBeep(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Sound string `json:"sound"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.backend.DeviceBeep(body.Sound); err != nil {
+		writeErr(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) postReconnect(w http.ResponseWriter, r *http.Request) {

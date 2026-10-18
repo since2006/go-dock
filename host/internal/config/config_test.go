@@ -26,7 +26,8 @@ func TestLoadCreatesDefaults(t *testing.T) {
 
 func TestPartialFileKeepsDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(path, []byte(`{"display":{"done_ttl":"5m"}}`), 0o600)
+	// Written by a version without the beep settings: they start on.
+	os.WriteFile(path, []byte(`{"device":{"enabled":true,"port":"COM3"},"display":{"done_ttl":"5m"}}`), 0o600)
 	s, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
@@ -34,6 +35,9 @@ func TestPartialFileKeepsDefaults(t *testing.T) {
 	c := s.Get()
 	if c.Display.DoneTTL.D() != 5*time.Minute || c.Display.MaxSessions != 12 || !c.Claude.Enabled {
 		t.Fatalf("merge wrong: %+v", c)
+	}
+	if c.Device.Port != "COM3" || !c.Device.Beep || c.Device.BeepSound != "chime" {
+		t.Fatalf("device = %+v", c.Device)
 	}
 }
 

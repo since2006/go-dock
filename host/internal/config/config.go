@@ -78,6 +78,11 @@ type DeviceConfig struct {
 	Enabled bool `json:"enabled"`
 	// Port is "auto" or an explicit serial port path such as /dev/cu.usbmodem1101 or COM3.
 	Port string `json:"port"`
+	// Beep sounds the buzzer wired to the screen when a task starts waiting
+	// for the user (approval or an answer); BeepSound picks the melody, an
+	// id from device.Sounds (unknown ids play the default).
+	Beep      bool   `json:"beep"`
+	BeepSound string `json:"beep_sound"`
 }
 
 type ClaudeConfig struct {
@@ -227,7 +232,7 @@ type Price struct {
 func Default() Config {
 	return Config{
 		Web:    WebConfig{Listen: DefaultListen, OpenBrowser: true},
-		Device: DeviceConfig{Enabled: true, Port: "auto"},
+		Device: DeviceConfig{Enabled: true, Port: "auto", Beep: true, BeepSound: "chime"},
 		Claude: ClaudeConfig{Enabled: true},
 		Codex: CodexConfig{
 			Enabled:           true,

@@ -34,6 +34,7 @@ brokers ◄──► mqtt.Pool (one Client per id) ◄── plugins/lights ─�
 
 - **Screen layout**: the preview in `host/internal/web/static/app.js` (`SCR_*` constants, `scrReset`, `scrTime`, `scrPages`) and `firmware/main/ui.c` (`MAIN_H`, `SUB_H`, `fmt_reset`, `fmt_elapsed`, `layout_pages`) implement the same design, described in `docs/protocol-v1.md` §7.1. Change all three together.
 - **Text limits**: `providers.DetailLen` / `TitleLen` bound what the web shows; `device` (`textLen`, `titleLen`) cuts further for the screen. Firmware buffers in `model.h` must fit the device limits, including the page limits (`pageTitleLen`, `itemLabelLen`, …, `maxPages`, `maxItems`).
+- **Beeps**: the alert melodies live only in `device.Sounds` (the firmware plays whatever notes arrive); their limits (`maxNotes`, `minHz`…`maxMs`) match `BEEP_MAX_NOTES` in `firmware/main/beep.h` and the clamping in `link.c` `handle_beep`. The web settings list and browser preview read `GET /api/device/sounds`.
 - **Function page layout**: `app.js` (`scrStrip` dots, `SCR_PAGE_*`, `scrGrid`, `scrCard`) and `docs/protocol-v1.md` §7.1 describe the lights grid; `firmware/main/ui.c` must follow once phase 2 starts.
 - **Token numbers** shown to users use `model.Tokens.Fresh()` (no cache reads), both in `BuildFrame` and in `app.js` (`freshTokens`). Costs still include cache reads.
 
