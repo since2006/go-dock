@@ -172,9 +172,21 @@ func hubOptions(c config.Config) hub.Options {
 func deviceOptions(c config.Config) device.Options {
 	o := device.Options{Enabled: c.Device.Enabled, Port: c.Device.Port, MaxSessions: c.Display.MaxSessions, ShowIdle: c.Display.ShowIdle}
 	if c.Device.Beep {
-		o.Beep = device.SoundByID(c.Device.BeepSound).ID
+		o.BeepNotes = beepNotes(c.Device.BeepSound, c.Device.BeepCustom)
 	}
 	return o
+}
+
+// beepNotes resolves the alert sound setting; custom notes that do not
+// parse (only a hand-edited config has them) play the default sound.
+func beepNotes(sound, custom string) []device.Note {
+	if sound == device.CustomSound {
+		if notes, err := device.ParseNotes(custom); err == nil {
+			return notes
+		}
+		return device.SoundByID(device.DefaultSound).Notes
+	}
+	return device.SoundByID(sound).Notes
 }
 
 func mqttOptions(c config.Config) []mqtt.BrokerOptions {
@@ -270,10 +282,18 @@ func (a *App) onConfigChange(old, cur config.Config) {
 func (a *App) Snapshot() model.Snapshot             { return a.hub.Snapshot() }
 func (a *App) Subscribe() (<-chan struct{}, func()) { return a.hub.Subscribe() }
 func (a *App) Config() config.Config                { return a.store.Get() }
-func (a *App) SetConfig(c config.Config) error      { return a.store.Set(c) }
-func (a *App) DeviceStatus() any                    { return a.deviceStatus() }
-func (a *App) ReconnectDevice()                     { a.device.Reconnect() }
-func (a *App) DevicePorts() (any, error)            { return device.ListPorts() }
+func (a *App) SetConfig(c config.Config) error {
+	if c.Device.BeepSound == device.CustomSound {
+		if _, err := device.ParseNotes(c.Device.BeepCustom); err != nil {
+			return fmt.Errorf("自定义提示音：%w", err)
+		}
+	}
+	return a.store.Set(c)
+}
+
+func (a *App) DeviceStatus() any         { return a.deviceStatus() }
+func (a *App) ReconnectDevice()          { a.device.Reconnect() }
+func (a *App) DevicePorts() (any, error) { return device.ListPorts() }
 
 func (a *App) UpdateStatus() any { return a.updater.Status() }
 
@@ -349,7 +369,14 @@ func (a *App) DevicePages() any { return device.BuildPages(a.plugins.Pages()) }
 
 func (a *App) DeviceSounds() any { return device.Sounds }
 
-func (a *App) DeviceBeep(sound string) error { return a.device.Beep(sound) }
+func (a *App) SoundNotes(sound, custom string) ([][2]int, error) {
+	if sound == device.CustomSound {
+		return device.ParseNotes(custom)
+	}
+	return device.SoundByID(sound).Notes, nil
+}
+
+func (a *App) DeviceBeep(notes [][2]int) error { return a.device.Beep(notes) }
 
 func (a *App) MQTTStatus() any { return a.mqtt.Status() }
 

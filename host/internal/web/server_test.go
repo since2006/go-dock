@@ -25,7 +25,7 @@ type fakeBackend struct {
 	autostart bool
 	flashing  bool
 	actions   []model.Action
-	beeps     []string
+	beeps     [][][2]int
 }
 
 func (f *fakeBackend) Snapshot() model.Snapshot             { return model.Snapshot{} }
@@ -68,11 +68,23 @@ func (f *fakeBackend) MQTTStatus() any  { return map[string]string{"state": "dis
 func (f *fakeBackend) DeviceSounds() any {
 	return []map[string]string{{"id": "chime", "name": "叮咚"}}
 }
-func (f *fakeBackend) DeviceBeep(sound string) error {
-	if sound == "" {
+func (f *fakeBackend) SoundNotes(sound, custom string) ([][2]int, error) {
+	switch sound {
+	case "custom":
+		if custom == "" {
+			return nil, errors.New("还没有填音符")
+		}
+		return [][2]int{{2637, 100}}, nil
+	case "rise", "":
+		return [][2]int{{2093, 100}}, nil
+	}
+	return nil, errors.New("no such sound")
+}
+func (f *fakeBackend) DeviceBeep(notes [][2]int) error {
+	if f.cfg.Device.Port == "none" {
 		return errors.New("设备未连接")
 	}
-	f.beeps = append(f.beeps, sound)
+	f.beeps = append(f.beeps, notes)
 	return nil
 }
 func (f *fakeBackend) PluginAction(ctx context.Context, a model.Action) error {
@@ -250,10 +262,18 @@ func TestBeep(t *testing.T) {
 	if w := do(h, "GET", host, "/api/device/sounds", "", ""); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"chime"`) {
 		t.Fatalf("sounds: %d %s", w.Code, w.Body.String())
 	}
-	if w := do(h, "POST", host, "/api/device/beep", "application/json", `{"sound":"rise"}`); w.Code != http.StatusOK || len(b.beeps) != 1 || b.beeps[0] != "rise" {
+	if w := do(h, "POST", host, "/api/device/beep", "application/json", `{"sound":"rise"}`); w.Code != http.StatusOK || len(b.beeps) != 1 || b.beeps[0][0] != [2]int{2093, 100} {
 		t.Fatalf("beep: %d %s %v", w.Code, w.Body.String(), b.beeps)
 	}
-	if w := do(h, "POST", host, "/api/device/beep", "application/json", `{}`); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "设备未连接") {
+	if w := do(h, "POST", host, "/api/device/beep", "application/json", `{"sound":"custom","custom":"E7 100"}`); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"notes":[[2637,100]]`) {
+		t.Fatalf("custom: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(h, "POST", host, "/api/device/beep", "application/json", `{"sound":"custom"}`); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "还没有填音符") {
+		t.Fatalf("empty custom: %d %s", w.Code, w.Body.String())
+	}
+	// No device: the notes come back for the browser to play.
+	b.cfg.Device.Port = "none"
+	if w := do(h, "POST", host, "/api/device/beep", "application/json", `{}`); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "设备未连接") || !strings.Contains(w.Body.String(), `"notes":[[2093,100]]`) {
 		t.Fatalf("no device: %d %s", w.Code, w.Body.String())
 	}
 	if w := do(h, "POST", host, "/api/device/beep", "application/json", `nope`); w.Code != http.StatusBadRequest {

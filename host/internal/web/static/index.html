@@ -202,6 +202,10 @@
             </div>
             <small>屏幕本身没有喇叭，需要在 34 针排针的 1 脚（GND）和 3 脚（GPIO1）上接一个无源蜂鸣器，接法见固件说明。设备暂时放不了时，试听改在浏览器里模拟。</small>
           </label>
+          <label id="beep-custom-row" hidden>自定义音符
+            <input name="device.beep_custom" placeholder="E7 100, - 40, C8 300" maxlength="400" spellcheck="false">
+            <small>每个音写「音高 时长」，用逗号分开，最多 16 个音：音高写音名加八度（C4 是中央 C，可加 # 或 b，如 F#6、Bb5）或频率（Hz），休止写 <code>-</code>；时长 10–1000 毫秒。蜂鸣器在 C7–C8 一带最响，旋律可以整体升高一两个八度。</small>
+          </label>
         </fieldset>
         <fieldset>
           <legend>显示</legend>

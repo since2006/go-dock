@@ -21,9 +21,9 @@ type Options struct {
 	Port        string // "auto" or an explicit port path
 	MaxSessions int
 	ShowIdle    bool
-	// Beep is the sound (Sounds) the device plays when a task starts
-	// waiting for the user; empty plays none.
-	Beep string
+	// BeepNotes is what the device plays when a task starts waiting for the
+	// user; none plays nothing.
+	BeepNotes []Note
 }
 
 // SnapshotSource is what the manager mirrors to the device; *hub.Hub
@@ -508,16 +508,16 @@ func (m *Manager) alert(conn io.WriteCloser, s model.Snapshot) error {
 		fresh = fresh || !m.waiting[k]
 	}
 	m.waiting = now
-	sound := m.options().Beep
-	if !fresh || sound == "" {
+	notes := m.options().BeepNotes
+	if !fresh || len(notes) == 0 {
 		return nil
 	}
-	m.log.Debug("有任务等待处理，设备响铃", "sound", sound)
-	return m.write(conn, EncodeBeep(SoundByID(sound).Notes))
+	m.log.Debug("有任务等待处理，设备响铃", "notes", len(notes))
+	return m.write(conn, EncodeBeep(notes))
 }
 
-// Beep plays sound on the device now, to try it out.
-func (m *Manager) Beep(sound string) error {
+// Beep plays notes on the device now, to try a sound out.
+func (m *Manager) Beep(notes []Note) error {
 	switch st := m.Status(); {
 	case st.State != StateReady:
 		return errors.New("设备未连接")
@@ -525,7 +525,7 @@ func (m *Manager) Beep(sound string) error {
 		return errors.New("设备固件不支持蜂鸣器，请先升级固件")
 	}
 	select {
-	case m.beepReq <- SoundByID(sound).Notes:
+	case m.beepReq <- notes:
 	default: // one is on its way already
 	}
 	return nil

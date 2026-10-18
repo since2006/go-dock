@@ -115,7 +115,7 @@ esptool.py --chip esp32s3 write_flash 0x0 go-dock-firmware-v2.bin
 
 烧录前先退出 go-dock（或在设置里取消「启用 USB 屏幕」），否则串口被占用会烧录失败。从源码编译、硬件说明见 [firmware/README.md](firmware/README.md)。
 
-**提示音**：有任务等你授权或回答时，屏幕可以响铃提醒（默认开启，设置里可以关掉、选音色、试听）。板子本身没有喇叭，要在排针上接一个几块钱的无源蜂鸣器，接法见 [firmware/README.md](firmware/README.md#蜂鸣器提醒)。
+**提示音**：有任务等你授权或回答时，屏幕可以响铃提醒（默认开启，设置里可以关掉、选音色、试听）。除了「叮咚」「嘀嘀」这类，还有一组 8-bit 风格的原创音效（拾取、升级、过关、跳跃、警笛）；选「自定义」可以自己写音符，比如 `E7 100, - 40, C8 300`。板子本身没有喇叭，要在排针上接一个几块钱的无源蜂鸣器，接法见 [firmware/README.md](firmware/README.md#蜂鸣器提醒)。
 
 这样用 USB 刷一次之后，固件就能在网页上升级：固件版本跟着 go-dock 走，go-dock 升级后，如果设备上的固件更旧，网页顶部会提示「升级固件」，点一下就通过 USB 发给设备，约 1 分钟，屏幕上显示进度。出错或中途拔线时设备继续用原来的固件。详见 [firmware/README.md](firmware/README.md#在线升级)。
 

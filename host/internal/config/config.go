@@ -80,9 +80,11 @@ type DeviceConfig struct {
 	Port string `json:"port"`
 	// Beep sounds the buzzer wired to the screen when a task starts waiting
 	// for the user (approval or an answer); BeepSound picks the melody, an
-	// id from device.Sounds (unknown ids play the default).
-	Beep      bool   `json:"beep"`
-	BeepSound string `json:"beep_sound"`
+	// id from device.Sounds (unknown ids play the default) or "custom" for
+	// the notes in BeepCustom (device.ParseNotes: "E7 100, - 40, C8 300").
+	Beep       bool   `json:"beep"`
+	BeepSound  string `json:"beep_sound"`
+	BeepCustom string `json:"beep_custom"`
 }
 
 type ClaudeConfig struct {

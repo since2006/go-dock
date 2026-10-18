@@ -886,6 +886,7 @@ async function loadSettings() {
     await loadSounds(); // the select needs its options before it can show the value
     loadedConfig = await api("/api/config");
     fillForm(form, loadedConfig);
+    showCustomSound();
     showMsg("#settings-msg", "");
   } catch (e) {
     showMsg("#settings-msg", e.message, true);
@@ -908,8 +909,16 @@ let sounds = null;
 async function loadSounds() {
   if (sounds) return;
   sounds = (await api("/api/device/sounds")) || [];
-  form.elements["device.beep_sound"].replaceChildren(...sounds.map((s) => el("option", { value: s.id }, s.name)));
+  form.elements["device.beep_sound"].replaceChildren(
+    ...sounds.map((s) => el("option", { value: s.id }, s.name)),
+    el("option", { value: "custom" }, "自定义…"));
 }
+
+// The notes field only matters for the custom sound.
+function showCustomSound() {
+  $("#beep-custom-row").hidden = form.elements["device.beep_sound"].value !== "custom";
+}
+form.elements["device.beep_sound"].addEventListener("change", showCustomSound);
 
 // playNotes stands in for the buzzer with a quiet square wave.
 let audio = null;
@@ -931,15 +940,23 @@ function playNotes(notes) {
   }
 }
 
+// Tries the sound chosen, custom notes as written (saved or not): on the
+// device if it can, else in the browser with the notes the host sends back.
 $("#beep-test").addEventListener("click", async () => {
-  const id = form.elements["device.beep_sound"].value;
+  const body = { sound: form.elements["device.beep_sound"].value, custom: form.elements["device.beep_custom"].value };
   try {
-    await api("/api/device/beep", { method: "POST", body: { sound: id } });
-    showMsg("#settings-msg", "已发到设备播放");
+    const res = await fetch("/api/device/beep", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      showMsg("#settings-msg", "已发到设备播放");
+    } else if (data.notes) {
+      playNotes(data.notes);
+      showMsg("#settings-msg", `${data.error}（已在浏览器里模拟播放）`);
+    } else {
+      showMsg("#settings-msg", data.error || res.statusText, true);
+    }
   } catch (e) {
-    const s = (sounds || []).find((x) => x.id === id);
-    if (s) playNotes(s.notes);
-    showMsg("#settings-msg", `${e.message}（已在浏览器里模拟播放）`);
+    showMsg("#settings-msg", e.message, true);
   }
 });
 

@@ -39,6 +39,40 @@ func TestSounds(t *testing.T) {
 	}
 }
 
+func TestParseNotes(t *testing.T) {
+	for text, want := range map[string][]Note{
+		"E7 100, - 40, C8 300":        {{2637, 100}, {0, 40}, {4186, 300}},
+		" a4 50 ；Bb5 60\nF#6 70ms，":   {{440, 50}, {932, 60}, {1480, 70}},
+		"C4 10; 0 20; 2730 90; ♭":     nil, // the last entry is no note
+		"g♯6 100, e♭7 100, 8000 1000": {{1661, 100}, {2489, 100}, {8000, 1000}},
+	} {
+		got, err := ParseNotes(text)
+		if want == nil {
+			if err == nil {
+				t.Errorf("%q: accepted as %v", text, got)
+			}
+			continue
+		}
+		if err != nil || !slices.Equal(got, want) {
+			t.Errorf("%q: %v, %v; want %v", text, got, err, want)
+		}
+	}
+	for _, bad := range []string{
+		"", " , ", "H7 100", "E7", "E7 100 200", "E7 5", "E7 2000", "C1 100", "9000 100", "E10 100",
+		strings.Repeat("E7 50, ", maxNotes+1),
+	} {
+		if got, err := ParseNotes(bad); err == nil {
+			t.Errorf("%q: accepted as %v", bad, got)
+		}
+	}
+	if _, err := ParseNotes("E7 100, X7 100"); err == nil || !strings.Contains(err.Error(), "第 2 个音") {
+		t.Errorf("error does not say which note: %v", err)
+	}
+	if got, _ := ParseNotes(strings.Repeat("E7 50, ", maxNotes)); len(got) != maxNotes {
+		t.Errorf("%d notes", len(got))
+	}
+}
+
 func TestWaitingTasks(t *testing.T) {
 	s := model.Snapshot{Sessions: []model.Session{
 		{ID: "claude:a", State: model.StateApproval, Since: t0},
@@ -85,8 +119,8 @@ func TestManagerBeep(t *testing.T) {
 	)
 	src := &fakeSource{snap: sampleSnapshot(), ch: make(chan struct{}, 1)} // claude:a needs approval
 	m, devices := newTestManager(t, src, io.Discard)
-	m.opts.Beep = "chime"
-	if err := m.Beep("rise"); err == nil || !strings.Contains(err.Error(), "未连接") {
+	m.opts.BeepNotes = SoundByID("chime").Notes
+	if err := m.Beep(SoundByID("rise").Notes); err == nil || !strings.Contains(err.Error(), "未连接") {
 		t.Fatalf("beep with no device: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -98,7 +132,7 @@ func TestManagerBeep(t *testing.T) {
 	dev.send(t, helloPlain)
 	waitFor(t, "ready", func() bool { return m.Status().State == StateReady })
 	dev.none(t, "beep", 100*time.Millisecond)
-	if err := m.Beep("rise"); err == nil || !strings.Contains(err.Error(), "不支持") {
+	if err := m.Beep(SoundByID("rise").Notes); err == nil || !strings.Contains(err.Error(), "不支持") {
 		t.Fatalf("beep on old firmware: %v", err)
 	}
 
@@ -140,7 +174,7 @@ func TestManagerBeep(t *testing.T) {
 	dev.none(t, "beep", 100*time.Millisecond)
 
 	// ... but trying a sound still plays it.
-	if err := m.Beep("rise"); err != nil {
+	if err := m.Beep(SoundByID("rise").Notes); err != nil {
 		t.Fatal(err)
 	}
 	if got := notesOf(t, dev.next(t, "beep")); !slices.Equal(got, SoundByID("rise").Notes) {
