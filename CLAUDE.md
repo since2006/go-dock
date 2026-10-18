@@ -18,17 +18,23 @@ sessions files, transcripts, rollouts, codex app-server (polled by providers) �
                                        ▼                                            ▼                      ▼
                        device.BuildFrame → NDJSON over USB          web: /api/state + SSE /api/events   preview tab
                        (firmware/main/link.c → ui.c)                (overview, logs)                    (same frame)
+
+brokers ◄──► mqtt.Pool (one Client per id) ◄── plugins/lights ──Page()──► plugins.Host ──► device.BuildPages ──► `pages` after each snapshot
+                                                     ▲ Do(item, act)                                         (+ /api/state.pages, preview)
+                                  device `action` / POST /api/plugins/{page}/{item}
 ```
 
 - Providers never talk to the UI or device; they only emit `model.Observation`s. The hub merges them per session (newer wins), derives `Session.Effective()` (most urgent state of a session and its subagents) and sorts by state priority.
 - Observations with `AgentID` set describe a subagent and must not change the parent session's state.
 - `device.BuildFrame` is the only place that shapes data for the screen (truncation, `title`/`detail`, waiting-for-subagents text, `today_tokens`). The web "设备预览" tab renders that same frame, so it is the hardware-free check for firmware layout.
 - `internal/app` wires everything and implements `web.Backend`; config changes are applied live via `onConfigChange`.
+- Plugins (function pages) keep their own state and call `hub.Touch` when their page changes. They reach MQTT through `mqtt.Pool.Client(id)`; config entries name a broker by id (`config.MQTTConfig.BrokerFor` turns an empty id into the first broker), so one broker being down only disables what uses it; the device loop re-reads `plugins.Host.Pages()` on the same debounce as snapshots. `Page()` runs on the serial loop, so it must never wait on the network; `Do` may. The firmware does not render `pages` yet (docs/plans/0002-plugins-mqtt.md, phase 2).
 
 ## Things that must stay in sync
 
 - **Screen layout**: the preview in `host/internal/web/static/app.js` (`SCR_*` constants, `scrReset`, `scrTime`, `scrPages`) and `firmware/main/ui.c` (`MAIN_H`, `SUB_H`, `fmt_reset`, `fmt_elapsed`, `layout_pages`) implement the same design, described in `docs/protocol-v1.md` §7.1. Change all three together.
-- **Text limits**: `providers.DetailLen` / `TitleLen` bound what the web shows; `device` (`textLen`, `titleLen`) cuts further for the screen. Firmware buffers in `model.h` must fit the device limits.
+- **Text limits**: `providers.DetailLen` / `TitleLen` bound what the web shows; `device` (`textLen`, `titleLen`) cuts further for the screen. Firmware buffers in `model.h` must fit the device limits, including the page limits (`pageTitleLen`, `itemLabelLen`, …, `maxPages`, `maxItems`).
+- **Function page layout**: `app.js` (`scrStrip` dots, `SCR_PAGE_*`, `scrGrid`, `scrCard`) and `docs/protocol-v1.md` §7.1 describe the lights grid; `firmware/main/ui.c` must follow once phase 2 starts.
 - **Token numbers** shown to users use `model.Tokens.Fresh()` (no cache reads), both in `BuildFrame` and in `app.js` (`freshTokens`). Costs still include cache reads.
 
 ## Running and testing locally
@@ -50,6 +56,8 @@ curl -s http://127.0.0.1:47399/api/state   # snapshot + the exact device frame
 ```
 
 Never install integrations into the real `~/.claude/settings.json` or `~/.codex/hooks.json` while testing; point `CLAUDE_CONFIG_DIR` / `CODEX_HOME` at a temp dir.
+
+MQTT without a real broker: `internal/mqtt/mqtttest` is a small in-process broker (wildcards, retained messages, `Kill()` for reconnect tests). For a manual run, add an entry to `mqtt.brokers` in the temp config pointing at any local broker (e.g. `mosquitto -p 1884`) and simulate a lamp that echoes its command topic to a retained state topic.
 
 Firmware UI checks without hardware: `firmware/sim` compiles `main/ui.c` against LVGL on the desktop and writes PPM screenshots. It needs `idf.py reconfigure` once (downloads LVGL into `managed_components/`) and the cmake from `. ~/esp/esp-idf/export.sh`. Sample scenarios live in `firmware/sim/sim.c`.
 

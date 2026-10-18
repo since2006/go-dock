@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"time"
 	"unicode/utf8"
 
@@ -31,6 +33,14 @@ const (
 	maxAgents    = 3
 	agentTypeLen = 16
 	agentTextLen = 32
+
+	// Function pages (§3.5): what one screen page holds.
+	maxPages     = 4
+	maxItems     = 6
+	pageTitleLen = 8
+	pageNoteLen  = 24 // summary and error
+	itemLabelLen = 12
+	itemTextLen  = 8
 )
 
 // Hello is the host's handshake message.
@@ -349,6 +359,99 @@ func dropMsg(ss []SessionFrame) bool {
 	return false
 }
 
+// Pages carries the function pages shown next to the Agent page
+// (docs/protocol-v1.md §3.5).
+type Pages struct {
+	T     string      `json:"t"`
+	Pages []PageFrame `json:"pages"`
+}
+
+type PageFrame struct {
+	ID      string      `json:"id"`
+	Title   string      `json:"title"`
+	Summary string      `json:"summary,omitempty"`
+	Error   string      `json:"error,omitempty"`
+	Items   []ItemFrame `json:"items"`
+}
+
+// ItemFrame is one widget; On is omitted while a switch's state is
+// unknown.
+type ItemFrame struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	Label    string `json:"label"`
+	Text     string `json:"text"`
+	On       *bool  `json:"on,omitempty"`
+	Busy     bool   `json:"busy,omitempty"`
+	Disabled bool   `json:"disabled,omitempty"`
+}
+
+// protoID is what page, item and kind ids may look like, so the firmware
+// can echo them back in an action without escaping.
+var protoID = regexp.MustCompile(`^[a-z0-9_-]{1,16}$`)
+
+// BuildPages converts plugin pages into the pages message: at most
+// maxPages pages of maxItems items, texts cut to fit the screen, and
+// anything with an unusable id dropped.
+func BuildPages(ps []model.Page) Pages {
+	f := Pages{T: "pages", Pages: []PageFrame{}}
+	for _, p := range ps {
+		if len(f.Pages) == maxPages {
+			break
+		}
+		if !protoID.MatchString(p.ID) {
+			continue
+		}
+		pf := PageFrame{
+			ID:      p.ID,
+			Title:   model.Truncate(p.Title, pageTitleLen),
+			Summary: model.Truncate(p.Summary, pageNoteLen),
+			Error:   model.Truncate(p.Error, pageNoteLen),
+			Items:   []ItemFrame{},
+		}
+		for _, it := range p.Items {
+			if len(pf.Items) == maxItems {
+				break
+			}
+			if !protoID.MatchString(it.ID) || !protoID.MatchString(it.Kind) {
+				continue
+			}
+			pf.Items = append(pf.Items, ItemFrame{
+				ID:       it.ID,
+				Kind:     it.Kind,
+				Label:    model.Truncate(it.Label, itemLabelLen),
+				Text:     model.Truncate(it.Text, itemTextLen),
+				On:       it.On,
+				Busy:     it.Busy,
+				Disabled: it.Disabled,
+			})
+		}
+		f.Pages = append(f.Pages, pf)
+	}
+	return f
+}
+
+// EncodePages encodes f as one line of at most MaxLine bytes, dropping
+// items and then pages from the tail when it is too long.
+func EncodePages(f Pages) ([]byte, error) {
+	f.Pages = slices.Clone(f.Pages) // trimmed below
+	for {
+		line, err := encodeLine(f)
+		if err != nil {
+			return nil, err
+		}
+		if len(line) <= MaxLine {
+			return line, nil
+		}
+		last := &f.Pages[len(f.Pages)-1] // an empty list always fits
+		if n := len(last.Items); n > 0 {
+			last.Items = last.Items[: n-1 : n-1]
+		} else {
+			f.Pages = f.Pages[:len(f.Pages)-1]
+		}
+	}
+}
+
 // EncodeHello encodes the host handshake.
 func EncodeHello(hostVersion string) []byte {
 	line, _ := encodeLine(Hello{T: "hello", Proto: ProtoVersion, Host: "go-dock", Ver: hostVersion})
@@ -403,7 +506,8 @@ type DeviceMsg struct {
 	W       int    `json:"w"`
 	H       int    `json:"h"`
 	MaxLine int    `json:"max_line"`
-	OTA     int    `json:"ota"` // 1: can be updated over the link
+	OTA     int    `json:"ota"`   // 1: can be updated over the link
+	Pages   int    `json:"pages"` // 1: shows function pages (§3.5)
 	// ack
 	Seq uint64 `json:"seq"`
 	// log; also the error text of ota
@@ -412,6 +516,10 @@ type DeviceMsg struct {
 	// ota: the device's answer during an update
 	State string `json:"state"` // ready, ack, done, error
 	Off   int    `json:"off"`   // ack: bytes written so far
+	// action: a tap on a function page item
+	Page string `json:"page"`
+	Item string `json:"item"`
+	Act  string `json:"act"`
 }
 
 var errNotMessage = errors.New("不是协议消息")

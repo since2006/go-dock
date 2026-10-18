@@ -20,6 +20,7 @@ import (
 	"github.com/since2006/go-dock/host/internal/ingest"
 	"github.com/since2006/go-dock/host/internal/logx"
 	"github.com/since2006/go-dock/host/internal/model"
+	"github.com/since2006/go-dock/host/internal/plugins"
 	"github.com/since2006/go-dock/host/internal/providers"
 )
 
@@ -37,6 +38,8 @@ type Backend interface {
 	Ingest(provider, kind string, body []byte) error
 	DeviceStatus() any
 	DeviceFrame() any
+	// DevicePages is the pages message the device gets now.
+	DevicePages() any
 	DevicePorts() (any, error)
 	ReconnectDevice()
 	ApplyFirmware() error
@@ -45,6 +48,10 @@ type Backend interface {
 	ApplyUpdate() error
 	System() any
 	SetAutostart(enabled bool) error
+	MQTTStatus() any
+	// PluginAction handles a tap on a function page item, like the
+	// device's action message.
+	PluginAction(ctx context.Context, a model.Action) error
 }
 
 type Server struct {
@@ -77,6 +84,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/integrations/{name}/{action}", s.postIntegration)
 	mux.HandleFunc("GET /api/device/ports", s.getPorts)
 	mux.HandleFunc("GET /api/device/frame", s.getFrame)
+	mux.HandleFunc("GET /api/device/pages", s.getPages)
 	mux.HandleFunc("POST /api/device/reconnect", s.postReconnect)
 	mux.HandleFunc("POST /api/device/firmware", s.postFirmware)
 	mux.HandleFunc("POST /api/ingest/{provider}/{kind}", s.postIngest)
@@ -84,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/autostart", s.postAutostart)
 	mux.HandleFunc("POST /api/update/check", s.postUpdateCheck)
 	mux.HandleFunc("POST /api/update/apply", s.postUpdateApply)
+	mux.HandleFunc("POST /api/plugins/{page}/{item}", s.postPluginAction)
 	return guard(s.listen, mux)
 }
 
@@ -170,6 +179,8 @@ type statePayload struct {
 	Snapshot model.Snapshot `json:"snapshot"`
 	Device   any            `json:"device"`
 	Frame    any            `json:"frame"`
+	Pages    any            `json:"pages"`
+	MQTT     any            `json:"mqtt"`
 	Update   any            `json:"update"`
 }
 
@@ -179,6 +190,8 @@ func (s *Server) state() statePayload {
 		Snapshot: s.backend.Snapshot(),
 		Device:   s.backend.DeviceStatus(),
 		Frame:    s.backend.DeviceFrame(),
+		Pages:    s.backend.DevicePages(),
+		MQTT:     s.backend.MQTTStatus(),
 		Update:   s.backend.UpdateStatus(),
 	}
 }
@@ -295,6 +308,35 @@ func (s *Server) postUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, s.backend.UpdateStatus())
+}
+
+func (s *Server) getPages(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.backend.DevicePages())
+}
+
+// postPluginAction takes {"act":"on|off|toggle"} and answers with the
+// pages message after the tap.
+func (s *Server) postPluginAction(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Act string `json:"act"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	err := s.backend.PluginAction(ctx, model.Action{Page: r.PathValue("page"), Item: r.PathValue("item"), Act: body.Act})
+	switch {
+	case errors.Is(err, plugins.ErrNotFound):
+		writeErr(w, http.StatusNotFound, err)
+	case errors.Is(err, plugins.ErrBadAct):
+		writeErr(w, http.StatusBadRequest, err)
+	case err != nil:
+		writeErr(w, http.StatusBadGateway, err)
+	default:
+		writeJSON(w, http.StatusOK, s.backend.DevicePages())
+	}
 }
 
 // postIngest always answers with an empty body: hook runners may treat

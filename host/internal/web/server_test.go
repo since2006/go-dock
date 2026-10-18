@@ -15,6 +15,7 @@ import (
 	"github.com/since2006/go-dock/host/internal/config"
 	"github.com/since2006/go-dock/host/internal/logx"
 	"github.com/since2006/go-dock/host/internal/model"
+	"github.com/since2006/go-dock/host/internal/plugins"
 	"github.com/since2006/go-dock/host/internal/providers"
 )
 
@@ -23,11 +24,12 @@ type fakeBackend struct {
 	ingests   []string
 	autostart bool
 	flashing  bool
+	actions   []model.Action
 }
 
 func (f *fakeBackend) Snapshot() model.Snapshot             { return model.Snapshot{} }
 func (f *fakeBackend) Subscribe() (<-chan struct{}, func()) { return make(chan struct{}), func() {} }
-func (f *fakeBackend) Config() config.Config                { return f.cfg }
+func (f *fakeBackend) Config() config.Config                { return f.cfg.Clone() }
 func (f *fakeBackend) SetConfig(c config.Config) error {
 	if err := c.Validate(); err != nil {
 		return err
@@ -58,6 +60,20 @@ func (f *fakeBackend) ApplyUpdate() error { return errors.New("没有可用的�
 func (f *fakeBackend) System() any        { return map[string]any{"autostart": f.autostart} }
 func (f *fakeBackend) SetAutostart(on bool) error {
 	f.autostart = on
+	return nil
+}
+func (f *fakeBackend) DevicePages() any { return map[string]any{"t": "pages", "n": len(f.actions)} }
+func (f *fakeBackend) MQTTStatus() any  { return map[string]string{"state": "disabled"} }
+func (f *fakeBackend) PluginAction(ctx context.Context, a model.Action) error {
+	switch {
+	case a.Page != "lights" || a.Item != "main":
+		return plugins.ErrNotFound
+	case a.Act != model.ActOn && a.Act != model.ActOff && a.Act != model.ActToggle:
+		return plugins.ErrBadAct
+	case a.Act == model.ActOff:
+		return errors.New("MQTT 未连接")
+	}
+	f.actions = append(f.actions, a)
 	return nil
 }
 
@@ -130,6 +146,64 @@ func TestConfigPut(t *testing.T) {
 	}
 	if w := do(h, "PUT", "127.0.0.1:47321", "/api/config", "application/json", `{"nope":1}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("unknown field: %d", w.Code)
+	}
+}
+
+func TestConfigPutLights(t *testing.T) {
+	b, h := newTestServer("127.0.0.1:47321")
+	two := `{"plugins":{"lights":{"enabled":true,"lights":[
+		{"id":"main","name":"主灯","command_topic":"a/set","state_topic":"a/state","state_path":"state"},
+		{"id":"desk","name":"台灯","command_topic":"b/set"}]}}}`
+	if w := do(h, "PUT", "127.0.0.1:47321", "/api/config", "application/json", two); w.Code != http.StatusOK {
+		t.Fatalf("put: %d %s", w.Code, w.Body.String())
+	}
+	// A shorter list whose first light omits keys replaces the whole list.
+	one := `{"plugins":{"lights":{"lights":[{"id":"desk","name":"台灯","command_topic":"b/set"}]}}}`
+	if w := do(h, "PUT", "127.0.0.1:47321", "/api/config", "application/json", one); w.Code != http.StatusOK {
+		t.Fatalf("put: %d %s", w.Code, w.Body.String())
+	}
+	ls := b.cfg.Plugins.Lights
+	if !ls.Enabled || len(ls.Lights) != 1 || ls.Lights[0] != (config.Light{ID: "desk", Name: "台灯", CommandTopic: "b/set"}) {
+		t.Fatalf("lights %+v", ls)
+	}
+	bad := `{"plugins":{"lights":{"lights":[{"id":"Main","name":"x","command_topic":"a"}]}}}`
+	if w := do(h, "PUT", "127.0.0.1:47321", "/api/config", "application/json", bad); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad id: %d", w.Code)
+	}
+	if len(b.cfg.Plugins.Lights.Lights) != 1 || b.cfg.Plugins.Lights.Lights[0].ID != "desk" {
+		t.Fatalf("rejected put changed the config: %+v", b.cfg.Plugins.Lights)
+	}
+}
+
+func TestPluginAction(t *testing.T) {
+	b, h := newTestServer("127.0.0.1:47321")
+	host := "127.0.0.1:47321"
+	w := do(h, "POST", host, "/api/plugins/lights/main", "application/json", `{"act":"toggle"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"n":1`) {
+		t.Fatalf("toggle: %d %s", w.Code, w.Body.String())
+	}
+	if len(b.actions) != 1 || b.actions[0] != (model.Action{Page: "lights", Item: "main", Act: "toggle"}) {
+		t.Fatalf("actions %+v", b.actions)
+	}
+	for _, tc := range []struct {
+		path, body string
+		code       int
+	}{
+		{"/api/plugins/lights/nope", `{"act":"on"}`, http.StatusNotFound},
+		{"/api/plugins/lights/main", `{"act":"dim"}`, http.StatusBadRequest},
+		{"/api/plugins/lights/main", `not json`, http.StatusBadRequest},
+		{"/api/plugins/lights/main", `{"act":"off"}`, http.StatusBadGateway},
+	} {
+		if w := do(h, "POST", host, tc.path, "application/json", tc.body); w.Code != tc.code {
+			t.Errorf("%s %s: %d, want %d", tc.path, tc.body, w.Code, tc.code)
+		}
+	}
+	if w := do(h, "POST", host, "/api/plugins/lights/main", "text/plain", `{"act":"on"}`); w.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("text/plain: %d", w.Code)
+	}
+	w = do(h, "GET", host, "/api/state", "", "")
+	if !strings.Contains(w.Body.String(), `"pages":{`) || !strings.Contains(w.Body.String(), `"mqtt":{"state":"disabled"}`) {
+		t.Fatalf("state: %s", w.Body.String())
 	}
 }
 

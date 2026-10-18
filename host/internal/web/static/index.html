@@ -18,6 +18,7 @@
       <button role="tab" data-tab="overview" aria-selected="true">概览</button>
       <button role="tab" data-tab="preview">设备预览</button>
       <button role="tab" data-tab="integrations">集成</button>
+      <button role="tab" data-tab="plugins">插件</button>
       <button role="tab" data-tab="settings">设置</button>
       <button role="tab" data-tab="logs">日志</button>
     </nav>
@@ -50,7 +51,13 @@
             <div class="screen" id="screen"></div>
           </div>
           <div class="preview-opts">
-            <span>点列表右侧的竖向圆点翻页；子 agent 缩进显示在所属会话下面。</span>
+            <div class="fn-nav">
+              <button type="button" class="btn small ghost" id="fn-prev" aria-label="上一个功能页">◀</button>
+              <span id="fn-name">Agent</span>
+              <button type="button" class="btn small ghost" id="fn-next" aria-label="下一个功能页">▶</button>
+            </div>
+            <span>左右拖动屏幕（或按 ← →）切换功能页；点列表右侧的竖向圆点翻任务页。功能页上的开关点一下就会真的执行。</span>
+            <span class="form-msg" id="preview-msg" role="status"></span>
           </div>
         </div>
         <div class="preview-side">
@@ -66,6 +73,11 @@
             <p class="muted">发给屏幕的 snapshot 消息，格式见 docs/protocol-v1.md。</p>
             <pre class="code" id="frame-json"></pre>
           </div>
+          <div class="panel">
+            <h2>功能页数据</h2>
+            <p class="muted">发给屏幕的 pages 消息（§3.5）。固件暂未支持功能页，目前只在这里预览。</p>
+            <pre class="code" id="pages-json"></pre>
+          </div>
         </div>
       </div>
     </section>
@@ -73,6 +85,47 @@
     <section id="tab-integrations" class="tab" hidden>
       <p class="lead">安装后，Claude Code 和 Codex 会在状态变化时立即通知 go-dock。修改前会自动备份原文件（<code>*.go-dock-时间.bak</code>），卸载可恢复。</p>
       <div class="cards" id="integrations"></div>
+    </section>
+
+    <section id="tab-plugins" class="tab" hidden>
+      <p class="lead">插件显示在屏幕上 Agent 页右边的功能页里，左右滑动切换；在「设备预览」里也能直接操作。插件通过 MQTT 控制设备，go-dock 负责连接 broker（可以有多个），屏幕本身不联网。</p>
+      <form id="mqtt-form" class="panel settings" autocomplete="off">
+        <div class="panel-head">
+          <h2>MQTT broker</h2>
+          <span class="muted" id="mqtt-summary"></span>
+        </div>
+        <fieldset>
+          <small class="muted">每个 broker 一条连接，灯光等插件按名字选用。地址支持 <code>mqtt://</code>、<code>mqtts://</code>（TLS）、<code>ws://</code>、<code>wss://</code>；只填主机和端口时按 <code>mqtt://</code> 处理，省略端口时用 1883 / 8883。密码保存在本机的 go-dock 配置文件里。</small>
+          <div id="broker-list" class="light-list"></div>
+          <div class="row">
+            <button type="button" class="btn ghost" id="add-broker">添加 broker</button>
+            <small class="muted">最多 8 个</small>
+          </div>
+        </fieldset>
+        <div class="row end">
+          <span class="form-msg" id="mqtt-msg" role="status"></span>
+          <button type="submit" class="btn primary">保存</button>
+        </div>
+      </form>
+      <form id="lights-form" class="panel settings" autocomplete="off">
+        <div class="panel-head">
+          <h2>灯光</h2>
+          <span class="muted" id="lights-summary"></span>
+        </div>
+        <fieldset>
+          <label class="check"><input type="checkbox" name="plugins.lights.enabled"> 在屏幕上显示「灯光」页</label>
+          <small class="muted">每盏灯填一个命令主题和开 / 关时发送的内容；填了状态主题，屏幕显示的是灯实际回报的状态，否则按最后一次命令显示。</small>
+          <div id="lights-list" class="light-list"></div>
+          <div class="row">
+            <button type="button" class="btn ghost" id="add-light">添加灯</button>
+            <small class="muted">最多 6 盏</small>
+          </div>
+        </fieldset>
+        <div class="row end">
+          <span class="form-msg" id="lights-msg" role="status"></span>
+          <button type="submit" class="btn primary">保存</button>
+        </div>
+      </form>
     </section>
 
     <section id="tab-settings" class="tab" hidden>

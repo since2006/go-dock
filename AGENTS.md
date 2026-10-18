@@ -10,6 +10,8 @@ Guidance for AI coding agents working in this repository.
   - `internal/hub/` — merges observations into ordered sessions + usage; the single source of truth.
   - `internal/providers/` — collectors. `claude/` and `codex/` each have: status-file / log polling, hook mapping, install/uninstall of integrations. `jsonl/` is the incremental JSONL reader, `pricing/` the cost table. Shared install helpers live in `providers/install.go`.
   - `internal/device/` — USB serial link to the screen (`protocol.go` mirrors `docs/protocol-v1.md`).
+  - `internal/mqtt/` — MQTT connections for plugins: `Client` is one broker (own reconnect loop, subscriptions kept across reconnects, fail-fast publish), `Pool` keeps one `Client` per configured broker id; `mqtttest/` is an in-process broker for tests.
+  - `internal/plugins/` — function pages next to the Agent page: the `Plugin` interface and `Host`; one subpackage per plugin (`lights/`). Plugins describe pages with the generic widgets in `model.Page`, reach MQTT through brokers they name by id, and never talk to the device or UI directly.
   - `internal/web/` — HTTP API + embedded UI (`static/`, plain HTML/CSS/JS, no build step).
   - `internal/app/` — wiring; implements `web.Backend`.
   - `internal/autostart/` — login item per OS (LaunchAgent / systemd user unit or XDG / HKCU Run).
@@ -34,7 +36,7 @@ cmake -B build-sim -S sim && cmake --build build-sim && build-sim/dock_sim out  
 
 ## Rules
 
-- **Protocol changes**: update `docs/protocol-v1.md`, `host/internal/device/protocol.go` and `firmware/main/link.c` (+ `model.h`) together; keep the 4096-byte line cap; only add optional fields unless bumping `proto`.
+- **Protocol changes**: update `docs/protocol-v1.md`, `host/internal/device/protocol.go` and `firmware/main/link.c` (+ `model.h`) together; keep the 4096-byte line cap; only add optional fields unless bumping `proto`. Exception for now: `pages` / `action` (§3.5, §4.4) exist host-side only until the firmware catches up; the host sends `pages` only to a device whose hello has `"pages":1`.
 - **Privacy**: never read or send credentials (`~/.claude/.credentials.json`, Keychain, `~/.codex/auth.json`). Never log hook/statusline payloads (they contain prompts and tool input) above debug level.
 - **Editing user config files** (`~/.claude/settings.json`, `~/.codex/hooks.json`): go through `providers.ReadJSONFile` / `Save`, which keep unrelated content and key order, back up the original, and write atomically. `~/.codex/hooks.json` may only contain the top-level keys `description` and `hooks`. Replace our hook entries in place rather than reordering (Codex trust keys include array indices).
 - **Hook subcommands** must stay silent and exit 0, even when the daemon is down.

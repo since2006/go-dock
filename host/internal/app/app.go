@@ -22,6 +22,9 @@ import (
 	"github.com/since2006/go-dock/host/internal/hub"
 	"github.com/since2006/go-dock/host/internal/logx"
 	"github.com/since2006/go-dock/host/internal/model"
+	"github.com/since2006/go-dock/host/internal/mqtt"
+	"github.com/since2006/go-dock/host/internal/plugins"
+	"github.com/since2006/go-dock/host/internal/plugins/lights"
 	"github.com/since2006/go-dock/host/internal/providers"
 	"github.com/since2006/go-dock/host/internal/providers/claude"
 	"github.com/since2006/go-dock/host/internal/providers/codex"
@@ -52,6 +55,9 @@ type App struct {
 	hub     *hub.Hub
 	device  *device.Manager
 	updater *update.Updater
+	mqtt    *mqtt.Pool
+	lights  *lights.Plugin
+	plugins *plugins.Host
 	listen  string // loopback-reachable address hooks call back to
 
 	ctx        context.Context
@@ -106,6 +112,12 @@ func Run(ctx context.Context, o Options) error {
 	a.device = device.NewManager(a.hub, deviceOptions(cfg), o.Version, lg.Logger, a.hub.Touch)
 	a.updater = update.New(o.Version, lg.Logger, a.hub.Touch)
 	a.updater.SetBeta(cfg.Update.Prerelease)
+	a.mqtt = mqtt.NewPool(lg.Logger, a.hub.Touch)
+	a.mqtt.SetOptions(mqttOptions(cfg))
+	a.lights = lights.New(func(id string) lights.Bus { return a.mqtt.Client(id) }, lg.Logger, a.hub.Touch)
+	a.lights.SetOptions(lightsOptions(cfg))
+	a.plugins = plugins.New(a.lights)
+	a.device.SetPages(a.plugins)
 	a.applyProviders(cfg)
 	store.OnChange(a.onConfigChange)
 
@@ -114,6 +126,7 @@ func Run(ctx context.Context, o Options) error {
 
 	go a.hub.Run(ctx)
 	go a.device.Run(ctx)
+	go a.mqtt.Run(ctx)
 	go a.updater.Run(ctx, func() bool { return a.store.Get().Update.AutoCheck })
 	if o.OpenBrowser && !o.Restarted && cfg.Web.OpenBrowser {
 		openBrowser(url)
@@ -152,6 +165,29 @@ func hubOptions(c config.Config) hub.Options {
 
 func deviceOptions(c config.Config) device.Options {
 	return device.Options{Enabled: c.Device.Enabled, Port: c.Device.Port, MaxSessions: c.Display.MaxSessions, ShowIdle: c.Display.ShowIdle}
+}
+
+func mqttOptions(c config.Config) []mqtt.BrokerOptions {
+	var bs []mqtt.BrokerOptions
+	for _, b := range c.MQTT.Brokers {
+		url, _ := config.BrokerURL(b.URL) // validated; empty stays off
+		bs = append(bs, mqtt.BrokerOptions{ID: b.ID, Name: b.Label(), Options: mqtt.Options{
+			Enabled: b.Enabled, Broker: url, Username: b.Username, Password: b.Password, ClientID: b.ClientID,
+		}})
+	}
+	return bs
+}
+
+func lightsOptions(c config.Config) lights.Options {
+	o := lights.Options{Enabled: c.Plugins.Lights.Enabled, Brokers: map[string]string{}}
+	for _, b := range c.MQTT.Brokers {
+		o.Brokers[b.ID] = b.Label()
+	}
+	for _, l := range c.Plugins.Lights.Lights {
+		l.Broker = c.MQTT.BrokerFor(l.Broker)
+		o.Lights = append(o.Lights, l)
+	}
+	return o
 }
 
 func codexOptions(c config.Config) codex.Options {
@@ -201,6 +237,8 @@ func (a *App) onConfigChange(old, cur config.Config) {
 	a.log.Level.Set(logx.ParseLevel(cur.Log.Level))
 	a.hub.SetOptions(hubOptions(cur))
 	a.device.SetOptions(deviceOptions(cur))
+	a.mqtt.SetOptions(mqttOptions(cur))
+	a.lights.SetOptions(lightsOptions(cur))
 	a.applyProviders(cur)
 	if old.Update.Prerelease != cur.Update.Prerelease {
 		a.updater.SetBeta(cur.Update.Prerelease)
@@ -290,6 +328,19 @@ func (a *App) SetAutostart(enabled bool) error {
 func (a *App) DeviceFrame() any {
 	return device.BuildFrame(a.hub.Snapshot(), deviceOptions(a.store.Get()), 0)
 }
+
+func (a *App) DevicePages() any { return device.BuildPages(a.plugins.Pages()) }
+
+func (a *App) MQTTStatus() any { return a.mqtt.Status() }
+
+func (a *App) PluginAction(ctx context.Context, act model.Action) error {
+	return a.plugins.Do(ctx, act)
+}
+
+var (
+	_ lights.Bus        = (*mqtt.Client)(nil)
+	_ device.PageSource = (*plugins.Host)(nil)
+)
 
 func (a *App) Ingest(provider, kind string, body []byte) error {
 	a.mu.Lock()

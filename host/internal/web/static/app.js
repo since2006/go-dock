@@ -20,7 +20,9 @@ const STATE_ORDER = ["approval", "input", "error", "running", "done", "idle"];
 const PROVIDER_NAME = { claude: "Claude", codex: "Codex" };
 
 let state = null;
-let previewPage = 0;
+let previewPage = 0; // task page on the Agent page
+let previewFn = "agent"; // the page shown: "agent" or a function page id
+let scrTaskPages = 1;
 
 // ---------- formatting ----------
 
@@ -99,6 +101,7 @@ function showTab(name) {
   try { localStorage.setItem("tab", name); } catch {}
   if (name === "integrations") loadIntegrations();
   if (name === "settings") { loadSettings(); loadSystem(); }
+  if (name === "plugins") loadPlugins();
   if (name === "logs") loadLogs();
   if (name === "preview") fitScreen();
 }
@@ -237,6 +240,7 @@ const SCR_ICONS = {
   done: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
   idle: '<circle cx="12" cy="12" r="2.5"/>',
   moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>',
+  bulb: '<path d="M9 18h6"/><path d="M10 21h4"/><path d="M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.4 1.1 2.2h5c0-.8.4-1.6 1.1-2.2A6 6 0 0 0 12 3z"/>',
   unplug: '<path d="M9 7V3M15 7V3"/><path d="M6 7h12v4a6 6 0 0 1-6 6 6 6 0 0 1-6-6z"/><path d="M12 17v4"/><path d="M3 3l18 18"/>',
 };
 
@@ -361,20 +365,30 @@ function scrGroup(s, now) {
   return el("div", { class: "scr-group" }, row, ...subs);
 }
 
-function renderScreen(frame) {
-  const screen = $("#screen");
-  if (!frame) { screen.replaceChildren(); return; }
+// The strip on top of every page: title and summary (or why the page cannot
+// be used now) on the left; page dots, link and clock on the right.
+function scrStrip(title, summary, now, dots, error) {
+  const clock = new Date(now * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+  return el("div", { class: "scr-strip" },
+    el("div", { class: "left" }, el("span", { class: "title" }, title),
+      error ? el("span", { class: "summary err" }, error) : el("span", { class: "summary" }, summary)),
+    el("div", { class: "right" }, dots, el("span", { class: `link ${hostConnected ? "" : "off"}` }), el("span", { class: "clock mono" }, clock)),
+  );
+}
+
+// Horizontal page dots, the current one stretched; none for a single page.
+function scrDots(n, cur) {
+  if (n < 2) return null;
+  return el("span", { class: "scr-dots" }, ...Array.from({ length: n }, (_, i) => el("i", { class: i === cur ? "on" : "" })));
+}
+
+function scrAgentBody(frame, dots) {
   const now = frame.now;
   const sessions = frame.sessions || [];
   const counts = frame.counts || {};
-
   const summary = SCR_ACTIVE.filter((k) => counts[k]).map((k) => `${STATE_LABEL[k]} ${counts[k]}`).join(" · ")
     || (sessions.length ? "全部完成" : "");
-  const clock = new Date(now * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
-  const strip = el("div", { class: "scr-strip" },
-    el("div", { class: "left" }, el("span", { class: "title" }, "Agent"), el("span", { class: "summary" }, summary)),
-    el("div", { class: "right" }, el("span", { class: `link ${hostConnected ? "" : "off"}` }), el("span", { class: "clock mono" }, clock)),
-  );
+  const strip = scrStrip("Agent", summary, now, dots);
 
   const usage = el("div", { class: "scr-usage" }, ...["claude", "codex"].map((p) => {
     const u = (frame.usage && frame.usage[p]) || {};
@@ -387,6 +401,7 @@ function renderScreen(frame) {
   }));
 
   const pages = scrPages(sessions);
+  scrTaskPages = pages.length;
   previewPage = Math.min(previewPage, pages.length - 1);
   const shown = pages[previewPage];
   const list = el("div", { class: "scr-list" }, shown.length
@@ -396,11 +411,91 @@ function renderScreen(frame) {
   const tasks = el("div", { class: "scr-tasks" }, list,
     pages.length > 1 ? el("button", {
       class: "scr-pager", type: "button", "aria-label": `下一页任务（第 ${previewPage + 1} 页，共 ${pages.length} 页）`,
-      onclick: () => { previewPage = (previewPage + 1) % pages.length; renderScreen(frame); },
+      onclick: () => goTaskPage(1),
     }, ...pages.map((_, i) => el("i", { class: i === previewPage ? "on" : "" }))) : null,
   );
+  return [strip, usage, tasks];
+}
 
-  const body = el("div", { class: `scr-body ${hostConnected ? "" : "dim"}` }, strip, usage, tasks);
+// Function page layout, shared with the firmware (docs/protocol-v1.md §7.1):
+// under the strip a 564x380 area holds the items as cards in a grid.
+const SCR_PAGE_W = 564, SCR_PAGE_H = 380, SCR_CARD_GAP = 12;
+
+// Columns and rows for n cards: one row up to three, then 2x2 and 3x2.
+function scrGrid(n) {
+  if (n <= 3) return [Math.max(n, 1), 1];
+  return n === 4 ? [2, 2] : [3, 2];
+}
+
+function scrFnBody(page, now, dots) {
+  const items = page.items || [];
+  const [cols, rows] = scrGrid(items.length);
+  const w = (SCR_PAGE_W - (cols - 1) * SCR_CARD_GAP) / cols;
+  const h = (SCR_PAGE_H - (rows - 1) * SCR_CARD_GAP) / rows;
+  const grid = items.length
+    ? el("div", { class: "scr-grid", style: `grid-template-columns:repeat(${cols},${w}px);grid-template-rows:repeat(${rows},${h}px)` },
+      ...items.map((it) => scrCard(page, it, rows === 1)))
+    : el("div", { class: "scr-empty" }, el("span", { class: "s" }, "这一页还没有内容"));
+  return [scrStrip(page.title, page.summary || "", now, dots, page.error), grid];
+}
+
+// A switch card: lamp icon, label and state. Cards of kinds the screen
+// does not know show their texts but take no taps.
+function scrCard(page, it, big) {
+  const st = it.busy ? "busy" : it.on === true ? "on" : it.on === false ? "off" : "unknown";
+  const tappable = it.kind === "switch" && !it.disabled && hostConnected;
+  return el("button", {
+    type: "button",
+    class: `scr-card ${st} ${big ? "big" : ""} ${it.disabled ? "disabled" : ""}`,
+    disabled: tappable ? null : "",
+    onclick: () => previewTap(page.id, it),
+  },
+  el("span", { class: "chip" }, scrIcon("bulb", big ? 46 : 30, 2)),
+  el("span", { class: "label" }, it.label),
+  el("span", { class: "text" }, it.text));
+}
+
+function fnPages() { return (state && state.pages && state.pages.pages) || []; }
+
+// The pages left to right: Agent first, then the function pages in order.
+function previewIds() { return ["agent", ...fnPages().map((p) => p.id)]; }
+
+function goFn(delta) {
+  const ids = previewIds();
+  const i = Math.max(0, Math.min(ids.length - 1, ids.indexOf(previewFn) + delta));
+  if (ids[i] === previewFn) return;
+  previewFn = ids[i];
+  if (state) renderScreen(state.frame);
+}
+
+function goTaskPage(delta) {
+  if (previewFn !== "agent" || scrTaskPages < 2) return;
+  previewPage = (previewPage + delta + scrTaskPages) % scrTaskPages;
+  if (state) renderScreen(state.frame);
+}
+
+async function previewTap(pageId, it) {
+  it.busy = true; // until the host answers
+  renderScreen(state.frame);
+  try {
+    state.pages = await api(`/api/plugins/${pageId}/${it.id}`, { method: "POST", body: { act: "toggle" } });
+    showMsg("#preview-msg", "");
+  } catch (e) {
+    showMsg("#preview-msg", e.message, true);
+  }
+  render();
+}
+
+function renderScreen(frame) {
+  const screen = $("#screen");
+  if (!frame) { screen.replaceChildren(); return; }
+  const ids = previewIds();
+  if (!ids.includes(previewFn)) previewFn = "agent";
+  const cur = ids.indexOf(previewFn);
+  const page = fnPages().find((p) => p.id === previewFn);
+  const dots = scrDots(ids.length, cur);
+  const body = el("div", { class: `scr-body ${hostConnected ? "" : "dim"}` },
+    ...(page ? scrFnBody(page, frame.now, dots) : scrAgentBody(frame, dots)));
   const parts = [body];
   if (!hostConnected) {
     parts.push(el("div", { class: "scr-offline" }, el("div", { class: "card" },
@@ -410,6 +505,39 @@ function renderScreen(frame) {
   }
   screen.replaceChildren(...parts);
   fitScreen();
+
+  $("#fn-name").textContent = `${page ? page.title : "Agent"}  ${cur + 1} / ${ids.length}`;
+  $("#fn-prev").disabled = cur === 0;
+  $("#fn-next").disabled = cur === ids.length - 1;
+}
+
+$("#fn-prev").addEventListener("click", () => goFn(-1));
+$("#fn-next").addEventListener("click", () => goFn(1));
+document.addEventListener("keydown", (e) => {
+  if ($("#tab-preview").hidden || e.altKey || e.ctrlKey || e.metaKey || e.target.closest("input, select, textarea")) return;
+  if (e.key === "ArrowLeft") { e.preventDefault(); goFn(-1); }
+  if (e.key === "ArrowRight") { e.preventDefault(); goFn(1); }
+});
+
+// Swipes on the preview, as on the screen: left/right switches pages,
+// up/down turns task pages. A swipe never also taps a card.
+{
+  const screen = $("#screen");
+  let start = null, swallow = false;
+  screen.addEventListener("pointerdown", (e) => { start = { x: e.clientX, y: e.clientY }; });
+  screen.addEventListener("pointercancel", () => { start = null; });
+  screen.addEventListener("pointerup", (e) => {
+    if (!start) return;
+    const s = Number(screen.style.getPropertyValue("--s")) || 1;
+    const dx = (e.clientX - start.x) / s, dy = (e.clientY - start.y) / s;
+    start = null;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 50) return; // a tap
+    swallow = true;
+    setTimeout(() => { swallow = false; });
+    if (Math.abs(dx) > Math.abs(dy)) goFn(dx < 0 ? 1 : -1);
+    else goTaskPage(dy < 0 ? 1 : -1);
+  });
+  screen.addEventListener("click", (e) => { if (swallow) { e.preventDefault(); e.stopPropagation(); } }, true);
 }
 
 function renderDeviceDetail(dev) {
@@ -448,6 +576,8 @@ function render() {
   renderDeviceDetail(state.device || {});
   renderScreen(state.frame);
   $("#frame-json").textContent = JSON.stringify(state.frame, null, 2);
+  $("#pages-json").textContent = JSON.stringify(state.pages, null, 2);
+  renderPluginsLive();
 }
 
 $("#show-idle").addEventListener("change", (e) => {
@@ -695,41 +825,52 @@ function setPath(obj, path, v) {
   o[keys.at(-1)] = v;
 }
 
-async function loadSettings() {
-  try {
-    loadedConfig = await api("/api/config");
-    for (const input of form.elements) {
-      if (!input.name) continue;
-      const v = getPath(loadedConfig, input.name);
-      if (input.type === "checkbox") input.checked = !!v;
-      else input.value = v ?? "";
-    }
-    $("#settings-msg").textContent = "";
-  } catch (e) {
-    showFormMsg(e.message, true);
+// Inputs named with dotted config paths ("device.port") fill from and read
+// into a config object; each form saves only its own fields, which the
+// server merges into the rest.
+function fillForm(f, cfg) {
+  for (const input of f.elements) {
+    if (!input.name) continue;
+    const v = getPath(cfg, input.name);
+    if (input.type === "checkbox") input.checked = !!v;
+    else input.value = v ?? "";
   }
 }
 
-function showFormMsg(text, err) {
-  const m = $("#settings-msg");
+function readForm(f) {
+  const out = {};
+  for (const input of f.elements) {
+    if (!input.name) continue;
+    let v = input.type === "checkbox" ? input.checked : input.type === "password" ? input.value : input.value.trim();
+    if (input.type === "number") v = Number(v);
+    setPath(out, input.name, v);
+  }
+  return out;
+}
+
+function showMsg(sel, text, err) {
+  const m = $(sel);
   m.textContent = text;
   m.className = `form-msg ${err ? "err" : ""}`;
 }
 
+async function loadSettings() {
+  try {
+    loadedConfig = await api("/api/config");
+    fillForm(form, loadedConfig);
+    showMsg("#settings-msg", "");
+  } catch (e) {
+    showMsg("#settings-msg", e.message, true);
+  }
+}
+
 form.addEventListener("submit", async (ev) => {
   ev.preventDefault();
-  const cfg = structuredClone(loadedConfig || {});
-  for (const input of form.elements) {
-    if (!input.name) continue;
-    let v = input.type === "checkbox" ? input.checked : input.value.trim();
-    if (input.type === "number") v = Number(v);
-    setPath(cfg, input.name, v);
-  }
   try {
-    loadedConfig = await api("/api/config", { method: "PUT", body: cfg });
-    showFormMsg("已保存");
+    loadedConfig = await api("/api/config", { method: "PUT", body: readForm(form) });
+    showMsg("#settings-msg", "已保存");
   } catch (e) {
-    showFormMsg(`保存失败：${e.message}`, true);
+    showMsg("#settings-msg", `保存失败：${e.message}`, true);
   }
 });
 
@@ -748,6 +889,237 @@ $("#scan-ports").addEventListener("click", async () => {
     box.replaceChildren(el("span", { class: "form-msg err" }, e.message));
   }
 });
+
+// ---------- plugins ----------
+
+const mqttForm = $("#mqtt-form");
+const lightsForm = $("#lights-form");
+
+// Editable list rows: each field is [config key, label, placeholder, type].
+// Inputs use data-k, not name, so the dotted-name form helpers skip them;
+// data-id on the row is the id it was saved under, empty for a new one.
+function rowField(entry, [k, label, ph, type]) {
+  if (type === "checkbox") {
+    return el("label", { class: "check" }, el("input", { type: "checkbox", "data-k": k, checked: entry[k] ? "" : null }), label);
+  }
+  const saved = k === "id" && entry.saved;
+  return el("label", {}, label, el("input", {
+    "data-k": k, value: entry[k] || "", placeholder: ph, type: type || null,
+    readonly: saved ? "" : null, title: saved ? "保存后不能修改：插件用它引用这一项" : null,
+    autocomplete: type === "password" ? "new-password" : "off",
+  }));
+}
+
+function readRow(row) {
+  const out = {};
+  for (const input of row.querySelectorAll("[data-k]")) {
+    const k = input.dataset.k;
+    out[k] = input.type === "checkbox" ? input.checked : input.type === "password" ? input.value : input.value.trim();
+  }
+  return out;
+}
+
+// A fresh id like broker1 or light1 that no row uses yet.
+function nextID(list, prefix) {
+  const ids = new Set([...list.querySelectorAll('[data-k="id"]')].map((i) => i.value));
+  let n = 1;
+  while (ids.has(`${prefix}${n}`)) n++;
+  return `${prefix}${n}`;
+}
+
+const BROKER_FIELDS = [
+  ["name", "名称", "如：办公室"],
+  ["id", "ID", "小写字母、数字、- 或 _"],
+  ["url", "地址", "192.168.1.10:1883"],
+  ["username", "用户名", ""],
+  ["password", "密码", "", "password"],
+  ["client_id", "Client ID", "留空自动生成"],
+];
+
+// Light fields; the rest sit under "更多选项".
+const LIGHT_FIELDS = [
+  ["name", "名称", "如：办公室主灯"],
+  ["id", "ID", "小写字母、数字、- 或 _"],
+  ["command_topic", "命令主题", "如：office/light/set"],
+  ["state_topic", "状态主题（可选）", "灯回报状态的主题"],
+  ["payload_on", "开灯时发送", "ON"],
+  ["payload_off", "关灯时发送", "OFF"],
+];
+const LIGHT_MORE = [
+  ["state_path", "状态字段（可选）", "如 state"],
+  ["state_on", "表示「开」的状态值", "默认见下方说明"],
+  ["state_off", "表示「关」的状态值", "默认见下方说明"],
+  ["query_topic", "查询主题（可选）", "如 office/light/get"],
+  ["query_payload", "查询时发送", "可留空"],
+];
+const LIGHT_MORE_NOTE = "状态是 JSON 时，「状态字段」填要读的字段（如 state），JSON 里的 true / false 直接识别。状态值不区分大小写；"
+  + "不填时，有状态字段默认 ON / OFF，没有则与开灯、关灯时发送的内容相同。填了查询主题，每次连上 broker 都会发一次查询，让灯回报当前状态。";
+
+const savedBrokers = () => (loadedConfig && loadedConfig.mqtt && loadedConfig.mqtt.brokers) || [];
+const brokerLabel = (b) => (b.name || "").trim() || b.id;
+
+async function loadPlugins() {
+  try {
+    loadedConfig = await api("/api/config");
+    fillForm(lightsForm, loadedConfig);
+    renderBrokerRows(savedBrokers());
+    renderLightRows(loadedConfig.plugins.lights.lights || []);
+    showMsg("#mqtt-msg", "");
+    showMsg("#lights-msg", "");
+  } catch (e) {
+    showMsg("#lights-msg", e.message, true);
+  }
+}
+
+function brokerRow(b) {
+  const row = el("div", { class: "light-row", "data-id": b.saved ? b.id : "" },
+    el("div", { class: "head" },
+      el("b", {}, b.saved ? brokerLabel(b) : "新的 broker"),
+      el("span", { class: "pill live" }, b.saved ? "—" : "未保存"),
+      rowField(b, ["enabled", "启用", "", "checkbox"]),
+      el("button", { type: "button", class: "btn small danger", onclick: () => { row.remove(); updateAddButtons(); } }, "删除")),
+    el("div", { class: "grid" }, ...BROKER_FIELDS.map((f) => rowField(b, f))),
+  );
+  return row;
+}
+
+function renderBrokerRows(list) {
+  $("#broker-list").replaceChildren(...list.map((b) => brokerRow({ ...b, saved: true })));
+  updateAddButtons();
+  renderPluginsLive();
+}
+
+// The broker a light uses. With one broker or none the choice is hidden
+// and an empty value means "the first broker"; with more every light names
+// its own, and a broker that is gone stays visible so it can be changed.
+function fillBrokerSelect(sel, current) {
+  const bs = savedBrokers();
+  const known = bs.some((b) => b.id === current);
+  const hide = bs.length <= 1 && (current === "" || known);
+  const opts = hide ? [[current, ""]] : bs.map((b) => [b.id, brokerLabel(b)]);
+  if (!hide && current && !known) opts.push([current, `${current}（已删除）`]);
+  sel.replaceChildren(...opts.map(([v, t]) => el("option", { value: v }, t)));
+  sel.value = !hide && current === "" && bs.length ? bs[0].id : current;
+  sel.closest("label").hidden = hide;
+}
+
+function lightRow(l, saved) {
+  const field = (f) => rowField({ ...l, saved }, f);
+  const pick = el("select", { "data-k": "broker" });
+  const row = el("div", { class: "light-row", "data-id": saved ? l.id : "" },
+    el("div", { class: "head" },
+      el("b", {}, l.name || "新的灯"),
+      el("span", { class: "pill live" }, saved ? "—" : "未保存"),
+      el("button", { type: "button", class: "btn small", "data-act": "on" }, "开"),
+      el("button", { type: "button", class: "btn small", "data-act": "off" }, "关"),
+      el("button", { type: "button", class: "btn small danger", onclick: () => { row.remove(); updateAddButtons(); } }, "删除")),
+    el("div", { class: "grid" }, ...LIGHT_FIELDS.slice(0, 2).map(field), el("label", {}, "MQTT broker", pick), ...LIGHT_FIELDS.slice(2).map(field)),
+    el("details", {}, el("summary", {}, "更多选项"),
+      el("div", { class: "grid" }, ...LIGHT_MORE.map(field)),
+      el("small", { class: "muted" }, LIGHT_MORE_NOTE)),
+  );
+  fillBrokerSelect(pick, l.broker || "");
+  for (const b of row.querySelectorAll("[data-act]")) b.addEventListener("click", () => lightAct(row.dataset.id, b.dataset.act, b));
+  return row;
+}
+
+function renderLightRows(list) {
+  $("#lights-list").replaceChildren(...list.map((l) => lightRow(l, true)));
+  updateAddButtons();
+  renderPluginsLive();
+}
+
+function updateAddButtons() {
+  $("#add-broker").disabled = $("#broker-list").children.length >= 8;
+  $("#add-light").disabled = $("#lights-list").children.length >= 6;
+}
+
+$("#add-broker").addEventListener("click", () => {
+  $("#broker-list").append(brokerRow({ id: nextID($("#broker-list"), "broker"), enabled: true }));
+  updateAddButtons();
+  renderPluginsLive();
+});
+
+$("#add-light").addEventListener("click", () => {
+  $("#lights-list").append(lightRow({ id: nextID($("#lights-list"), "light") }, false));
+  updateAddButtons();
+  renderPluginsLive();
+});
+
+async function lightAct(id, act, btn) {
+  if (!id) return;
+  btn.disabled = true;
+  try {
+    state.pages = await api(`/api/plugins/lights/${id}`, { method: "POST", body: { act } });
+    showMsg("#lights-msg", "");
+  } catch (e) {
+    showMsg("#lights-msg", e.message, true);
+  }
+  render();
+}
+
+mqttForm.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const brokers = [...$("#broker-list").children].map(readRow);
+  try {
+    loadedConfig = await api("/api/config", { method: "PUT", body: { mqtt: { brokers } } });
+    renderBrokerRows(savedBrokers());
+    for (const sel of lightsForm.querySelectorAll('select[data-k="broker"]')) fillBrokerSelect(sel, sel.value);
+    showMsg("#mqtt-msg", "已保存");
+  } catch (e) {
+    showMsg("#mqtt-msg", `保存失败：${e.message}`, true);
+  }
+});
+
+lightsForm.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const body = readForm(lightsForm);
+  body.plugins.lights.lights = [...$("#lights-list").children].map(readRow);
+  try {
+    loadedConfig = await api("/api/config", { method: "PUT", body });
+    renderLightRows(loadedConfig.plugins.lights.lights || []);
+    showMsg("#lights-msg", "已保存");
+  } catch (e) {
+    showMsg("#lights-msg", `保存失败：${e.message}`, true);
+  }
+});
+
+const MQTT_STATE = { disabled: ["未启用", ""], connecting: ["连接中…", "warn"], connected: ["已连接", "ok"], error: ["连接失败", "bad"] };
+const LIGHT_TEXTS_OK = ["已开", "已关", "未知", "切换中…"];
+
+// Live state only: the inputs are left alone so typing is never lost.
+function renderPluginsLive() {
+  if (!state) return;
+  const brokers = Array.isArray(state.mqtt) ? state.mqtt : [];
+  const up = brokers.filter((b) => b.state === "connected").length;
+  $("#mqtt-summary").textContent = brokers.length ? `${up} / ${brokers.length} 个已连接` : "";
+  for (const row of $("#broker-list").children) {
+    const b = row.dataset.id ? brokers.find((x) => x.id === row.dataset.id) : null;
+    const live = row.querySelector(".live");
+    const [text, cls] = b ? MQTT_STATE[b.state] || ["—", ""] : ["未保存", ""];
+    live.textContent = b && b.state === "error" && b.error ? `${text}：${b.error}` : text;
+    live.className = `pill live ${cls}`;
+    live.title = b && b.client_id ? `client id：${b.client_id}` : "";
+  }
+
+  const page = fnPages().find((p) => p.id === "lights");
+  $("#lights-summary").textContent = page ? page.summary || "" : "";
+  for (const row of $("#lights-list").children) {
+    const it = page && row.dataset.id ? (page.items || []).find((i) => i.id === row.dataset.id) : null;
+    const live = row.querySelector(".live");
+    if (!row.dataset.id) {
+      live.textContent = "未保存";
+      live.className = "pill live";
+    } else if (!it) {
+      live.textContent = "未启用";
+      live.className = "pill live";
+    } else {
+      live.textContent = it.disabled ? (brokers.length ? "MQTT 未连接" : "没有配置 MQTT") : it.text;
+      live.className = `pill live ${it.disabled || !LIGHT_TEXTS_OK.includes(it.text) ? "bad" : it.busy || it.on === undefined ? "warn" : it.on ? "ok" : ""}`;
+    }
+    for (const b of row.querySelectorAll("[data-act]")) b.disabled = !it || it.disabled;
+  }
+}
 
 // ---------- logs ----------
 

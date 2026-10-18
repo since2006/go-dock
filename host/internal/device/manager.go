@@ -2,6 +2,7 @@ package device
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -29,6 +30,13 @@ type SnapshotSource interface {
 	Subscribe() (<-chan struct{}, func())
 }
 
+// PageSource provides the function pages and handles taps on them;
+// *plugins.Host implements it.
+type PageSource interface {
+	Pages() []model.Page
+	Do(ctx context.Context, a model.Action) error
+}
+
 // Link states reported in Status.State.
 const (
 	StateDisabled  = "disabled"
@@ -44,6 +52,8 @@ type Status struct {
 	Firmware string `json:"firmware,omitempty"`
 	// OTA: the firmware can be updated over the link.
 	OTA bool `json:"ota,omitempty"`
+	// Pages: the firmware shows function pages.
+	Pages bool `json:"pages,omitempty"`
 	// Incompatible: the device speaks another protocol version; it gets no
 	// snapshots but can still be updated.
 	Incompatible bool        `json:"incompatible,omitempty"`
@@ -79,8 +89,10 @@ type Manager struct {
 
 	kick     chan struct{}
 	flashReq chan flashJob
+	actions  chan struct{} // bounds taps being handled at once
 
 	mu          sync.Mutex
+	pages       PageSource
 	opts        Options
 	status      Status
 	seq         uint64
@@ -110,6 +122,7 @@ func NewManager(src SnapshotSource, opts Options, hostVersion string, log *slog.
 		otaSettle:    5 * time.Second,
 		kick:         make(chan struct{}, 1),
 		flashReq:     make(chan flashJob),
+		actions:      make(chan struct{}, 4),
 		opts:         opts,
 		status:       Status{State: StateSearching},
 	}
@@ -125,6 +138,19 @@ func (m *Manager) SetOptions(o Options) {
 	if old.Enabled != o.Enabled || old.Port != o.Port {
 		m.Reconnect()
 	}
+}
+
+// SetPages sets where function pages come from; call it before Run.
+func (m *Manager) SetPages(p PageSource) {
+	m.mu.Lock()
+	m.pages = p
+	m.mu.Unlock()
+}
+
+func (m *Manager) pageSource() PageSource {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pages
 }
 
 // Reconnect drops the current link and searches again immediately.
@@ -199,7 +225,7 @@ func (m *Manager) Run(ctx context.Context) {
 
 // unlinked forgets the device while searching for one.
 func unlinked(s *Status) {
-	s.State, s.Port, s.Firmware, s.OTA, s.Incompatible, s.Width, s.Height = StateSearching, "", "", false, false, 0, 0
+	s.State, s.Port, s.Firmware, s.OTA, s.Pages, s.Incompatible, s.Width, s.Height = StateSearching, "", "", false, false, false, 0, 0
 }
 
 // wait sleeps for d (forever when d is 0) or until a reconnect request.
@@ -260,6 +286,25 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 		m.setError(fmt.Errorf("%s: %w", name, err))
 		return false
 	}
+	// Function pages follow each snapshot, to devices that show them;
+	// a debounced change resends them only when they differ.
+	pagesOK := false
+	var lastPages []byte
+	sendPages := func(force bool) error {
+		src := m.pageSource()
+		if !pagesOK || incompatible || src == nil {
+			return nil
+		}
+		line, err := EncodePages(BuildPages(src.Pages()))
+		if err != nil || (!force && bytes.Equal(line, lastPages)) {
+			return err
+		}
+		if err := m.write(conn, line); err != nil {
+			return err
+		}
+		lastPages = line
+		return nil
+	}
 	if err := m.write(conn, EncodeHello(m.hostVersion)); err != nil {
 		return fail(err)
 	}
@@ -294,12 +339,19 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 				if !ready {
 					m.log.Info("设备握手完成", "fw", msg.FW, "w", msg.W, "h", msg.H)
 				}
-				ready = true
+				ready, pagesOK = true, msg.Pages > 0
 				m.update(func(s *Status) {
-					s.State, s.Incompatible, s.Width, s.Height, s.Error = StateReady, false, msg.W, msg.H, ""
+					s.State, s.Incompatible, s.Pages, s.Width, s.Height, s.Error = StateReady, false, pagesOK, msg.W, msg.H, ""
 				})
 				if err := m.sendSnapshot(conn); err != nil {
 					return fail(err)
+				}
+				if err := sendPages(true); err != nil {
+					return fail(err)
+				}
+			case "action":
+				if ready && !incompatible {
+					m.dispatch(ctx, model.Action{Page: msg.Page, Item: msg.Item, Act: msg.Act})
 				}
 			case "ack":
 			case "log":
@@ -317,10 +369,16 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 				if err := m.sendSnapshot(conn); err != nil {
 					return fail(err)
 				}
+				if err := sendPages(false); err != nil {
+					return fail(err)
+				}
 			}
 		case <-heartbeat.C:
 			if !incompatible {
 				if err := m.sendSnapshot(conn); err != nil {
+					return fail(err)
+				}
+				if err := sendPages(true); err != nil {
 					return fail(err)
 				}
 			}
@@ -350,9 +408,36 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 				if err := m.sendSnapshot(conn); err != nil {
 					return fail(err)
 				}
+				if err := sendPages(true); err != nil {
+					return fail(err)
+				}
 			}
 		}
 	}
+}
+
+// dispatch hands a tap to the page source without holding up the serial
+// loop: a plugin may wait on the network.
+func (m *Manager) dispatch(ctx context.Context, a model.Action) {
+	src := m.pageSource()
+	if src == nil {
+		return
+	}
+	select {
+	case m.actions <- struct{}{}:
+	default:
+		m.log.Warn("屏幕操作太多，已丢弃", "page", a.Page, "item", a.Item)
+		return
+	}
+	m.log.Debug("屏幕操作", "page", a.Page, "item", a.Item, "act", a.Act)
+	go func() {
+		defer func() { <-m.actions }()
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if err := src.Do(ctx, a); err != nil {
+			m.log.Warn("屏幕操作失败", "page", a.Page, "item", a.Item, "act", a.Act, "err", err)
+		}
+	}()
 }
 
 func (m *Manager) sendSnapshot(conn io.WriteCloser) error {

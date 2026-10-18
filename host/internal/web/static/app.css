@@ -192,10 +192,14 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .scr-strip .left { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
 .scr-strip .title { font-size: 20px; font-weight: 700; letter-spacing: .02em; }
 .scr-strip .summary { font-size: 15px; color: var(--scr-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.scr-strip .summary.err { color: #FF6B5E; }
 .scr-strip .right { display: flex; align-items: center; gap: 8px; }
 .scr-strip .link { width: 8px; height: 8px; border-radius: 50%; background: #3DD68C; }
 .scr-strip .link.off { background: #FF6B5E; }
 .scr-strip .clock { font-size: 20px; font-weight: 500; }
+.scr-dots { display: flex; align-items: center; gap: 5px; margin-right: 8px; }
+.scr-dots i { display: block; width: 6px; height: 6px; border-radius: 3px; background: #3A3A3C; }
+.scr-dots i.on { width: 18px; background: #E9E9E5; }
 
 .scr-usage { flex: none; background: var(--scr-card); border-radius: 18px; padding: 10px 16px; display: flex; flex-direction: column; gap: 6px; }
 .scr-urow { height: 44px; display: grid; grid-template-columns: 70px minmax(0, 1fr) minmax(0, 1fr) 58px; column-gap: 16px; align-items: center; }
@@ -265,6 +269,31 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .scr-empty .t { font-size: 24px; font-weight: 700; }
 .scr-empty .s { font-size: 16px; color: var(--scr-3); }
 
+/* Function pages: cards in a grid under the strip (§7.1). */
+.scr-grid { flex: 1; min-height: 0; display: grid; gap: 12px; }
+.scr-card {
+  all: unset; box-sizing: border-box; min-width: 0; padding: 12px; border-radius: 18px; cursor: pointer;
+  --c: #8C8B86; --chip: #1C1C1E;
+  background: var(--scr-card); color: var(--scr-text);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+}
+.scr-card.on { --c: #FFC14D; --chip: rgba(255,193,77,.16); background: #1E1606; box-shadow: inset 0 0 0 1.5px rgba(255,193,77,.4); }
+.scr-card.unknown { --c: #5C5B57; }
+.scr-card.busy { --c: #5AA9FF; --chip: rgba(90,169,255,.14); }
+.scr-card.busy .chip { animation: scr-pulse 1s ease-in-out infinite; }
+.scr-card.disabled { opacity: .35; }
+.scr-card:disabled { cursor: default; }
+.scr-card .chip { width: 56px; height: 56px; border-radius: 50%; background: var(--chip); color: var(--c); display: flex; align-items: center; justify-content: center; }
+.scr-card.big .chip { width: 96px; height: 96px; }
+.scr-card .label { max-width: 100%; font-size: 20px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.scr-card.big .label { font-size: 26px; }
+.scr-card .text { font-size: 16px; font-weight: 700; color: var(--c); }
+.scr-card.big .text { font-size: 20px; }
+.scr-card.off .text { color: var(--scr-3); }
+@keyframes scr-pulse { 50% { opacity: .45; } }
+.screen { touch-action: pan-y; }
+.fn-nav { display: flex; align-items: center; gap: 6px; color: var(--text); font-weight: 600; white-space: pre; }
+
 .scr-offline { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
 .scr-offline .card { background: #161617; border-radius: 22px; padding: 26px 36px; display: flex; flex-direction: column; align-items: center; gap: 8px; box-shadow: 0 0 0 1px #2C2C2E; }
 .scr-offline .t { font-size: 28px; font-weight: 700; }
@@ -297,9 +326,18 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
   border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
 }
 .settings small { color: var(--muted); font-size: 12px; }
+.settings input[readonly] { background: var(--surface-2); color: var(--muted); }
 .form-msg { font-size: 13px; color: var(--muted); }
 .form-msg.err { color: var(--error); }
 .ports { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.light-list { display: grid; gap: 12px; }
+.light-row { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; display: grid; gap: 10px; }
+.light-row .head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.light-row .head .live { margin-right: auto; }
+.light-row .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.light-row details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.light-row details[open] summary { margin-bottom: 10px; }
+.light-row details small { display: block; margin-top: 8px; }
 .ports button { text-align: left; font-family: var(--mono); font-size: 12px; }
 
 /* Logs */
