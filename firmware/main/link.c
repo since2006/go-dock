@@ -21,11 +21,14 @@
 
 static const char *TAG = "link";
 
-static SemaphoreHandle_t s_lock;     // guards s_shared, s_version, s_received_us
+static SemaphoreHandle_t s_lock;     // guards s_shared, s_version, s_received_us and the pages
 static SemaphoreHandle_t s_tx_lock;  // keeps lines from different tasks whole
 static dock_snapshot_t *s_shared;    // newest complete snapshot
 static dock_snapshot_t *s_scratch;   // parse target, owned by the reader task
 static uint32_t s_version;
+static dock_pages_t *s_pages;         // newest function pages
+static dock_pages_t *s_pages_scratch; // parse target, owned by the reader task
+static uint32_t s_pages_version;
 static int64_t s_received_us;
 static volatile int64_t s_last_rx_us;
 static volatile bool s_incompatible;
@@ -44,7 +47,8 @@ static void send_hello(void)
 {
     char buf[176];
     snprintf(buf, sizeof(buf),
-             "{\"t\":\"hello\",\"proto\":%d,\"fw\":\"%s\",\"w\":600,\"h\":450,\"max_line\":%d%s,\"beep\":1}",
+             "{\"t\":\"hello\",\"proto\":%d,\"fw\":\"%s\",\"w\":600,\"h\":450,\"max_line\":%d%s,\"beep\":1,"
+             "\"pages\":1}",
              DOCK_PROTO, esp_app_get_description()->version, MAX_LINE, s_ota ? ",\"ota\":1" : "");
     send_line(buf);
 }
@@ -169,6 +173,67 @@ static void parse_snapshot(const cJSON *root, dock_snapshot_t *s)
     }
 }
 
+// Copies an id the device echoes back in an action; only [a-z0-9_-]{1,16}
+// passes, so it never needs escaping.
+static bool copy_id(char *dst, const cJSON *v)
+{
+    const char *s = cJSON_IsString(v) ? v->valuestring : "";
+    size_t n = strlen(s);
+    if (n == 0 || n >= DOCK_ID_LEN) {
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_')) {
+            return false;
+        }
+    }
+    memcpy(dst, s, n + 1);
+    return true;
+}
+
+// pages: the function pages, replacing the ones before. Pages and items
+// with ids the device could not echo back are left out.
+static void parse_pages(const cJSON *root, dock_pages_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    const cJSON *pg;
+    cJSON_ArrayForEach(pg, cJSON_GetObjectItem(root, "pages"))
+    {
+        if (out->count >= DOCK_MAX_PAGES) {
+            break;
+        }
+        dock_page_t *p = &out->pages[out->count];
+        if (!copy_id(p->id, cJSON_GetObjectItem(pg, "id"))) {
+            continue;
+        }
+        out->count++;
+        copy_str(p->title, sizeof(p->title), cJSON_GetObjectItem(pg, "title"));
+        copy_str(p->summary, sizeof(p->summary), cJSON_GetObjectItem(pg, "summary"));
+        copy_str(p->error, sizeof(p->error), cJSON_GetObjectItem(pg, "error"));
+        const cJSON *it;
+        cJSON_ArrayForEach(it, cJSON_GetObjectItem(pg, "items"))
+        {
+            if (p->item_count >= DOCK_MAX_ITEMS) {
+                break;
+            }
+            dock_item_t *d = &p->items[p->item_count];
+            if (!copy_id(d->id, cJSON_GetObjectItem(it, "id"))) {
+                continue;
+            }
+            p->item_count++;
+            const cJSON *kind = cJSON_GetObjectItem(it, "kind");
+            d->kind = cJSON_IsString(kind) && strcmp(kind->valuestring, "switch") == 0 ? DOCK_ITEM_SWITCH : DOCK_ITEM_OTHER;
+            copy_str(d->label, sizeof(d->label), cJSON_GetObjectItem(it, "label"));
+            copy_str(d->text, sizeof(d->text), cJSON_GetObjectItem(it, "text"));
+            const cJSON *on = cJSON_GetObjectItem(it, "on");
+            d->on = cJSON_IsBool(on) ? (cJSON_IsTrue(on) ? 1 : 0) : -1;
+            d->busy = cJSON_IsTrue(cJSON_GetObjectItem(it, "busy"));
+            d->disabled = cJSON_IsTrue(cJSON_GetObjectItem(it, "disabled"));
+        }
+    }
+}
+
 // beep: {"notes":[[hz,ms],...]}; a frequency out of range plays as a rest.
 static void handle_beep(const cJSON *root)
 {
@@ -281,6 +346,14 @@ static void handle_line(char *line)
         char ack[48];
         snprintf(ack, sizeof(ack), "{\"t\":\"ack\",\"seq\":%lu}", (unsigned long)seq);
         send_line(ack);
+    } else if (strcmp(t->valuestring, "pages") == 0) {
+        parse_pages(root, s_pages_scratch);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        dock_pages_t *tmp = s_pages;
+        s_pages = s_pages_scratch;
+        s_pages_scratch = tmp;
+        s_pages_version++;
+        xSemaphoreGive(s_lock);
     } else if (strcmp(t->valuestring, "beep") == 0) {
         handle_beep(root);
     }
@@ -329,9 +402,12 @@ void link_start(void)
     s_ota = ota_supported();
     s_shared = heap_caps_calloc(1, sizeof(dock_snapshot_t), MALLOC_CAP_SPIRAM);
     s_scratch = heap_caps_calloc(1, sizeof(dock_snapshot_t), MALLOC_CAP_SPIRAM);
+    s_pages = heap_caps_calloc(1, sizeof(dock_pages_t), MALLOC_CAP_SPIRAM);
+    s_pages_scratch = heap_caps_calloc(1, sizeof(dock_pages_t), MALLOC_CAP_SPIRAM);
 
+    // A snapshot and the pages after it arrive back to back, up to 4 KB each.
     usb_serial_jtag_driver_config_t cfg = {
-        .rx_buffer_size = 8192,
+        .rx_buffer_size = 16384,
         .tx_buffer_size = 4096,
     };
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&cfg));
@@ -351,6 +427,26 @@ bool link_take_snapshot(dock_snapshot_t *out, uint32_t *version, int64_t *receiv
     }
     xSemaphoreGive(s_lock);
     return fresh;
+}
+
+bool link_take_pages(dock_pages_t *out, uint32_t *version)
+{
+    bool fresh = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_pages_version != *version) {
+        memcpy(out, s_pages, sizeof(*out));
+        *version = s_pages_version;
+        fresh = true;
+    }
+    xSemaphoreGive(s_lock);
+    return fresh;
+}
+
+void link_send_action(const char *page, const char *item, const char *act)
+{
+    char buf[112];
+    snprintf(buf, sizeof(buf), "{\"t\":\"action\",\"page\":\"%s\",\"item\":\"%s\",\"act\":\"%s\"}", page, item, act);
+    send_line(buf);
 }
 
 int64_t link_last_rx_us(void)

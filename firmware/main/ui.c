@@ -1,5 +1,6 @@
 #include "ui.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -42,6 +43,8 @@
 #define C_AMBER 0xFFB020
 #define C_RED 0xFF6B5E
 #define C_GREEN 0x3DD68C
+#define C_BLUE 0x5AA9FF
+#define C_LAMP 0xFFC14D
 
 static const uint32_t PROVIDER_COLOR[2] = {0xE8906E, 0x93A9FF};
 static const char *PROVIDER_NAME[2] = {"Claude", "Codex"};
@@ -82,6 +85,14 @@ static const struct {
 #define END_X (LIST_W - 14)     // right edge of the row's text
 #define LINE_W (END_X - MID_X) // lines under the project line
 
+// Function pages, shared with the web preview (§7.1): the items as cards in
+// a grid under the strip, one row up to three, then 2x2 and 3x2.
+#define FN_Y 54
+#define FN_W (SCR_W - 2 * PAD_X)
+#define FN_H 380
+#define CARD_GAP 12
+#define MAX_FN (1 + DOCK_MAX_PAGES) // the Agent page, then the function pages
+
 typedef struct {
     lv_obj_t *reset, *window, *pct, *bar;
 } meter_t;
@@ -95,10 +106,18 @@ typedef struct {
     lv_obj_t *obj, *icon, *spinner, *type, *text, *label, *time;
 } sub_t;
 
+typedef struct {
+    lv_obj_t *obj, *chip, *label, *text;
+} card_t;
+
 static struct {
     lv_obj_t *root;    // shifted a few px now and then against burn-in
     lv_obj_t *content; // dimmed when the host is away
-    lv_obj_t *summary, *link_dot, *clock;
+    lv_obj_t *title, *summary, *link_dot, *clock;
+    lv_obj_t *fn_pager, *fn_dots[MAX_FN]; // which page is shown
+    lv_obj_t *agent;                      // the Agent page's body
+    lv_obj_t *fn, *fn_empty;              // a function page's body
+    card_t cards[DOCK_MAX_ITEMS];
     struct {
         meter_t m[2];
         lv_obj_t *today;
@@ -123,6 +142,13 @@ static int64_t s_touch_us;
 static int64_t s_active_us;
 static int64_t s_shift_us;
 static int s_shift;
+
+static dock_pages_t *s_pages;
+static uint32_t s_pages_version;
+static int s_fn;                       // page shown: 0 Agent, i the function page s_pages->pages[i - 1]
+static char s_fn_id[DOCK_ID_LEN];      // its id, to stay on it when the pages change
+static bool s_wake_tap;                // the press under way woke a dim screen: no tap
+static uint8_t s_bright = BRIGHT_FULL; // as last asked for, before any new touch
 
 // ---------- helpers ----------
 
@@ -350,14 +376,16 @@ static int page_of(int index)
 
 // ---------- building ----------
 
+// The strip over every page: its name and summary on the left; page dots,
+// the link dot and the clock on the right.
 static void build_strip(lv_obj_t *p)
 {
-    lv_obj_t *title = text(p, font_get(FONT_BOLD, 20), C_TEXT);
-    lv_label_set_text(title, "Agent");
-    lv_obj_set_pos(title, PAD_X, TOP);
+    ui.title = text(p, font_get(FONT_BOLD, 20), C_TEXT);
+    lv_label_set_text(ui.title, "Agent");
+    lv_obj_set_pos(ui.title, PAD_X, TOP);
 
     ui.summary = line(p, font_get(FONT_REGULAR, 15), C_TEXT2, 360);
-    lv_obj_align_to(ui.summary, title, LV_ALIGN_OUT_RIGHT_BOTTOM, 12, -3);
+    lv_obj_align_to(ui.summary, ui.title, LV_ALIGN_OUT_RIGHT_BOTTOM, 12, -3);
 
     ui.clock = text(p, font_get(FONT_MONO, 20), C_TEXT);
     lv_label_set_text(ui.clock, "--:--");
@@ -365,6 +393,14 @@ static void build_strip(lv_obj_t *p)
 
     ui.link_dot = box(p, 0, 0, 8, 8, C_GREEN, LV_RADIUS_CIRCLE);
     lv_obj_align_to(ui.link_dot, ui.clock, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+
+    ui.fn_pager = box(p, 0, 0, LV_SIZE_CONTENT, 6, 0, -1);
+    lv_obj_set_flex_flow(ui.fn_pager, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ui.fn_pager, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(ui.fn_pager, 5, 0);
+    for (int i = 0; i < MAX_FN; i++) {
+        ui.fn_dots[i] = box(ui.fn_pager, 0, 0, 6, 6, 0x3A3A3C, 3);
+    }
 }
 
 // "4h 33m / 5h" on the left, the percentage on the right, the bar below.
@@ -493,6 +529,8 @@ static void go_page(int delta)
 }
 
 static void render_rows(void);
+static void render_page(void);
+static void render_fn(void);
 
 static void on_pager(lv_event_t *e)
 {
@@ -501,17 +539,33 @@ static void on_pager(lv_event_t *e)
     render_rows();
 }
 
+// Shows page i: 0 is the Agent page, then the function pages in order.
+static void show_fn(int i)
+{
+    s_fn = i;
+    snprintf(s_fn_id, sizeof(s_fn_id), "%s", i ? s_pages->pages[i - 1].id : "");
+    render_page();
+}
+
+static dock_page_t *fn_page(void)
+{
+    return s_fn > 0 && s_fn <= s_pages->count ? &s_pages->pages[s_fn - 1] : NULL;
+}
+
 static void on_gesture(lv_event_t *e)
 {
     (void)e;
-    lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
-    // Up/down pages through tasks. Left/right will switch function pages
-    // once there is more than the Agent page.
-    if (dir == LV_DIR_TOP) {
-        go_page(1);
-        render_rows();
-    } else if (dir == LV_DIR_BOTTOM) {
-        go_page(-1);
+    lv_indev_t *indev = lv_indev_active();
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    lv_indev_wait_release(indev); // a swipe never also taps what it started on
+    // Left/right switches pages, stopping at both ends; up/down pages
+    // through the Agent page's tasks.
+    if (dir == LV_DIR_LEFT && s_fn < s_pages->count) {
+        show_fn(s_fn + 1);
+    } else if (dir == LV_DIR_RIGHT && s_fn > 0) {
+        show_fn(s_fn - 1);
+    } else if (s_fn == 0 && (dir == LV_DIR_TOP || dir == LV_DIR_BOTTOM)) {
+        go_page(dir == LV_DIR_TOP ? 1 : -1);
         render_rows();
     }
 }
@@ -581,9 +635,120 @@ static void build_overlay(lv_obj_t *p)
     lv_obj_align(ui.ov_ver, LV_ALIGN_BOTTOM_MID, 0, -14);
 }
 
+// The lamp of a card, as the bulb icon of the web preview draws it on a
+// 24-unit grid (coordinates here in tenths): a round head, its neck and two
+// lines of the base, in the chip's arc and line colours.
+static void draw_bulb(lv_event_t *e)
+{
+    lv_obj_t *chip = lv_event_get_current_target_obj(e);
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_area_t a;
+    lv_obj_get_coords(chip, &a);
+    int size = lv_area_get_width(&a) >= 96 ? 46 : 30;
+    int w = (size * 2 + 12) / 24; // stroke 2 of 24
+    int32_t ox = a.x1 + (lv_area_get_width(&a) - size) / 2;
+    int32_t oy = a.y1 + (lv_area_get_height(&a) - size) / 2;
+
+    lv_draw_arc_dsc_t arc;
+    lv_draw_arc_dsc_init(&arc);
+    arc.base.layer = layer;
+    lv_obj_init_draw_arc_dsc(chip, LV_PART_MAIN, &arc);
+    arc.width = w;
+    arc.rounded = 1;
+    arc.center.x = ox + 120 * size / 240;
+    arc.center.y = oy + 90 * size / 240;
+    arc.radius = (uint16_t)(60 * size / 240 + w / 2); // the stroke centred on radius 6
+    arc.start_angle = 127;                             // open at the bottom for the neck
+    arc.end_angle = 53;
+    lv_draw_arc(layer, &arc);
+
+    static const int16_t seg[][4] = {
+        {84, 138, 95, 160}, {156, 138, 145, 160}, {95, 160, 145, 160}, // neck
+        {90, 180, 150, 180}, {100, 210, 140, 210},                     // base
+    };
+    lv_draw_line_dsc_t ln;
+    lv_draw_line_dsc_init(&ln);
+    ln.base.layer = layer;
+    lv_obj_init_draw_line_dsc(chip, LV_PART_MAIN, &ln);
+    ln.width = w;
+    ln.round_start = ln.round_end = 1;
+    for (size_t i = 0; i < sizeof(seg) / sizeof(seg[0]); i++) {
+        ln.p1.x = ox + seg[i][0] * size / 240;
+        ln.p1.y = oy + seg[i][1] * size / 240;
+        ln.p2.x = ox + seg[i][2] * size / 240;
+        ln.p2.y = oy + seg[i][3] * size / 240;
+        lv_draw_line(layer, &ln);
+    }
+}
+
+static void on_card_pressed(lv_event_t *e)
+{
+    (void)e;
+    s_wake_tap = s_bright < BRIGHT_FULL; // a dim screen only wakes up
+}
+
+// A tap on a switch card toggles it: the host hears of it at once and the
+// card shows it is switching until the host's next pages.
+static void on_card_clicked(lv_event_t *e)
+{
+    dock_page_t *pg = fn_page();
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (s_wake_tap || !pg || i >= pg->item_count || !lv_obj_has_flag(ui.overlay, LV_OBJ_FLAG_HIDDEN)) {
+        return;
+    }
+    dock_item_t *it = &pg->items[i];
+    if (it->kind != DOCK_ITEM_SWITCH || it->disabled) {
+        return;
+    }
+    link_send_action(pg->id, it->id, "toggle");
+    it->busy = true;
+    snprintf(it->text, sizeof(it->text), "切换中…");
+    render_fn();
+}
+
+// Card: the lamp icon in a round chip, the label and the state text,
+// centred; sizes depend on the grid and are set when rendered.
+static void build_card(lv_obj_t *p, card_t *c, int index)
+{
+    c->obj = box(p, 0, 0, 180, 184, C_CARD, 18);
+    lv_obj_set_style_border_width(c->obj, 2, 0);
+    lv_obj_set_style_border_color(c->obj, lv_color_hex(C_LAMP), 0);
+    lv_obj_set_style_border_opa(c->obj, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(c->obj, 12, 0);
+    lv_obj_set_style_pad_row(c->obj, 8, 0);
+    lv_obj_set_flex_flow(c->obj, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(c->obj, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_opa(c->obj, 204, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(c->obj, on_card_pressed, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(c->obj, on_card_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)index);
+
+    c->chip = box(c->obj, 0, 0, 56, 56, 0x1C1C1E, LV_RADIUS_CIRCLE);
+    lv_obj_remove_flag(c->chip, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(c->chip, 1, 0); // the bulb is drawn in these styles
+    lv_obj_set_style_line_width(c->chip, 1, 0);
+    lv_obj_add_event_cb(c->chip, draw_bulb, LV_EVENT_DRAW_MAIN_END, NULL);
+
+    c->label = line(c->obj, font_get(FONT_BOLD, 20), C_TEXT, 156);
+    lv_obj_set_style_text_align(c->label, LV_TEXT_ALIGN_CENTER, 0);
+    c->text = text(c->obj, font_get(FONT_BOLD, 16), C_TEXT3);
+}
+
+static void build_fn(lv_obj_t *p)
+{
+    ui.fn = box(p, PAD_X, FN_Y, FN_W, FN_H, 0, -1);
+    for (int i = 0; i < DOCK_MAX_ITEMS; i++) {
+        build_card(ui.fn, &ui.cards[i], i);
+    }
+    ui.fn_empty = box(ui.fn, 0, 0, FN_W, FN_H, 0x0B0B0C, 18);
+    lv_obj_t *t = text(ui.fn_empty, font_get(FONT_REGULAR, 16), C_TEXT3);
+    lv_label_set_text(t, "这一页还没有内容");
+    lv_obj_center(t);
+}
+
 void ui_create(void)
 {
     s_snap = heap_caps_calloc(1, sizeof(dock_snapshot_t), MALLOC_CAP_SPIRAM);
+    s_pages = heap_caps_calloc(1, sizeof(dock_pages_t), MALLOC_CAP_SPIRAM);
 
     lv_obj_t *scr = lv_screen_active();
     lv_obj_remove_style_all(scr);
@@ -595,34 +760,184 @@ void ui_create(void)
     ui.root = box(scr, 0, 0, SCR_W, SCR_H, 0, -1);
     ui.content = box(ui.root, 0, 0, SCR_W, SCR_H, 0, -1);
     build_strip(ui.content);
-    build_usage(ui.content);
-    build_tasks(ui.content);
+    ui.agent = box(ui.content, 0, 0, SCR_W, SCR_H, 0, -1);
+    build_usage(ui.agent);
+    build_tasks(ui.agent);
+    build_fn(ui.content);
     build_overlay(ui.root);
 
     int64_t now = esp_timer_get_time();
     s_touch_us = s_active_us = s_shift_us = now;
     render_rows();
+    render_page();
 }
 
 // ---------- rendering ----------
 
-static void render_summary(void)
+// The Agent page's summary: the active tasks by state.
+static void agent_summary(char *buf, size_t size)
 {
-    char buf[96] = "";
+    buf[0] = '\0';
     if (s_have) {
         static const dock_state_t order[] = {DOCK_APPROVAL, DOCK_INPUT, DOCK_ERROR, DOCK_RUNNING};
         size_t used = 0;
         for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
             int n = s_snap->counts[order[i]];
-            if (n > 0 && used < sizeof(buf)) {
-                used += snprintf(buf + used, sizeof(buf) - used, "%s%s %d", used ? " · " : "", STATE[order[i]].label, n);
+            if (n > 0 && used < size) {
+                used += snprintf(buf + used, size - used, "%s%s %d", used ? " · " : "", STATE[order[i]].label, n);
             }
         }
         if (!used && s_snap->count > 0) {
-            snprintf(buf, sizeof(buf), "全部完成");
+            snprintf(buf, size, "全部完成");
         }
     }
+}
+
+// The strip for the page shown: its name and summary, or in red why the
+// page cannot be used now; page dots once there are function pages.
+static void render_strip(void)
+{
+    const dock_page_t *pg = fn_page();
+    char buf[100];
+    if (pg) {
+        snprintf(buf, sizeof(buf), "%s", pg->error[0] ? pg->error : pg->summary);
+    } else {
+        agent_summary(buf, sizeof(buf));
+    }
+    set_text(ui.title, pg ? pg->title : "Agent");
     set_text(ui.summary, buf);
+    set_color(ui.summary, pg && pg->error[0] ? C_RED : C_TEXT2);
+
+    int n = 1 + s_pages->count;
+    for (int i = 0; i < MAX_FN; i++) {
+        if (i >= n) {
+            lv_obj_add_flag(ui.fn_dots[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_obj_remove_flag(ui.fn_dots[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_width(ui.fn_dots[i], i == s_fn ? 18 : 6);
+        lv_obj_set_style_bg_color(ui.fn_dots[i], lv_color_hex(i == s_fn ? 0xE9E9E5 : 0x3A3A3C), 0);
+    }
+    if (n > 1) {
+        lv_obj_remove_flag(ui.fn_pager, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(ui.fn_pager, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_update_layout(ui.content);
+    lv_obj_align_to(ui.fn_pager, ui.link_dot, LV_ALIGN_OUT_LEFT_MID, -16, 0);
+    // The summary takes the room between the title and the dots.
+    lv_obj_align_to(ui.summary, ui.title, LV_ALIGN_OUT_RIGHT_BOTTOM, 12, -3);
+    int end = (n > 1 ? lv_obj_get_x(ui.fn_pager) : lv_obj_get_x(ui.link_dot)) - 12;
+    int w = end - lv_obj_get_x(ui.summary);
+    lv_obj_set_width(ui.summary, w > 1 ? w : 1);
+}
+
+static void set_opa(void *obj, int32_t v)
+{
+    lv_obj_set_style_opa(obj, (lv_opa_t)v, 0);
+}
+
+// Pulses the icon of a card that is switching, about once a second.
+static void pulse(lv_obj_t *chip, bool on)
+{
+    bool running = lv_anim_get(chip, set_opa) != NULL;
+    if (on == running) {
+        return;
+    }
+    if (!on) {
+        lv_anim_delete(chip, set_opa);
+        lv_obj_set_style_opa(chip, LV_OPA_COVER, 0);
+        return;
+    }
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, chip);
+    lv_anim_set_exec_cb(&a, set_opa);
+    lv_anim_set_values(&a, LV_OPA_COVER, 115); // down to 45%
+    lv_anim_set_duration(&a, 500);
+    lv_anim_set_reverse_duration(&a, 500);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_start(&a);
+}
+
+// Lays out card c for item it at x, y; a single row of cards gets the
+// large icon and type. Lit cards keep to a dark tint and a thin ring, kind
+// to the AMOLED panel.
+static void render_card(card_t *c, const dock_item_t *it, int x, int y, int w, int h, bool big)
+{
+    bool lit = !it->busy && it->on == 1;
+    uint32_t color = it->busy ? C_BLUE : it->on == 1 ? C_LAMP : it->on == 0 ? C_TEXT3 : 0x5C5B57;
+
+    lv_obj_remove_flag(c->obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_pos(c->obj, x, y);
+    lv_obj_set_size(c->obj, w, h);
+    lv_obj_set_style_bg_color(c->obj, lv_color_hex(lit ? 0x1E1606 : C_CARD), 0);
+    lv_obj_set_style_border_opa(c->obj, lit ? 102 : LV_OPA_TRANSP, 0); // 40%
+    lv_obj_set_style_opa(c->obj, it->disabled ? 90 : LV_OPA_COVER, 0);  // 35%
+    if (it->kind == DOCK_ITEM_SWITCH && !it->disabled) {
+        lv_obj_add_flag(c->obj, LV_OBJ_FLAG_CLICKABLE);
+    } else {
+        lv_obj_remove_flag(c->obj, LV_OBJ_FLAG_CLICKABLE);
+    }
+
+    int chip = big ? 96 : 56;
+    lv_obj_set_size(c->chip, chip, chip);
+    bool tint = it->busy || it->on == 1;
+    lv_obj_set_style_bg_color(c->chip, lv_color_hex(tint ? color : 0x1C1C1E), 0);
+    lv_obj_set_style_bg_opa(c->chip, it->busy ? 36 : tint ? 41 : LV_OPA_COVER, 0); // 14%, 16%
+    lv_obj_set_style_arc_color(c->chip, lv_color_hex(color), 0);
+    lv_obj_set_style_line_color(c->chip, lv_color_hex(color), 0);
+    pulse(c->chip, it->busy);
+
+    const lv_font_t *fl = font_get(FONT_BOLD, big ? 26 : 20);
+    lv_obj_set_style_text_font(c->label, fl, 0);
+    lv_obj_set_size(c->label, w - 24, lv_font_get_line_height(fl));
+    set_text(c->label, it->label);
+    lv_obj_set_style_text_font(c->text, font_get(FONT_BOLD, big ? 20 : 16), 0);
+    set_color(c->text, color);
+    set_text(c->text, it->text);
+}
+
+static void render_fn(void)
+{
+    const dock_page_t *pg = fn_page();
+    int n = pg ? pg->item_count : 0;
+    int cols = n <= 3 ? (n > 1 ? n : 1) : n == 4 ? 2 : 3;
+    int rows = n <= 3 ? 1 : 2;
+    int w = (FN_W - (cols - 1) * CARD_GAP) / cols;
+    int h = (FN_H - (rows - 1) * CARD_GAP) / rows;
+    for (int i = 0; i < DOCK_MAX_ITEMS; i++) {
+        card_t *c = &ui.cards[i];
+        if (i < n) {
+            render_card(c, &pg->items[i], i % cols * (w + CARD_GAP), i / cols * (h + CARD_GAP), w, h, rows == 1);
+        } else {
+            lv_obj_add_flag(c->obj, LV_OBJ_FLAG_HIDDEN);
+            pulse(c->chip, false);
+        }
+    }
+    if (n == 0) {
+        lv_obj_remove_flag(ui.fn_empty, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(ui.fn_empty, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// Shows the body of the page s_fn and the strip over it.
+static void render_page(void)
+{
+    if (s_fn) {
+        lv_obj_add_flag(ui.agent, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(ui.fn, LV_OBJ_FLAG_HIDDEN);
+        render_fn();
+    } else {
+        lv_obj_remove_flag(ui.agent, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ui.fn, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < DOCK_MAX_ITEMS; i++) {
+            pulse(ui.cards[i].chip, false);
+        }
+    }
+    render_strip();
 }
 
 static void render_usage(int64_t now)
@@ -995,8 +1310,18 @@ void ui_poll(void)
                 break;
             }
         }
-        render_summary();
+        render_strip();
         render_rows();
+    }
+    if (link_take_pages(s_pages, &s_pages_version)) {
+        // Stay on the page shown while it is there, else go back to Agent.
+        int keep = 0;
+        for (int i = 0; s_fn_id[0] && i < s_pages->count; i++) {
+            if (strcmp(s_pages->pages[i].id, s_fn_id) == 0) {
+                keep = i + 1;
+            }
+        }
+        show_fn(keep);
     }
     // An update's progress shows at once, not on the next second.
     static ota_state_t ota_shown;
@@ -1021,7 +1346,7 @@ void ui_poll(void)
     }
 }
 
-uint8_t ui_brightness(void)
+static uint8_t brightness(void)
 {
     int64_t now_us = esp_timer_get_time();
     int64_t last = link_last_rx_us();
@@ -1039,4 +1364,10 @@ uint8_t ui_brightness(void)
         return BRIGHT_FULL;
     }
     return BRIGHT_DIM;
+}
+
+uint8_t ui_brightness(void)
+{
+    s_bright = brightness();
+    return s_bright;
 }

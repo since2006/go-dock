@@ -16,6 +16,14 @@ void link_start(void);
 // received_us is the esp_timer time it arrived.
 bool link_take_snapshot(dock_snapshot_t *out, uint32_t *version, int64_t *received_us);
 
+// Copies the newest function pages into out when they are newer than
+// *version.
+bool link_take_pages(dock_pages_t *out, uint32_t *version);
+
+// Tells the host the user tapped item on page; act is "toggle" for a
+// switch. Ids come from link_take_pages, which only passes plain ones.
+void link_send_action(const char *page, const char *item, const char *act);
+
 // esp_timer time of the last protocol message from the host, 0 if none yet.
 int64_t link_last_rx_us(void);
 

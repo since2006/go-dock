@@ -39,6 +39,29 @@ bool link_take_snapshot(dock_snapshot_t *out, uint32_t *version, int64_t *receiv
 int64_t link_last_rx_us(void) { return s_last_rx_us; }
 bool link_incompatible(void) { return false; }
 
+static dock_pages_t s_pages;
+static uint32_t s_pages_ver;
+
+bool link_take_pages(dock_pages_t *out, uint32_t *version)
+{
+    if (*version == s_pages_ver) {
+        return false;
+    }
+    memcpy(out, &s_pages, sizeof(*out));
+    *version = s_pages_ver;
+    return true;
+}
+
+static int s_actions;
+static char s_action[96];
+
+void link_send_action(const char *page, const char *item, const char *act)
+{
+    s_actions++;
+    snprintf(s_action, sizeof(s_action), "%s/%s %s", page, item, act);
+    printf("action %s\n", s_action);
+}
+
 static ota_state_t s_ota;
 static int s_ota_pct;
 
@@ -125,14 +148,69 @@ static void save(const char *dir, const char *name)
 
 static uint32_t tick(void) { return (uint32_t)(s_now_us / 1000); }
 
+// One pass of the firmware's LVGL task, 50 ms on.
+static void step(void)
+{
+    s_now_us += 50000;
+    ui_poll();
+    ui_brightness();
+    lv_timer_handler();
+}
+
 static void run(int64_t us)
 {
     for (int64_t t = 0; t < us; t += 50000) {
-        s_now_us += 50000;
-        ui_poll();
-        lv_timer_handler();
+        step();
     }
     lv_refr_now(NULL);
+}
+
+// ---- touch, through LVGL's own gesture and click handling ----
+
+static bool s_pressed;
+static lv_point_t s_point;
+
+static void touch_read(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    (void)indev;
+    data->point = s_point;
+    data->state = s_pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    if (s_pressed) {
+        ui_touched(); // as the board's touch driver does
+    }
+}
+
+static void tap(int x, int y)
+{
+    s_point = (lv_point_t){x, y};
+    s_pressed = true;
+    step();
+    step();
+    s_pressed = false;
+    step();
+    step();
+}
+
+static void swipe(int x, int y, int dx, int dy)
+{
+    s_point = (lv_point_t){x, y};
+    s_pressed = true;
+    step();
+    for (int i = 1; i <= 6; i++) {
+        s_point = (lv_point_t){x + dx * i / 6, y + dy * i / 6};
+        step();
+    }
+    s_pressed = false;
+    step();
+    step();
+}
+
+static void check(bool ok, const char *what)
+{
+    if (!ok) {
+        fprintf(stderr, "FAIL: %s\n", what);
+        exit(1);
+    }
 }
 
 // ---- sample data, as go-dock would send it ----
@@ -196,6 +274,42 @@ static void send(void)
 
 static void reset(void) { memset(&s_snap, 0, sizeof(s_snap)); }
 
+// Function pages, as the lights plugin describes them.
+static void page(const char *id, const char *title, const char *summary, const char *error)
+{
+    dock_page_t *p = &s_pages.pages[s_pages.count++];
+    memset(p, 0, sizeof(*p));
+    snprintf(p->id, sizeof(p->id), "%s", id);
+    snprintf(p->title, sizeof(p->title), "%s", title);
+    snprintf(p->summary, sizeof(p->summary), "%s", summary);
+    snprintf(p->error, sizeof(p->error), "%s", error);
+}
+
+// on: 1, 0 or -1 (unknown); text NULL says what on and busy mean.
+static void lamp(const char *id, const char *label, int on, bool busy, bool disabled, const char *text)
+{
+    dock_page_t *p = &s_pages.pages[s_pages.count - 1];
+    dock_item_t *it = &p->items[p->item_count++];
+    snprintf(it->id, sizeof(it->id), "%s", id);
+    it->kind = DOCK_ITEM_SWITCH;
+    snprintf(it->label, sizeof(it->label), "%s", label);
+    it->on = (int8_t)on;
+    it->busy = busy;
+    it->disabled = disabled;
+    if (!text) {
+        text = busy ? "切换中…" : on == 1 ? "已开" : on == 0 ? "已关" : "未知";
+    }
+    snprintf(it->text, sizeof(it->text), "%s", text);
+}
+
+static void send_pages(void)
+{
+    s_pages_ver++;
+    s_last_rx_us = s_now_us;
+}
+
+static void reset_pages(void) { memset(&s_pages, 0, sizeof(s_pages)); }
+
 int main(int argc, char **argv)
 {
     const char *out = argc > 1 ? argv[1] : ".";
@@ -205,6 +319,9 @@ int main(int argc, char **argv)
     static uint16_t buf[W * 60];
     lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(disp, flush);
+    lv_indev_t *touch = lv_indev_create();
+    lv_indev_set_type(touch, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(touch, touch_read);
     ui_create();
 
     // Before go-dock talks to the board.
@@ -313,6 +430,84 @@ int main(int argc, char **argv)
     send();
     run(2 * SEC);
     save(out, "7-turn");
+
+    // Function pages: the lights next to the Agent page, which now shows
+    // page dots in its strip.
+    reset_pages();
+    page("lights", "灯光", "1 / 3 盏亮着 · 1 盏未知", "");
+    lamp("main", "办公室主灯", 1, false, false, NULL);
+    lamp("desk", "台灯", 0, false, false, NULL);
+    lamp("fan", "风扇灯", -1, false, false, NULL);
+    send_pages();
+    run(1 * SEC);
+    save(out, "10-agent-dots");
+
+    // Swiping left shows the lights; tapping a card toggles it and shows it
+    // switching until the host's next pages.
+    swipe(500, 250, -300, 0);
+    run(1 * SEC);
+    save(out, "11-lights-3");
+    tap(18 + 90 + 192, 244);
+    check(s_actions == 1 && strcmp(s_action, "lights/desk toggle") == 0, "tap sends a toggle");
+    run(1 * SEC);
+    save(out, "12-lights-tap");
+
+    // A swipe that starts on a card only switches pages.
+    swipe(110, 244, 300, 0);
+    check(s_actions == 1, "a swipe is not a tap");
+    swipe(500, 250, -300, 0);
+    check(s_actions == 1, "a swipe is not a tap");
+
+    reset_pages();
+    page("lights", "灯光", "1 / 1 盏亮着", "");
+    lamp("main", "办公室主灯", 1, false, false, NULL);
+    send_pages();
+    run(1 * SEC);
+    save(out, "13-lights-1");
+
+    // The broker is down: the reason in red, the cards greyed and deaf.
+    reset_pages();
+    page("lights", "灯光", "2 / 4 盏亮着", "MQTT 未连接");
+    lamp("main", "办公室主灯", 1, false, true, NULL);
+    lamp("desk", "台灯", 0, false, true, NULL);
+    lamp("hall", "过道灯", 1, false, true, NULL);
+    lamp("fan", "会议室吊灯很长的名字", 0, false, true, "未响应");
+    send_pages();
+    run(1 * SEC);
+    save(out, "14-lights-4-offline");
+    tap(18 + 138, 54 + 92);
+    check(s_actions == 1, "a disabled card takes no taps");
+
+    reset_pages();
+    page("lights", "灯光", "2 / 6 盏亮着 · 1 盏未知", "");
+    lamp("main", "办公室主灯", 1, false, false, NULL);
+    lamp("desk", "台灯", 0, true, false, NULL);
+    lamp("hall", "过道灯", 0, false, false, NULL);
+    lamp("meet", "会议室", 1, false, false, NULL);
+    lamp("fan", "风扇灯", -1, false, false, NULL);
+    lamp("door", "门口", 0, false, false, "发送失败");
+    send_pages();
+    run(1 * SEC);
+    save(out, "15-lights-6");
+
+    // A screen dimmed for want of activity: the first tap only wakes it.
+    reset();
+    add(DOCK_DONE, DOCK_CODEX, "notes", "已完成", "", 900);
+    s_now_us += 6 * 60 * SEC;
+    send();
+    send_pages();
+    run(1 * SEC);
+    check(ui_brightness() < 200, "dim after five idle minutes");
+    tap(18 + 90, 54 + 92);
+    check(s_actions == 1, "the waking tap toggles nothing");
+    tap(18 + 90, 54 + 92);
+    check(s_actions == 2 && strcmp(s_action, "lights/main toggle") == 0, "the next tap toggles");
+
+    // The page shown went away: back to the Agent page, without dots.
+    reset_pages();
+    send_pages();
+    run(1 * SEC);
+    save(out, "16-pages-gone");
 
     // A firmware update from go-dock, then one that failed.
     s_ota = OTA_RECEIVING;

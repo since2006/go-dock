@@ -17,7 +17,7 @@ Guidance for AI coding agents working in this repository.
   - `internal/autostart/` — login item per OS (LaunchAgent / systemd user unit or XDG / HKCU Run).
   - `internal/update/` — checks GitHub Releases, verifies and replaces the executable; `cmd/go-dock/restart_*.go` restarts it.
   - `internal/config/`, `internal/logx/`, `internal/ingest/`, `internal/procutil/`, `internal/selfexe/` — support packages.
-- `firmware/` — ESP-IDF 5.5 + LVGL 9 firmware for the **V2** board only (pins differ from V1). `main/display.c` is the board bring-up, `link.c` the protocol, `ota.c` updates over the link, `ui.c` the Agent screen, `beep.c` plays alert notes on an external buzzer (GPIO1; the board has no speaker). `sim/` renders `ui.c` on the desktop to PNG-able PPM files for layout checks without hardware.
+- `firmware/` — ESP-IDF 5.5 + LVGL 9 firmware for the **V2** board only (pins differ from V1). `main/display.c` is the board bring-up, `link.c` the protocol, `ota.c` updates over the link, `ui.c` the screen (the Agent page and the function pages), `beep.c` plays alert notes on an external buzzer (GPIO1; the board has no speaker). `sim/` renders `ui.c` on the desktop to PNG-able PPM files for layout checks without hardware.
 - `docs/protocol-v1.md` — host ↔ device protocol. `docs/plans/` — implementation plans.
 
 ## Commands
@@ -36,7 +36,7 @@ cmake -B build-sim -S sim && cmake --build build-sim && build-sim/dock_sim out  
 
 ## Rules
 
-- **Protocol changes**: update `docs/protocol-v1.md`, `host/internal/device/protocol.go` and `firmware/main/link.c` (+ `model.h`) together; keep the 4096-byte line cap; only add optional fields unless bumping `proto`. Exception for now: `pages` / `action` (§3.5, §4.4) exist host-side only until the firmware catches up; the host sends `pages` only to a device whose hello has `"pages":1`.
+- **Protocol changes**: update `docs/protocol-v1.md`, `host/internal/device/protocol.go` and `firmware/main/link.c` (+ `model.h`) together; keep the 4096-byte line cap; only add optional fields unless bumping `proto`. Optional device features (`ota`, `beep`, `pages`) are announced in the device hello, and the host sends their messages only to devices that announce them.
 - **Privacy**: never read or send credentials (`~/.claude/.credentials.json`, Keychain, `~/.codex/auth.json`). Never log hook/statusline payloads (they contain prompts and tool input) above debug level.
 - **Editing user config files** (`~/.claude/settings.json`, `~/.codex/hooks.json`): go through `providers.ReadJSONFile` / `Save`, which keep unrelated content and key order, back up the original, and write atomically. `~/.codex/hooks.json` may only contain the top-level keys `description` and `hooks`. Replace our hook entries in place rather than reordering (Codex trust keys include array indices).
 - **Hook subcommands** must stay silent and exit 0, even when the daemon is down.

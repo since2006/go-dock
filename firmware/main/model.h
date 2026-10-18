@@ -69,3 +69,38 @@ typedef struct {
     dock_session_t sessions[DOCK_MAX_SESSIONS];
     int counts[DOCK_STATE_COUNT];
 } dock_snapshot_t;
+
+// Function pages next to the Agent page (docs/protocol-v1.md, "pages").
+// Text buffers hold the host's limits in runes at 4 bytes each.
+#define DOCK_MAX_PAGES 4
+#define DOCK_MAX_ITEMS 6 // per page
+#define DOCK_ID_LEN 17   // [a-z0-9_-]{1,16}
+
+typedef enum {
+    DOCK_ITEM_OTHER = 0, // a kind this firmware does not know: shown, not tappable
+    DOCK_ITEM_SWITCH,
+} dock_item_kind_t;
+
+typedef struct {
+    char id[DOCK_ID_LEN];
+    dock_item_kind_t kind;
+    char label[52]; // <= 12 runes
+    char text[36];  // <= 8 runes: 已开, 已关, 切换中…
+    int8_t on;      // 1 on, 0 off, -1 unknown
+    bool busy;      // a command is on its way
+    bool disabled;  // cannot be used now (MQTT down): greyed, no taps
+} dock_item_t;
+
+typedef struct {
+    char id[DOCK_ID_LEN];
+    char title[36];    // <= 8 runes
+    char summary[100]; // <= 24 runes
+    char error[100];   // <= 24 runes; shown instead of summary
+    int item_count;
+    dock_item_t items[DOCK_MAX_ITEMS];
+} dock_page_t;
+
+typedef struct {
+    int count;
+    dock_page_t pages[DOCK_MAX_PAGES];
+} dock_pages_t;
