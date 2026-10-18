@@ -83,7 +83,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("GET /api/config", s.getConfig)
-	mux.HandleFunc("PUT /api/config", s.putConfig)
+	mux.HandleFunc("POST /api/config", s.postConfig)
 	mux.HandleFunc("GET /api/integrations", s.getIntegrations)
 	mux.HandleFunc("POST /api/integrations/{name}/{action}", s.postIntegration)
 	mux.HandleFunc("GET /api/device/ports", s.getPorts)
@@ -218,7 +218,7 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.backend.Config())
 }
 
-func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
+func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 	cur := s.backend.Config()
 	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	dec.DisallowUnknownFields()

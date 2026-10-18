@@ -29,7 +29,7 @@
 ## 结构
 
 ```
-网页「插件」页 ──PUT /api/config──► config(mqtt.brokers, plugins.lights) ──onConfigChange──┐
+网页「插件」页 ──POST /api/config─► config(mqtt.brokers, plugins.lights) ──onConfigChange──┐
                                                                                          ▼
 mqtt.Pool ─Client(id)─► Bus ◄── lights.Plugin ──Page()──► plugins.Host ──► device.BuildPages ──► pages（USB）
  │ 每个 broker 一个 Client          ▲ Do(item, act)                                    └──► /api/state.pages ──► 设备预览
@@ -56,7 +56,7 @@ mqtt.Pool ─Client(id)─► Bus ◄── lights.Plugin ──Page()──► 
   - 「设备预览」可以左右切页（按钮、←/→、拖动），灯光页点卡片会真的发命令。
   - 新的「插件」页配置 broker 列表（每个显示自己的连接状态）和灯（有多个 broker 时每盏灯有下拉框）。
   - 各表单只提交自己的字段，由服务端合并。
-- **配置**：`mqtt.brokers` 列表，灯的 `broker` 填 broker id（留空表示第一个）；校验会拦下引用不存在的 broker，所以删还在用的 broker 会提示先改灯。`Store.Get` 返回深拷贝，broker 和灯的列表解码时整表替换。这顺带修了 PUT 时原地改坏已存配置的问题，`pricing` 以前就有这个问题。
+- **配置**：`mqtt.brokers` 列表，灯的 `broker` 填 broker id（留空表示第一个）；校验会拦下引用不存在的 broker，所以删还在用的 broker 会提示先改灯。`Store.Get` 返回深拷贝，broker 和灯的列表解码时整表替换。这顺带修了保存配置时原地改坏已存配置的问题，`pricing` 以前就有这个问题。
 
 协议细节见 `docs/protocol-v1.md` §3.5（`pages`）、§4.4（`action`）、§7.1（功能页布局）。
 

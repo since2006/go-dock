@@ -143,46 +143,50 @@ func TestIngestEmptyBody(t *testing.T) {
 	}
 }
 
-func TestConfigPut(t *testing.T) {
+func TestConfigSave(t *testing.T) {
 	b, h := newTestServer("127.0.0.1:47321")
-	w := do(h, "PUT", "127.0.0.1:47321", "/api/config", "application/json", `{"display":{"max_sessions":8,"done_ttl":"10m"}}`)
+	w := do(h, "POST", "127.0.0.1:47321", "/api/config", "application/json", `{"display":{"max_sessions":8,"done_ttl":"10m"}}`)
 	if w.Code != http.StatusOK || b.cfg.Display.MaxSessions != 8 || b.cfg.Display.DoneTTL.D().Minutes() != 10 {
-		t.Fatalf("put: %d %s %+v", w.Code, w.Body.String(), b.cfg.Display)
+		t.Fatalf("save: %d %s %+v", w.Code, w.Body.String(), b.cfg.Display)
 	}
 	if b.cfg.Web.Listen != config.DefaultListen {
-		t.Fatal("partial put cleared other fields")
+		t.Fatal("partial save cleared other fields")
 	}
-	if w := do(h, "PUT", "127.0.0.1:47321", "/api/config", "application/json", `{"display":{"max_sessions":0}}`); w.Code != http.StatusBadRequest {
-		t.Fatalf("invalid put: %d", w.Code)
+	if w := do(h, "POST", "127.0.0.1:47321", "/api/config", "application/json", `{"display":{"max_sessions":0}}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid save: %d", w.Code)
 	}
-	if w := do(h, "PUT", "127.0.0.1:47321", "/api/config", "application/json", `{"nope":1}`); w.Code != http.StatusBadRequest {
+	if w := do(h, "POST", "127.0.0.1:47321", "/api/config", "application/json", `{"nope":1}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("unknown field: %d", w.Code)
+	}
+	// Saving is POST only: some networks block PUT.
+	if w := do(h, "PUT", "127.0.0.1:47321", "/api/config", "application/json", `{}`); w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("PUT: %d", w.Code)
 	}
 }
 
-func TestConfigPutLights(t *testing.T) {
+func TestConfigSaveLights(t *testing.T) {
 	b, h := newTestServer("127.0.0.1:47321")
 	two := `{"plugins":{"lights":{"enabled":true,"lights":[
 		{"id":"main","name":"主灯","command_topic":"a/set","state_topic":"a/state","state_path":"state"},
 		{"id":"desk","name":"台灯","command_topic":"b/set"}]}}}`
-	if w := do(h, "PUT", "127.0.0.1:47321", "/api/config", "application/json", two); w.Code != http.StatusOK {
-		t.Fatalf("put: %d %s", w.Code, w.Body.String())
+	if w := do(h, "POST", "127.0.0.1:47321", "/api/config", "application/json", two); w.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}
 	// A shorter list whose first light omits keys replaces the whole list.
 	one := `{"plugins":{"lights":{"lights":[{"id":"desk","name":"台灯","command_topic":"b/set"}]}}}`
-	if w := do(h, "PUT", "127.0.0.1:47321", "/api/config", "application/json", one); w.Code != http.StatusOK {
-		t.Fatalf("put: %d %s", w.Code, w.Body.String())
+	if w := do(h, "POST", "127.0.0.1:47321", "/api/config", "application/json", one); w.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}
 	ls := b.cfg.Plugins.Lights
 	if !ls.Enabled || len(ls.Lights) != 1 || ls.Lights[0] != (config.Light{ID: "desk", Name: "台灯", CommandTopic: "b/set"}) {
 		t.Fatalf("lights %+v", ls)
 	}
 	bad := `{"plugins":{"lights":{"lights":[{"id":"Main","name":"x","command_topic":"a"}]}}}`
-	if w := do(h, "PUT", "127.0.0.1:47321", "/api/config", "application/json", bad); w.Code != http.StatusBadRequest {
+	if w := do(h, "POST", "127.0.0.1:47321", "/api/config", "application/json", bad); w.Code != http.StatusBadRequest {
 		t.Fatalf("bad id: %d", w.Code)
 	}
 	if len(b.cfg.Plugins.Lights.Lights) != 1 || b.cfg.Plugins.Lights.Lights[0].ID != "desk" {
-		t.Fatalf("rejected put changed the config: %+v", b.cfg.Plugins.Lights)
+		t.Fatalf("rejected save changed the config: %+v", b.cfg.Plugins.Lights)
 	}
 }
 

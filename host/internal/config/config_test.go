@@ -181,7 +181,7 @@ func TestGetSharesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Decoding onto a copy, as PUT /api/config does, leaves the store alone
+	// Decoding onto a copy, as POST /api/config does, leaves the store alone
 	// and replaces the list instead of merging into its elements.
 	cur := s.Get()
 	if err := json.Unmarshal([]byte(`{"pricing":{"m":{"input":2}},"plugins":{"lights":{"lights":[{"id":"b","name":"b2"}]}}}`), &cur); err != nil {

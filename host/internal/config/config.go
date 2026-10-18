@@ -252,7 +252,7 @@ func Default() Config {
 }
 
 // Clone returns a copy that shares no maps or slices with c, so decoding
-// onto it (as PUT /api/config does) cannot change c.
+// onto it (as POST /api/config does) cannot change c.
 func (c Config) Clone() Config {
 	if c.Pricing != nil {
 		c.Pricing = maps.Clone(c.Pricing)

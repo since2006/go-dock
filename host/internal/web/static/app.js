@@ -868,7 +868,7 @@ async function loadSettings() {
 form.addEventListener("submit", async (ev) => {
   ev.preventDefault();
   try {
-    loadedConfig = await api("/api/config", { method: "PUT", body: readForm(form) });
+    loadedConfig = await api("/api/config", { method: "POST", body: readForm(form) });
     showMsg("#settings-msg", "已保存");
   } catch (e) {
     showMsg("#settings-msg", `保存失败：${e.message}`, true);
@@ -1104,7 +1104,7 @@ mqttForm.addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const brokers = [...$("#broker-list").children].map(readRow);
   try {
-    loadedConfig = await api("/api/config", { method: "PUT", body: { mqtt: { brokers } } });
+    loadedConfig = await api("/api/config", { method: "POST", body: { mqtt: { brokers } } });
     renderBrokerRows(savedBrokers());
     for (const sel of lightsForm.querySelectorAll('select[data-k="broker"]')) fillBrokerSelect(sel, sel.value);
     showMsg("#mqtt-msg", "已保存");
@@ -1118,7 +1118,7 @@ lightsForm.addEventListener("submit", async (ev) => {
   const body = readForm(lightsForm);
   body.plugins.lights.lights = [...$("#lights-list").children].map(readRow);
   try {
-    loadedConfig = await api("/api/config", { method: "PUT", body });
+    loadedConfig = await api("/api/config", { method: "POST", body });
     renderLightRows(loadedConfig.plugins.lights.lights || []);
     showMsg("#lights-msg", "已保存");
   } catch (e) {
