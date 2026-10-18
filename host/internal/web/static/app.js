@@ -969,6 +969,7 @@ function nextID(list, prefix) {
   return `${prefix}${n}`;
 }
 
+// Broker fields, shown three to a row.
 const BROKER_FIELDS = [
   ["name", "名称", "如：办公室"],
   ["id", "ID", "小写字母、数字、- 或 _"],
@@ -978,24 +979,27 @@ const BROKER_FIELDS = [
   ["client_id", "Client ID", "留空自动生成"],
 ];
 
-// Light fields; the rest sit under "更多选项".
-const LIGHT_FIELDS = [
+// Light fields by config key; lightRow lays them out.
+const LIGHT_FIELDS = Object.fromEntries([
   ["name", "名称", "如：办公室主灯"],
   ["id", "ID", "小写字母、数字、- 或 _"],
   ["command_topic", "命令主题", "如：office/light/set"],
+  ["payload_on", "开灯时发送", 'ON / {"state":"ON"}'],
+  ["payload_off", "关灯时发送", 'OFF / {"state":"OFF"}'],
   ["state_topic", "状态主题（可选）", "灯回报状态的主题"],
-  ["payload_on", "开灯时发送", "ON"],
-  ["payload_off", "关灯时发送", "OFF"],
-];
-const LIGHT_MORE = [
-  ["state_path", "状态字段（可选）", "如 state"],
-  ["state_on", "表示「开」的状态值", "默认见下方说明"],
-  ["state_off", "表示「关」的状态值", "默认见下方说明"],
+  ["state_path", "状态字段（可选）", "如 state、params.Onoff"],
+  ["state_on", "表示「开」的状态值", "见上方说明"],
+  ["state_off", "表示「关」的状态值", "见上方说明"],
   ["query_topic", "查询主题（可选）", "如 office/light/get"],
-  ["query_payload", "查询时发送", "可留空"],
-];
-const LIGHT_MORE_NOTE = "状态是 JSON 时，「状态字段」填要读的字段（如 state），JSON 里的 true / false 直接识别。状态值不区分大小写；"
-  + "不填时，有状态字段默认 ON / OFF，没有则与开灯、关灯时发送的内容相同。填了查询主题，每次连上 broker 都会发一次查询，让灯回报当前状态。";
+  ["query_payload", "查询时发送", '留空 / {"state":""}'],
+].map((f) => [f[0], f]));
+const LIGHT_QUERY_NOTE = "填了查询主题，每次连上 broker 都会发一次查询，让灯回报当前状态。";
+
+// fieldRow lays fields out in n equal columns; fewer fields leave the
+// rest empty, so a lone field lines up with the row above.
+function fieldRow(n, ...fields) {
+  return el("div", { class: "field-row", style: `--n:${n}` }, ...fields);
+}
 
 const savedBrokers = () => (loadedConfig && loadedConfig.mqtt && loadedConfig.mqtt.brokers) || [];
 const brokerLabel = (b) => (b.name || "").trim() || b.id;
@@ -1020,7 +1024,7 @@ function brokerRow(b) {
       el("span", { class: "pill live" }, b.saved ? "—" : "未保存"),
       rowField(b, ["enabled", "启用", "", "checkbox"]),
       el("button", { type: "button", class: "btn small danger", onclick: () => { row.remove(); updateAddButtons(); } }, "删除")),
-    el("div", { class: "grid" }, ...BROKER_FIELDS.map((f) => rowField(b, f))),
+    el("div", { class: "grid three" }, ...BROKER_FIELDS.map((f) => rowField(b, f))),
   );
   return row;
 }
@@ -1046,7 +1050,7 @@ function fillBrokerSelect(sel, current) {
 }
 
 function lightRow(l, saved) {
-  const field = (f) => rowField({ ...l, saved }, f);
+  const field = (k) => rowField({ ...l, saved }, LIGHT_FIELDS[k]);
   const pick = el("select", { "data-k": "broker" });
   const row = el("div", { class: "light-row", "data-id": saved ? l.id : "" },
     el("div", { class: "head" },
@@ -1055,10 +1059,15 @@ function lightRow(l, saved) {
       el("button", { type: "button", class: "btn small", "data-act": "on" }, "开"),
       el("button", { type: "button", class: "btn small", "data-act": "off" }, "关"),
       el("button", { type: "button", class: "btn small danger", onclick: () => { row.remove(); updateAddButtons(); } }, "删除")),
-    el("div", { class: "grid" }, ...LIGHT_FIELDS.slice(0, 2).map(field), el("label", {}, "MQTT broker", pick), ...LIGHT_FIELDS.slice(2).map(field)),
+    fieldRow(3, field("name"), field("id"), el("label", {}, "MQTT broker", pick)),
+    fieldRow(1, field("command_topic")),
+    fieldRow(2, field("payload_on"), field("payload_off")),
+    el("hr"),
+    fieldRow(1, field("state_topic")),
+    fieldRow(3, field("state_path"), field("state_on"), field("state_off")),
     el("details", {}, el("summary", {}, "更多选项"),
-      el("div", { class: "grid" }, ...LIGHT_MORE.map(field)),
-      el("small", { class: "muted" }, LIGHT_MORE_NOTE)),
+      el("div", { class: "rows" }, fieldRow(1, field("query_topic")), fieldRow(2, field("query_payload"))),
+      el("small", { class: "muted" }, LIGHT_QUERY_NOTE)),
   );
   fillBrokerSelect(pick, l.broker || "");
   for (const b of row.querySelectorAll("[data-act]")) b.addEventListener("click", () => lightAct(row.dataset.id, b.dataset.act, b));

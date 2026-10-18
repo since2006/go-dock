@@ -156,13 +156,15 @@ MQTT broker 可以配多个（比如办公室一个、家里一个、云上一�
 
 配置保存在 `config.json` 的 `mqtt.brokers` 和 `plugins.lights` 两节。灯的 `broker` 填 broker 的 `id`，留空表示第一个 broker；删除还有灯在用的 broker 时会提示先把灯改到别的 broker。
 
+排查问题看「日志」页：发出的开关命令、查询，以及收到的状态都会记下主题和报文（JSON 按原样显示）；状态对不上时会提示「无法识别灯的状态」，并列出收到的报文和当前的状态字段、状态值。同一个状态重复上报只记在 debug 级别，免得刷屏。
+
 想加别的功能页：在 `host/internal/plugins/<名字>/` 实现 `plugins.Plugin` 接口（用通用控件描述页面、处理点击），加上配置，再在 `host/internal/app` 里注册。设计说明和后续计划见 [docs/plans/0002-plugins-mqtt.md](docs/plans/0002-plugins-mqtt.md)。
 
 ## 安全
 
 - 管理台默认只监听 `127.0.0.1`；会校验 Host 头，并拒绝跨站请求和非 JSON 的写请求。
 - hooks 上报的提问和工具参数只保存在内存里，不会写进 info 级别日志。
-- MQTT 密码保存在本机的 `config.json` 里（go-dock 创建的文件权限为 0600），不会写进日志；MQTT 消息内容只在 debug 级别记录。
+- MQTT 密码保存在本机的 `config.json` 里（go-dock 创建的文件权限为 0600），不会写进日志。灯光插件收发的 MQTT 报文会写进 info 级别日志，方便排查。
 
 ## 开发
 

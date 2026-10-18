@@ -32,6 +32,16 @@ func TestRingAndHandler(t *testing.T) {
 	}
 }
 
+func TestJSONAttrsShownAsIs(t *testing.T) {
+	l := New(filepath.Join(t.TempDir(), "x.log"), nil, slog.LevelInfo)
+	defer l.Close()
+	l.Info("m", "payload", `{"state": "ON", "color": {"x": 0.3}}`, "list", "[1, 2]", "text", `[not json "x"`)
+	got := l.Ring.Entries(slog.LevelDebug, 0)[0].Attrs
+	if want := `payload={"state":"ON","color":{"x":0.3}} list=[1,2] text="[not json \"x\""`; got != want {
+		t.Fatalf("attrs = %s\nwant    %s", got, want)
+	}
+}
+
 func TestRingWraps(t *testing.T) {
 	r := NewRing(3)
 	for i := 0; i < 5; i++ {

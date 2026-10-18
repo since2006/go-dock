@@ -335,6 +335,12 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .light-row .head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .light-row .head .live { margin-right: auto; }
 .light-row .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.light-row .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.light-row input:not([type=checkbox]), .light-row select { max-width: none; }
+.light-row .field-row { display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); gap: 10px; }
+.light-row .rows { display: grid; gap: 10px; }
+.light-row hr { border: 0; border-top: 1px solid var(--border); margin: 4px 0; }
+@media (max-width: 640px) { .light-row .grid.three, .light-row .field-row { grid-template-columns: 1fr; } }
 .light-row details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .light-row details[open] summary { margin-bottom: 10px; }
 .light-row details small { display: block; margin-top: 8px; }

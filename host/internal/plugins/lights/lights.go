@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,6 +80,7 @@ type lamp struct {
 	pending *bool        // commanded state awaiting a report
 	gen     int          // bumped by every command, so stale timers do nothing
 	failed  string       // textNoReply or textFailed until the next report or command
+	logged  string       // what the last state message said: "true", "false" or "?"
 	lastTap time.Time
 	unsub   func()
 }
@@ -258,14 +260,38 @@ func parseState(c config.Light, payload []byte) (on, ok bool) {
 	return false, false
 }
 
+// logPayload is a payload for the log; logx shows JSON as is.
+func logPayload(b []byte) string {
+	if len(b) > 2048 {
+		return strings.ToValidUTF8(string(b[:2048]), "") + "…"
+	}
+	return string(b)
+}
+
 func (p *Plugin) onState(l *lamp) func(topic string, payload []byte) {
 	return func(topic string, payload []byte) {
 		p.mu.Lock()
-		on, ok := parseState(l.cfg, payload)
+		c := l.cfg
+		on, ok := parseState(c, payload)
+		// Repeats go to the debug log only: some devices republish an
+		// unchanged state every few seconds.
+		said := "?"
+		if ok {
+			said = strconv.FormatBool(on)
+		}
+		level := slog.LevelDebug
+		if said != l.logged || (ok && l.pending != nil) {
+			level = slog.LevelInfo
+		}
+		l.logged = said
 		if !ok {
-			id := l.cfg.ID
 			p.mu.Unlock()
-			p.log.Debug("无法识别灯的状态", "light", id, "topic", topic, "payload", string(payload))
+			attrs := []any{"light", c.Name, "topic", topic, "payload", logPayload(payload)}
+			if c.StatePath != "" {
+				attrs = append(attrs, "state_path", c.StatePath)
+			}
+			attrs = append(attrs, "state_on", c.StateOn, "state_off", c.StateOff)
+			p.log.Log(context.Background(), level, "无法识别灯的状态，请检查状态路径和状态值", attrs...)
 			return
 		}
 		before := p.item(l, true)
@@ -277,6 +303,7 @@ func (p *Plugin) onState(l *lamp) func(topic string, payload []byte) {
 		}
 		changed := !sameItem(before, p.item(l, true))
 		p.mu.Unlock()
+		p.log.Log(context.Background(), level, "收到灯的状态", "light", c.Name, "on", on, "topic", topic, "payload", logPayload(payload))
 		if changed {
 			p.onChange()
 		}
@@ -300,23 +327,27 @@ func (p *Plugin) query(broker string) {
 // queryLamps publishes the query of each lamp that has one.
 func (p *Plugin) queryLamps(ls []*lamp) {
 	type q struct {
-		bus Bus
-		cfg config.Light
+		bus    Bus
+		cfg    config.Light
+		broker string
 	}
 	var qs []q
 	p.mu.Lock()
 	for _, l := range ls {
 		if l.bus != nil && l.cfg.QueryTopic != "" {
-			qs = append(qs, q{l.bus, l.cfg})
+			qs = append(qs, q{l.bus, l.cfg, p.label(l.cfg.Broker)})
 		}
 	}
 	p.mu.Unlock()
 	for _, x := range qs {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := x.bus.Publish(ctx, x.cfg.QueryTopic, []byte(x.cfg.QueryPayload), false); err != nil {
-			p.log.Debug("查询灯的状态失败", "light", x.cfg.ID, "err", err)
-		}
+		err := x.bus.Publish(ctx, x.cfg.QueryTopic, []byte(x.cfg.QueryPayload), false)
 		cancel()
+		if err != nil {
+			p.log.Warn("查询灯的状态失败", "light", x.cfg.Name, "broker", x.broker, "topic", x.cfg.QueryTopic, "err", err)
+			continue
+		}
+		p.log.Info("已查询灯的状态", "light", x.cfg.Name, "broker", x.broker, "topic", x.cfg.QueryTopic, "payload", logPayload([]byte(x.cfg.QueryPayload)))
 	}
 }
 
@@ -375,7 +406,7 @@ func (p *Plugin) Do(ctx context.Context, item, act string) error {
 		return plugins.ErrBadAct
 	}
 	l.lastTap = time.Now()
-	c, bus := l.cfg, l.bus
+	c, bus, broker := l.cfg, l.bus, p.label(l.cfg.Broker)
 	l.gen++
 	gen := l.gen
 	l.failed = ""
@@ -407,10 +438,10 @@ func (p *Plugin) Do(ctx context.Context, item, act string) error {
 	p.mu.Unlock()
 	p.onChange()
 	if err != nil {
-		p.log.Warn("开关灯失败", "light", c.Name, "err", err)
+		p.log.Warn("开关灯失败", "light", c.Name, "broker", broker, "topic", c.CommandTopic, "err", err)
 		return err
 	}
-	p.log.Info("已发送开关灯命令", "light", c.Name, "on", target)
+	p.log.Info("已发送开关灯命令", "light", c.Name, "on", target, "broker", broker, "topic", c.CommandTopic, "payload", logPayload([]byte(payload)))
 	return nil
 }
 

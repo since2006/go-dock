@@ -5,13 +5,16 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/since2006/go-dock/host/internal/config"
+	"github.com/since2006/go-dock/host/internal/logx"
 	"github.com/since2006/go-dock/host/internal/model"
 	"github.com/since2006/go-dock/host/internal/plugins"
 )
@@ -434,6 +437,47 @@ func TestQueryOnConnect(t *testing.T) {
 	s := bus.sentList()
 	if len(s) != 2 || s[1] != (sent{"office/main/get", `{"state":""}`}) {
 		t.Fatalf("sent %+v", s)
+	}
+}
+
+// The web log shows what went over MQTT; a state that says nothing new
+// goes to debug only.
+func TestLogsPayloads(t *testing.T) {
+	bus := newFakeBus()
+	lg := logx.New(filepath.Join(t.TempDir(), "go-dock.log"), nil, slog.LevelDebug)
+	defer lg.Close()
+	l := mainLight()
+	l.PayloadOn, l.StatePath = `{"state": "ON"}`, "state"
+	l.QueryTopic, l.QueryPayload = "office/main/get", `{"state":""}`
+	bus.connected = false // no query before the connect below
+	p := New(func(string) Bus { return bus }, lg.Logger, nil)
+	p.SetOptions(opts(true, l))
+	bus.set(func(b *fakeBus) { b.connected = true })
+	bus.connect()
+
+	if err := p.Do(context.Background(), "main", model.ActOn); err != nil {
+		t.Fatal(err)
+	}
+	bus.deliver("office/main/state", `{"state":"ON","brightness":254}`)
+	bus.deliver("office/main/state", `{"state":"ON","brightness":200}`)
+	bus.deliver("office/main/state", `{"power":5}`)
+
+	var got []string
+	for _, e := range lg.Ring.Entries(slog.LevelDebug, 0) {
+		got = append(got, e.Level+" "+e.Msg+" "+e.Attrs)
+	}
+	want := []string{
+		`INFO 已查询灯的状态 component=lights light=主灯 broker=办公室 topic=office/main/get payload={"state":""}`,
+		`INFO 已发送开关灯命令 component=lights light=主灯 on=true broker=办公室 topic=office/main/set payload={"state":"ON"}`,
+		`INFO 收到灯的状态 component=lights light=主灯 on=true topic=office/main/state payload={"state":"ON","brightness":254}`,
+		`DEBUG 收到灯的状态 component=lights light=主灯 on=true topic=office/main/state payload={"state":"ON","brightness":200}`,
+		`INFO 无法识别灯的状态，请检查状态路径和状态值 component=lights light=主灯 topic=office/main/state payload={"power":5} state_path=state state_on=ON state_off=OFF`,
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("log:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if logPayload([]byte(strings.Repeat("灯", 1000)))[2046:] != "…" {
+		t.Fatal("long payload not cut on a rune boundary")
 	}
 }
 

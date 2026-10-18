@@ -114,7 +114,7 @@
         </div>
         <fieldset>
           <label class="check"><input type="checkbox" name="plugins.lights.enabled"> 在屏幕上显示「灯光」页</label>
-          <small class="muted">每盏灯填一个命令主题和开 / 关时发送的内容；填了状态主题，屏幕显示的是灯实际回报的状态，否则按最后一次命令显示。</small>
+          <small class="muted">每盏灯填一个命令主题和开 / 关时发送的内容；填了状态主题，屏幕显示的是灯实际回报的状态，否则按最后一次命令显示。状态是 JSON 时，「状态字段」填要读的字段，多层用点号连起来（如 params.Onoff），JSON 里的 true / false 直接识别。状态值不区分大小写；不填时，有状态字段默认 ON / OFF，没有则与开灯、关灯时发送的内容相同。</small>
           <div id="lights-list" class="light-list"></div>
           <div class="row">
             <button type="button" class="btn ghost" id="add-light">添加灯</button>
