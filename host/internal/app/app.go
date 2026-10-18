@@ -20,10 +20,12 @@ import (
 	"github.com/since2006/go-dock/host/internal/config"
 	"github.com/since2006/go-dock/host/internal/device"
 	"github.com/since2006/go-dock/host/internal/hub"
+	"github.com/since2006/go-dock/host/internal/ir"
 	"github.com/since2006/go-dock/host/internal/logx"
 	"github.com/since2006/go-dock/host/internal/model"
 	"github.com/since2006/go-dock/host/internal/mqtt"
 	"github.com/since2006/go-dock/host/internal/plugins"
+	"github.com/since2006/go-dock/host/internal/plugins/aircon"
 	"github.com/since2006/go-dock/host/internal/plugins/lights"
 	"github.com/since2006/go-dock/host/internal/providers"
 	"github.com/since2006/go-dock/host/internal/providers/claude"
@@ -57,6 +59,7 @@ type App struct {
 	updater *update.Updater
 	mqtt    *mqtt.Pool
 	lights  *lights.Plugin
+	aircon  *aircon.Plugin
 	plugins *plugins.Host
 	listen  string // loopback-reachable address hooks call back to
 
@@ -116,8 +119,11 @@ func Run(ctx context.Context, o Options) error {
 	a.mqtt.SetOptions(mqttOptions(cfg))
 	a.lights = lights.New(func(id string) lights.Bus { return a.mqtt.Client(id) }, lg.Logger, a.hub.Touch)
 	a.lights.SetOptions(lightsOptions(cfg))
-	a.plugins = plugins.New(a.lights)
+	a.aircon = aircon.New(a.device, filepath.Join(dir, "aircon.json"), lg.Logger, a.hub.Touch)
+	a.aircon.SetOptions(airconOptions(cfg))
+	a.plugins = plugins.New(a.lights, a.aircon)
 	a.device.SetPages(a.plugins)
+	a.device.SetIRSink(a.aircon.Received)
 	a.applyProviders(cfg)
 	store.OnChange(a.onConfigChange)
 
@@ -194,6 +200,11 @@ func lightsOptions(c config.Config) lights.Options {
 	return o
 }
 
+func airconOptions(c config.Config) aircon.Options {
+	a := c.Plugins.Aircon
+	return aircon.Options{Enabled: a.Enabled, Name: a.Name, Model: ir.GreeModel(a.Model)}
+}
+
 func codexOptions(c config.Config) codex.Options {
 	return codex.Options{AppServerPoll: c.Codex.AppServerPoll, AppServerInterval: c.Codex.AppServerInterval.D()}
 }
@@ -243,6 +254,7 @@ func (a *App) onConfigChange(old, cur config.Config) {
 	a.device.SetOptions(deviceOptions(cur))
 	a.mqtt.SetOptions(mqttOptions(cur))
 	a.lights.SetOptions(lightsOptions(cur))
+	a.aircon.SetOptions(airconOptions(cur))
 	a.applyProviders(cur)
 	if old.Update.Prerelease != cur.Update.Prerelease {
 		a.updater.SetBeta(cur.Update.Prerelease)
@@ -347,6 +359,7 @@ func (a *App) PluginAction(ctx context.Context, act model.Action) error {
 
 var (
 	_ lights.Bus        = (*mqtt.Client)(nil)
+	_ aircon.Remote     = (*device.Manager)(nil)
 	_ device.PageSource = (*plugins.Host)(nil)
 )
 

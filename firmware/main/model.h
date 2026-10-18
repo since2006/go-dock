@@ -78,17 +78,33 @@ typedef struct {
 
 typedef enum {
     DOCK_ITEM_OTHER = 0, // a kind this firmware does not know: shown, not tappable
-    DOCK_ITEM_SWITCH,
+    DOCK_ITEM_SWITCH,    // on / off: a tap toggles
+    DOCK_ITEM_STEPPER,   // a value with − and +: dec, inc
+    DOCK_ITEM_SELECT,    // one of a few options: a tap takes the next
 } dock_item_kind_t;
+
+typedef enum {
+    DOCK_ICON_BULB = 0, // also for icons this firmware does not know
+    DOCK_ICON_POWER,
+    DOCK_ICON_COOL,
+    DOCK_ICON_HEAT,
+    DOCK_ICON_DRY,
+    DOCK_ICON_FAN,
+    DOCK_ICON_AUTO,
+    DOCK_ICON_COUNT,
+} dock_icon_t;
 
 typedef struct {
     char id[DOCK_ID_LEN];
     dock_item_kind_t kind;
+    dock_icon_t icon;
     char label[52]; // <= 12 runes
-    char text[36];  // <= 8 runes: 已开, 已关, 切换中…
+    char text[36];  // <= 8 runes: 已开, 已关, 切换中…, 26°C, 制冷
     int8_t on;      // 1 on, 0 off, -1 unknown
     bool busy;      // a command is on its way
     bool disabled;  // cannot be used now (MQTT down): greyed, no taps
+    bool at_min;    // a stepper's value cannot go lower
+    bool at_max;    // or higher
 } dock_item_t;
 
 typedef struct {

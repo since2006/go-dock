@@ -302,6 +302,41 @@ static void lamp(const char *id, const char *label, int on, bool busy, bool disa
     snprintf(it->text, sizeof(it->text), "%s", text);
 }
 
+// Any widget, unknown state.
+static dock_item_t *item(dock_item_kind_t kind, dock_icon_t icon, const char *id, const char *label, const char *text)
+{
+    dock_page_t *p = &s_pages.pages[s_pages.count - 1];
+    dock_item_t *it = &p->items[p->item_count++];
+    memset(it, 0, sizeof(*it));
+    it->kind = kind;
+    it->icon = icon;
+    it->on = -1;
+    snprintf(it->id, sizeof(it->id), "%s", id);
+    snprintf(it->label, sizeof(it->label), "%s", label);
+    snprintf(it->text, sizeof(it->text), "%s", text);
+    return it;
+}
+
+static void reset_pages(void);
+
+// The air conditioner page as the aircon plugin describes it.
+static void aircon(const char *summary, const char *temp, dock_icon_t mode_icon, const char *mode, const char *fan)
+{
+    reset_pages();
+    page("aircon", "空调", summary, "");
+    item(DOCK_ITEM_SWITCH, DOCK_ICON_POWER, "power", "电源", "已开")->on = 1;
+    item(DOCK_ITEM_STEPPER, DOCK_ICON_BULB, "temp", "温度", temp);
+    item(DOCK_ITEM_SELECT, mode_icon, "mode", "模式", mode);
+    item(DOCK_ITEM_SELECT, DOCK_ICON_FAN, "fan", "风速", fan);
+}
+
+static void tapped(int x, int y, const char *want, const char *what)
+{
+    int n = s_actions;
+    tap(x, y);
+    check(want ? s_actions == n + 1 && strcmp(s_action, want) == 0 : s_actions == n, what);
+}
+
 static void send_pages(void)
 {
     s_pages_ver++;
@@ -508,6 +543,58 @@ int main(int argc, char **argv)
     send_pages();
     run(1 * SEC);
     save(out, "16-pages-gone");
+
+    // The air conditioner: a switch, a stepper and two selects in 2x2.
+    aircon("制冷 26°C · 自动风", "26°C", DOCK_ICON_COOL, "制冷", "自动");
+    send_pages();
+    run(1 * SEC);
+    swipe(500, 250, -300, 0);
+    run(1 * SEC);
+    save(out, "17-aircon");
+    tapped(534, 124, "aircon/temp inc", "+ sends inc");
+    tapped(354, 124, "aircon/temp dec", "- sends dec");
+    tapped(156, 342, "aircon/mode next", "the mode card sends next");
+    tapped(444, 342, "aircon/fan next", "the fan card sends next");
+    tapped(156, 146, "aircon/power toggle", "the power card toggles");
+
+    // At the top of the range + is greyed and deaf.
+    aircon("制热 30°C · 高风", "30°C", DOCK_ICON_HEAT, "制热", "高");
+    s_pages.pages[0].items[1].at_max = true;
+    send_pages();
+    run(1 * SEC);
+    save(out, "18-aircon-max");
+    tapped(534, 124, NULL, "+ at the top does nothing");
+    tapped(354, 124, "aircon/temp dec", "- still works at the top");
+
+    // Dry mode holds the fan, auto the temperature.
+    aircon("除湿 26°C · 低风", "26°C", DOCK_ICON_DRY, "除湿", "低");
+    s_pages.pages[0].items[3].disabled = true;
+    send_pages();
+    run(1 * SEC);
+    save(out, "19-aircon-dry");
+    tapped(444, 342, NULL, "a greyed select takes no taps");
+    aircon("自动 25°C · 自动风", "25°C", DOCK_ICON_AUTO, "自动", "自动");
+    s_pages.pages[0].items[1].disabled = true;
+    send_pages();
+    run(1 * SEC);
+    save(out, "20-aircon-auto");
+    tapped(534, 124, NULL, "a greyed stepper takes no taps");
+
+    // Every icon, for a look at the drawing.
+    reset_pages();
+    page("aircon", "图标", "", "");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_POWER, "a", "power", "电源");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_COOL, "b", "cool", "制冷");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_HEAT, "c", "heat", "制热");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_DRY, "d", "dry", "除湿");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_FAN, "e", "fan", "送风");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_AUTO, "f", "auto", "自动");
+    send_pages();
+    run(1 * SEC);
+    save(out, "21-icons");
+    reset_pages();
+    send_pages();
+    run(1 * SEC);
 
     // A firmware update from go-dock, then one that failed.
     s_ota = OTA_RECEIVING;

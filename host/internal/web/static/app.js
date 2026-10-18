@@ -241,6 +241,13 @@ const SCR_ICONS = {
   idle: '<circle cx="12" cy="12" r="2.5"/>',
   moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>',
   bulb: '<path d="M9 18h6"/><path d="M10 21h4"/><path d="M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.4 1.1 2.2h5c0-.8.4-1.6 1.1-2.2A6 6 0 0 0 12 3z"/>',
+  // Function page icons (item.icon), lines and arcs only, as the firmware draws them.
+  power: '<path d="M12 3v8"/><path d="M6.4 6.4a8 8 0 1 0 11.2 0"/>',
+  cool: '<path d="M12 2.5v19M3.8 7.3l16.4 9.4M3.8 16.7l16.4-9.4"/><path d="m9.5 4 2.5 2 2.5-2M9.5 20l2.5-2 2.5 2"/>',
+  heat: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
+  dry: '<path d="M12 3 6.8 11.5A6 6 0 1 0 17.2 11.5z"/>',
+  fan: '<path d="M3 8h9a2.5 2.5 0 1 0-2.5-2.5"/><path d="M3 12h15a2.5 2.5 0 1 1-2.5 2.5"/><path d="M3 16h7a2 2 0 1 1-2 2"/>',
+  auto: '<path d="M20 12a8 8 0 0 1-14 5.3"/><path d="M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v3.7h-3.7M6 21v-3.7h3.7"/>',
   unplug: '<path d="M9 7V3M15 7V3"/><path d="M6 7h12v4a6 6 0 0 1-6 6 6 6 0 0 1-6-6z"/><path d="M12 17v4"/><path d="M3 3l18 18"/>',
 };
 
@@ -439,20 +446,38 @@ function scrFnBody(page, now, dots) {
   return [scrStrip(page.title, page.summary || "", now, dots, page.error), grid];
 }
 
-// A switch card: lamp icon, label and state. Cards of kinds the screen
-// does not know show their texts but take no taps.
+// A card: its icon (a lamp unless the item names another), label and
+// text. A switch toggles and shows on / off; a select takes the next
+// option, coloured by its icon; a stepper is drawn by scrStepper. Cards of
+// kinds the screen does not know show their texts but take no taps.
 function scrCard(page, it, big) {
-  const st = it.busy ? "busy" : it.on === true ? "on" : it.on === false ? "off" : "unknown";
-  const tappable = it.kind === "switch" && !it.disabled && hostConnected;
+  if (it.kind === "stepper") return scrStepper(page, it, big);
+  const sw = it.kind === "switch";
+  const st = it.busy ? "busy" : !sw ? "plain" : it.on === true ? "on" : it.on === false ? "off" : "unknown";
+  const tappable = (sw || it.kind === "select") && !it.disabled && hostConnected;
+  const icon = SCR_ICONS[it.icon] ? it.icon : "bulb";
   return el("button", {
     type: "button",
-    class: `scr-card ${st} ${big ? "big" : ""} ${it.disabled ? "disabled" : ""}`,
+    class: `scr-card ${st} icon-${icon} ${big ? "big" : ""} ${it.disabled ? "disabled" : ""}`,
     disabled: tappable ? null : "",
-    onclick: () => previewTap(page.id, it),
+    onclick: () => previewTap(page.id, it, sw ? "toggle" : "next"),
   },
-  el("span", { class: "chip" }, scrIcon("bulb", big ? 46 : 30, 2)),
+  el("span", { class: "chip" }, scrIcon(icon, big ? 46 : 30, 2)),
   el("span", { class: "label" }, it.label),
   el("span", { class: "text" }, it.text));
+}
+
+// A stepper card: the value between − and +, its label below; a button
+// at the end of the range is greyed.
+function scrStepper(page, it, big) {
+  const dead = it.disabled || !hostConnected;
+  const step = (act, sign, end) => el("button", {
+    type: "button", class: "step", disabled: dead || end ? "" : null, "aria-label": `${it.label}${sign}`,
+    onclick: () => previewTap(page.id, it, act),
+  }, sign);
+  return el("div", { class: `scr-card stepper ${big ? "big" : ""} ${it.disabled ? "disabled" : ""}` },
+    el("span", { class: "steps" }, step("dec", "−", it.at_min), el("span", { class: "value mono" }, it.text), step("inc", "+", it.at_max)),
+    el("span", { class: "label" }, it.label));
 }
 
 function fnPages() { return (state && state.pages && state.pages.pages) || []; }
@@ -474,11 +499,13 @@ function goTaskPage(delta) {
   if (state) renderScreen(state.frame);
 }
 
-async function previewTap(pageId, it) {
-  it.busy = true; // until the host answers
-  renderScreen(state.frame);
+async function previewTap(pageId, it, act) {
+  if (it.kind === "switch") {
+    it.busy = true; // until the host answers
+    renderScreen(state.frame);
+  }
   try {
-    state.pages = await api(`/api/plugins/${pageId}/${it.id}`, { method: "POST", body: { act: "toggle" } });
+    state.pages = await api(`/api/plugins/${pageId}/${it.id}`, { method: "POST", body: { act } });
     showMsg("#preview-msg", "");
   } catch (e) {
     showMsg("#preview-msg", e.message, true);
@@ -936,6 +963,7 @@ $("#scan-ports").addEventListener("click", async () => {
 
 const mqttForm = $("#mqtt-form");
 const lightsForm = $("#lights-form");
+const airconForm = $("#aircon-form");
 
 // Editable list rows: each field is [config key, label, placeholder, type].
 // Inputs use data-k, not name, so the dotted-name form helpers skip them;
@@ -1008,10 +1036,12 @@ async function loadPlugins() {
   try {
     loadedConfig = await api("/api/config");
     fillForm(lightsForm, loadedConfig);
+    fillForm(airconForm, loadedConfig);
     renderBrokerRows(savedBrokers());
     renderLightRows(loadedConfig.plugins.lights.lights || []);
     showMsg("#mqtt-msg", "");
     showMsg("#lights-msg", "");
+    showMsg("#aircon-msg", "");
   } catch (e) {
     showMsg("#lights-msg", e.message, true);
   }
@@ -1122,6 +1152,31 @@ mqttForm.addEventListener("submit", async (ev) => {
   }
 });
 
+airconForm.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  try {
+    loadedConfig = await api("/api/config", { method: "POST", body: readForm(airconForm) });
+    showMsg("#aircon-msg", "已保存");
+  } catch (e) {
+    showMsg("#aircon-msg", `保存失败：${e.message}`, true);
+  }
+  render();
+});
+
+for (const b of airconForm.querySelectorAll("[data-ac]")) {
+  b.addEventListener("click", async () => {
+    const [item, act] = b.dataset.ac.split(":");
+    b.disabled = true;
+    try {
+      state.pages = await api(`/api/plugins/aircon/${item}`, { method: "POST", body: { act } });
+      showMsg("#aircon-msg", "");
+    } catch (e) {
+      showMsg("#aircon-msg", e.message, true);
+    }
+    render();
+  });
+}
+
 lightsForm.addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const body = readForm(lightsForm);
@@ -1169,6 +1224,19 @@ function renderPluginsLive() {
       live.className = `pill live ${it.disabled || !LIGHT_TEXTS_OK.includes(it.text) ? "bad" : it.busy || it.on === undefined ? "warn" : it.on ? "ok" : ""}`;
     }
     for (const b of row.querySelectorAll("[data-act]")) b.disabled = !it || it.disabled;
+  }
+
+  // The air conditioner: what the page says, and its buttons greyed as its
+  // items are (no infrared, temperature held in auto, fan held in dry).
+  const ac = fnPages().find((p) => p.id === "aircon");
+  $("#aircon-summary").textContent = ac ? ac.summary || "" : "";
+  const acLive = $("#aircon-state");
+  acLive.textContent = !ac ? "未启用" : ac.error || ac.summary || "";
+  acLive.className = `pill live ${!ac ? "" : ac.error ? "bad" : (ac.items || []).some((i) => i.id === "power" && i.on) ? "ok" : ""}`;
+  for (const b of airconForm.querySelectorAll("[data-ac]")) {
+    const [id, act] = b.dataset.ac.split(":");
+    const it = ac && (ac.items || []).find((i) => i.id === id);
+    b.disabled = !it || it.disabled || (act === "dec" && it.at_min) || (act === "inc" && it.at_max);
   }
 }
 

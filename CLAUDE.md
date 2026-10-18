@@ -22,6 +22,8 @@ sessions files, transcripts, rollouts, codex app-server (polled by providers) �
 brokers ◄──► mqtt.Pool (one Client per id) ◄── plugins/lights ──Page()──► plugins.Host ──► device.BuildPages ──► `pages` after each snapshot
                                                      ▲ Do(item, act)                                         (+ /api/state.pages, preview)
                                   device `action` / POST /api/plugins/{page}/{item}
+
+plugins/aircon ──ir.GreeRaw──► device.Manager.SendIR ──`ir_send`──► screen IR LED      screen IR receiver ──`ir_recv`──► SetIRSink ──► aircon.Received (ir.DecodeGree)
 ```
 
 - Providers never talk to the UI or device; they only emit `model.Observation`s. The hub merges them per session (newer wins), derives `Session.Effective()` (most urgent state of a session and its subagents) and sorts by state priority.
@@ -35,7 +37,8 @@ brokers ◄──► mqtt.Pool (one Client per id) ◄── plugins/lights ─�
 - **Screen layout**: the preview in `host/internal/web/static/app.js` (`SCR_*` constants, `scrReset`, `scrTime`, `scrPages`) and `firmware/main/ui.c` (`MAIN_H`, `SUB_H`, `fmt_reset`, `fmt_elapsed`, `layout_pages`) implement the same design, described in `docs/protocol-v1.md` §7.1. Change all three together.
 - **Text limits**: `providers.DetailLen` / `TitleLen` bound what the web shows; `device` (`textLen`, `titleLen`) cuts further for the screen. Firmware buffers in `model.h` must fit the device limits, including the page limits (`pageTitleLen`, `itemLabelLen`, …, `maxPages`, `maxItems`).
 - **Beeps**: the alert melodies live only in `device.Sounds` (the firmware plays whatever notes arrive); their limits (`maxNotes`, `minHz`…`maxMs`) match `BEEP_MAX_NOTES` in `firmware/main/beep.h` and the clamping in `link.c` `handle_beep`. The web settings list and browser preview read `GET /api/device/sounds`.
-- **Function page layout**: `app.js` (`scrStrip` dots, `SCR_PAGE_*`, `scrGrid`, `scrCard`), `firmware/main/ui.c` (`FN_*`, `CARD_GAP`, `render_strip`, `render_fn`, `render_card`, `draw_bulb`) and `docs/protocol-v1.md` §7.1 implement the same cards; change all three together. `firmware/sim` renders 1, 3, 4 and 6 cards and checks taps and swipes.
+- **Infrared**: all encoding is host-side (`internal/ir`); the plugin keeps the last state in `GO_DOCK_HOME/aircon.json` because the unit never reports. The firmware (`ir.c`, RMT) only sends and receives timings, and drops what its receiver hears while it sends; `device.Manager.IRReady` tells the page when the screen cannot send (not connected, firmware without `"ir":1`).
+- **Function page layout**: `app.js` (`scrStrip` dots, `SCR_PAGE_*`, `scrGrid`, `scrCard`, `scrStepper`, `SCR_ICONS` for item icons), `firmware/main/ui.c` (`FN_*`, `CARD_GAP`, `render_strip`, `render_fn`, `render_card`, the `ICON_*` stroke tables and `ICON_COLOR` drawn by `draw_icon`) and `docs/protocol-v1.md` §7.1 implement the same cards; change all three together. `firmware/sim` renders 1, 3, 4 and 6 lamps, the air conditioner page and every icon, and checks taps and swipes.
 - **Token numbers** shown to users use `model.Tokens.Fresh()` (no cache reads), both in `BuildFrame` and in `app.js` (`freshTokens`). Costs still include cache reads.
 
 ## Running and testing locally

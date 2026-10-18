@@ -108,6 +108,7 @@ typedef struct {
 
 typedef struct {
     lv_obj_t *obj, *chip, *label, *text;
+    lv_obj_t *steps, *dec, *value, *inc; // a stepper's − value +
 } card_t;
 
 static struct {
@@ -635,13 +636,66 @@ static void build_overlay(lv_obj_t *p)
     lv_obj_align(ui.ov_ver, LV_ALIGN_BOTTOM_MID, 0, -14);
 }
 
-// The lamp of a card, as the bulb icon of the web preview draws it on a
-// 24-unit grid (coordinates here in tenths): a round head, its neck and two
-// lines of the base, in the chip's arc and line colours.
-static void draw_bulb(lv_event_t *e)
+// Card icons, as the web preview's SCR_ICONS draws them on a 24-unit grid
+// (coordinates here in tenths), with straight strokes and arcs only.
+typedef struct {
+    bool arc;
+    int16_t v[5]; // line: x1 y1 x2 y2; arc: centre x y, radius, start and end angle (clockwise from 3 o'clock)
+} stroke_t;
+
+#define LINE(x1, y1, x2, y2) {false, {x1, y1, x2, y2, 0}}
+#define ARC(cx, cy, r, a0, a1) {true, {cx, cy, r, a0, a1}}
+
+static const stroke_t ICON_BULB[] = {
+    ARC(120, 90, 60, 127, 53), // the head, open at the bottom for the neck
+    LINE(84, 138, 95, 160), LINE(156, 138, 145, 160), LINE(95, 160, 145, 160),
+    LINE(90, 180, 150, 180), LINE(100, 210, 140, 210),
+};
+static const stroke_t ICON_POWER[] = {LINE(120, 30, 120, 110), ARC(120, 120, 80, 315, 225)};
+static const stroke_t ICON_COOL[] = {
+    LINE(120, 25, 120, 215), LINE(38, 73, 202, 167), LINE(38, 167, 202, 73),
+    LINE(95, 40, 120, 60), LINE(120, 60, 145, 40), LINE(95, 200, 120, 180), LINE(120, 180, 145, 200),
+};
+static const stroke_t ICON_HEAT[] = {
+    ARC(120, 120, 40, 0, 360),
+    LINE(120, 25, 120, 45), LINE(120, 195, 120, 215), LINE(25, 120, 45, 120), LINE(195, 120, 215, 120),
+    LINE(53, 53, 67, 67), LINE(173, 173, 187, 187), LINE(53, 187, 67, 173), LINE(173, 67, 187, 53),
+};
+static const stroke_t ICON_DRY[] = {LINE(120, 30, 68, 115), LINE(172, 115, 120, 30), ARC(120, 145, 60, 330, 210)};
+static const stroke_t ICON_FAN[] = {
+    LINE(30, 80, 120, 80), ARC(120, 55, 25, 180, 90),
+    LINE(30, 120, 180, 120), ARC(180, 145, 25, 270, 180),
+    LINE(30, 160, 100, 160), ARC(100, 180, 20, 270, 180),
+};
+static const stroke_t ICON_AUTO[] = {
+    ARC(120, 120, 80, 0, 138), ARC(120, 120, 80, 180, 318),
+    LINE(180, 30, 180, 67), LINE(180, 67, 143, 67), LINE(60, 210, 60, 173), LINE(60, 173, 97, 173),
+};
+
+#define STROKES(a) {a, sizeof(a) / sizeof(a[0])}
+static const struct {
+    const stroke_t *s;
+    int n;
+} ICONS[DOCK_ICON_COUNT] = {
+    [DOCK_ICON_BULB] = STROKES(ICON_BULB), [DOCK_ICON_POWER] = STROKES(ICON_POWER),
+    [DOCK_ICON_COOL] = STROKES(ICON_COOL), [DOCK_ICON_HEAT] = STROKES(ICON_HEAT),
+    [DOCK_ICON_DRY] = STROKES(ICON_DRY),   [DOCK_ICON_FAN] = STROKES(ICON_FAN),
+    [DOCK_ICON_AUTO] = STROKES(ICON_AUTO),
+};
+
+// A select card shows its option in the colour of its icon.
+static const uint32_t ICON_COLOR[DOCK_ICON_COUNT] = {
+    [DOCK_ICON_BULB] = 0xE9E9E5, [DOCK_ICON_POWER] = 0xE9E9E5, [DOCK_ICON_COOL] = 0x5AA9FF, [DOCK_ICON_HEAT] = 0xFF9F43,
+    [DOCK_ICON_DRY] = 0x4FD1C5,  [DOCK_ICON_FAN] = 0xE9E9E5,   [DOCK_ICON_AUTO] = 0x3DD68C,
+};
+
+// Draws the chip's icon (its user data) in the chip's arc and line
+// colours: 46 px in a 96 px chip, 30 px in the 56 px one.
+static void draw_icon(lv_event_t *e)
 {
     lv_obj_t *chip = lv_event_get_current_target_obj(e);
     lv_layer_t *layer = lv_event_get_layer(e);
+    dock_icon_t icon = (dock_icon_t)(intptr_t)lv_obj_get_user_data(chip);
     lv_area_t a;
     lv_obj_get_coords(chip, &a);
     int size = lv_area_get_width(&a) >= 96 ? 46 : 30;
@@ -655,28 +709,49 @@ static void draw_bulb(lv_event_t *e)
     lv_obj_init_draw_arc_dsc(chip, LV_PART_MAIN, &arc);
     arc.width = w;
     arc.rounded = 1;
-    arc.center.x = ox + 120 * size / 240;
-    arc.center.y = oy + 90 * size / 240;
-    arc.radius = (uint16_t)(60 * size / 240 + w / 2); // the stroke centred on radius 6
-    arc.start_angle = 127;                             // open at the bottom for the neck
-    arc.end_angle = 53;
-    lv_draw_arc(layer, &arc);
-
-    static const int16_t seg[][4] = {
-        {84, 138, 95, 160}, {156, 138, 145, 160}, {95, 160, 145, 160}, // neck
-        {90, 180, 150, 180}, {100, 210, 140, 210},                     // base
-    };
     lv_draw_line_dsc_t ln;
     lv_draw_line_dsc_init(&ln);
     ln.base.layer = layer;
     lv_obj_init_draw_line_dsc(chip, LV_PART_MAIN, &ln);
     ln.width = w;
     ln.round_start = ln.round_end = 1;
-    for (size_t i = 0; i < sizeof(seg) / sizeof(seg[0]); i++) {
-        ln.p1.x = ox + seg[i][0] * size / 240;
-        ln.p1.y = oy + seg[i][1] * size / 240;
-        ln.p2.x = ox + seg[i][2] * size / 240;
-        ln.p2.y = oy + seg[i][3] * size / 240;
+
+    for (int i = 0; i < ICONS[icon].n; i++) {
+        const int16_t *v = ICONS[icon].s[i].v;
+        if (ICONS[icon].s[i].arc) {
+            arc.center.x = ox + v[0] * size / 240;
+            arc.center.y = oy + v[1] * size / 240;
+            arc.radius = (uint16_t)(v[2] * size / 240 + w / 2); // the stroke centred on the radius
+            arc.start_angle = v[3];
+            arc.end_angle = v[4];
+            lv_draw_arc(layer, &arc);
+        } else {
+            ln.p1.x = ox + v[0] * size / 240;
+            ln.p1.y = oy + v[1] * size / 240;
+            ln.p2.x = ox + v[2] * size / 240;
+            ln.p2.y = oy + v[3] * size / 240;
+            lv_draw_line(layer, &ln);
+        }
+    }
+}
+
+// The − or + on a stepper's button (user data 1 for +), in its line style.
+static void draw_step(lv_event_t *e)
+{
+    lv_obj_t *b = lv_event_get_current_target_obj(e);
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_area_t a;
+    lv_obj_get_coords(b, &a);
+    int32_t cx = (a.x1 + a.x2) / 2, cy = (a.y1 + a.y2) / 2, r = lv_area_get_width(&a) / 6;
+    lv_draw_line_dsc_t ln;
+    lv_draw_line_dsc_init(&ln);
+    ln.base.layer = layer;
+    lv_obj_init_draw_line_dsc(b, LV_PART_MAIN, &ln);
+    ln.round_start = ln.round_end = 1;
+    ln.p1.x = cx - r, ln.p1.y = cy, ln.p2.x = cx + r, ln.p2.y = cy;
+    lv_draw_line(layer, &ln);
+    if (lv_obj_get_user_data(b)) {
+        ln.p1.x = cx, ln.p1.y = cy - r, ln.p2.x = cx, ln.p2.y = cy + r;
         lv_draw_line(layer, &ln);
     }
 }
@@ -687,27 +762,64 @@ static void on_card_pressed(lv_event_t *e)
     s_wake_tap = s_bright < BRIGHT_FULL; // a dim screen only wakes up
 }
 
-// A tap on a switch card toggles it: the host hears of it at once and the
-// card shows it is switching until the host's next pages.
+// The item tapped, if a tap may go to the host now.
+static dock_item_t *tapped(dock_page_t *pg, int i)
+{
+    if (s_wake_tap || !pg || i >= pg->item_count || !lv_obj_has_flag(ui.overlay, LV_OBJ_FLAG_HIDDEN)) {
+        return NULL;
+    }
+    dock_item_t *it = &pg->items[i];
+    return it->disabled ? NULL : it;
+}
+
+// A tap on a card: a switch toggles and shows it is switching until the
+// host's next pages; a select takes its next option, which the next pages
+// show.
 static void on_card_clicked(lv_event_t *e)
 {
     dock_page_t *pg = fn_page();
-    int i = (int)(intptr_t)lv_event_get_user_data(e);
-    if (s_wake_tap || !pg || i >= pg->item_count || !lv_obj_has_flag(ui.overlay, LV_OBJ_FLAG_HIDDEN)) {
+    dock_item_t *it = tapped(pg, (int)(intptr_t)lv_event_get_user_data(e));
+    if (!it) {
         return;
     }
-    dock_item_t *it = &pg->items[i];
-    if (it->kind != DOCK_ITEM_SWITCH || it->disabled) {
-        return;
+    if (it->kind == DOCK_ITEM_SELECT) {
+        link_send_action(pg->id, it->id, "next");
+    } else if (it->kind == DOCK_ITEM_SWITCH) {
+        link_send_action(pg->id, it->id, "toggle");
+        it->busy = true;
+        snprintf(it->text, sizeof(it->text), "切换中…");
+        render_fn();
     }
-    link_send_action(pg->id, it->id, "toggle");
-    it->busy = true;
-    snprintf(it->text, sizeof(it->text), "切换中…");
-    render_fn();
 }
 
-// Card: the lamp icon in a round chip, the label and the state text,
-// centred; sizes depend on the grid and are set when rendered.
+// A tap on a stepper's − or + (user data: card index * 2, plus 1 for +).
+static void on_step_clicked(lv_event_t *e)
+{
+    int v = (int)(intptr_t)lv_event_get_user_data(e);
+    bool inc = v & 1;
+    dock_page_t *pg = fn_page();
+    dock_item_t *it = tapped(pg, v / 2);
+    if (it && it->kind == DOCK_ITEM_STEPPER && !(inc ? it->at_max : it->at_min)) {
+        link_send_action(pg->id, it->id, inc ? "inc" : "dec");
+    }
+}
+
+static lv_obj_t *build_step(lv_obj_t *row, int index, bool inc)
+{
+    lv_obj_t *b = box(row, 0, 0, 56, 56, 0x1C1C1E, LV_RADIUS_CIRCLE);
+    lv_obj_set_style_line_color(b, lv_color_hex(C_TEXT), 0);
+    lv_obj_set_style_line_width(b, 3, 0);
+    lv_obj_set_style_opa(b, 204, LV_STATE_PRESSED);
+    lv_obj_set_user_data(b, (void *)(intptr_t)inc);
+    lv_obj_add_event_cb(b, draw_step, LV_EVENT_DRAW_MAIN_END, NULL);
+    lv_obj_add_event_cb(b, on_card_pressed, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(b, on_step_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)(index * 2 + inc));
+    return b;
+}
+
+// Card: an icon in a round chip (or, for a stepper, − value +), the label
+// and the state text, centred; sizes depend on the grid and are set when
+// rendered.
 static void build_card(lv_obj_t *p, card_t *c, int index)
 {
     c->obj = box(p, 0, 0, 180, 184, C_CARD, 18);
@@ -724,9 +836,19 @@ static void build_card(lv_obj_t *p, card_t *c, int index)
 
     c->chip = box(c->obj, 0, 0, 56, 56, 0x1C1C1E, LV_RADIUS_CIRCLE);
     lv_obj_remove_flag(c->chip, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_arc_width(c->chip, 1, 0); // the bulb is drawn in these styles
+    lv_obj_set_style_arc_width(c->chip, 1, 0); // icons are drawn in these styles
     lv_obj_set_style_line_width(c->chip, 1, 0);
-    lv_obj_add_event_cb(c->chip, draw_bulb, LV_EVENT_DRAW_MAIN_END, NULL);
+    lv_obj_add_event_cb(c->chip, draw_icon, LV_EVENT_DRAW_MAIN_END, NULL);
+
+    c->steps = box(c->obj, 0, 0, LV_SIZE_CONTENT, LV_SIZE_CONTENT, 0, -1);
+    lv_obj_remove_flag(c->steps, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_flex_flow(c->steps, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(c->steps, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(c->steps, 12, 0);
+    c->dec = build_step(c->steps, index, false);
+    c->value = text(c->steps, font_get(FONT_MONO_BOLD, 36), C_TEXT);
+    lv_obj_set_style_text_align(c->value, LV_TEXT_ALIGN_CENTER, 0);
+    c->inc = build_step(c->steps, index, true);
 
     c->label = line(c->obj, font_get(FONT_BOLD, 20), C_TEXT, 156);
     lv_obj_set_style_text_align(c->label, LV_TEXT_ALIGN_CENTER, 0);
@@ -861,13 +983,45 @@ static void pulse(lv_obj_t *chip, bool on)
     lv_anim_start(&a);
 }
 
+static void show(lv_obj_t *o, bool on)
+{
+    if (on) {
+        lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void set_tappable(lv_obj_t *o, bool on)
+{
+    if (on) {
+        lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE);
+    } else {
+        lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE);
+    }
+}
+
+// A stepper's − or +: greyed and deaf at the end of the range.
+static void render_step(lv_obj_t *b, bool big, bool usable)
+{
+    int d = big ? 72 : 56;
+    lv_obj_set_size(b, d, d);
+    lv_obj_set_style_line_width(b, big ? 4 : 3, 0);
+    lv_obj_set_style_opa(b, usable ? LV_OPA_COVER : 77, 0); // 30%
+    set_tappable(b, usable);
+}
+
 // Lays out card c for item it at x, y; a single row of cards gets the
-// large icon and type. Lit cards keep to a dark tint and a thin ring, kind
-// to the AMOLED panel.
+// large icon and type. A switch shows on / off (lit cards keep to a dark
+// tint and a thin ring, kind to the AMOLED panel), a select its option in
+// the colour of its icon, a stepper − value +.
 static void render_card(card_t *c, const dock_item_t *it, int x, int y, int w, int h, bool big)
 {
-    bool lit = !it->busy && it->on == 1;
-    uint32_t color = it->busy ? C_BLUE : it->on == 1 ? C_LAMP : it->on == 0 ? C_TEXT3 : 0x5C5B57;
+    bool sw = it->kind == DOCK_ITEM_SWITCH, step = it->kind == DOCK_ITEM_STEPPER;
+    bool lit = sw && !it->busy && it->on == 1;
+    uint32_t color = it->busy ? C_BLUE
+                     : sw     ? (it->on == 1 ? C_LAMP : it->on == 0 ? C_TEXT3 : 0x5C5B57)
+                              : ICON_COLOR[it->icon];
 
     lv_obj_remove_flag(c->obj, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_pos(c->obj, x, y);
@@ -875,28 +1029,39 @@ static void render_card(card_t *c, const dock_item_t *it, int x, int y, int w, i
     lv_obj_set_style_bg_color(c->obj, lv_color_hex(lit ? 0x1E1606 : C_CARD), 0);
     lv_obj_set_style_border_opa(c->obj, lit ? 102 : LV_OPA_TRANSP, 0); // 40%
     lv_obj_set_style_opa(c->obj, it->disabled ? 90 : LV_OPA_COVER, 0);  // 35%
-    if (it->kind == DOCK_ITEM_SWITCH && !it->disabled) {
-        lv_obj_add_flag(c->obj, LV_OBJ_FLAG_CLICKABLE);
-    } else {
-        lv_obj_remove_flag(c->obj, LV_OBJ_FLAG_CLICKABLE);
-    }
+    lv_obj_set_style_pad_row(c->obj, step ? 14 : 8, 0);
+    set_tappable(c->obj, (sw || it->kind == DOCK_ITEM_SELECT) && !it->disabled);
 
-    int chip = big ? 96 : 56;
-    lv_obj_set_size(c->chip, chip, chip);
-    bool tint = it->busy || it->on == 1;
-    lv_obj_set_style_bg_color(c->chip, lv_color_hex(tint ? color : 0x1C1C1E), 0);
-    lv_obj_set_style_bg_opa(c->chip, it->busy ? 36 : tint ? 41 : LV_OPA_COVER, 0); // 14%, 16%
-    lv_obj_set_style_arc_color(c->chip, lv_color_hex(color), 0);
-    lv_obj_set_style_line_color(c->chip, lv_color_hex(color), 0);
-    pulse(c->chip, it->busy);
+    show(c->chip, !step);
+    show(c->steps, step);
+    show(c->text, !step);
+    if (step) {
+        render_step(c->dec, big, !it->disabled && !it->at_min);
+        render_step(c->inc, big, !it->disabled && !it->at_max);
+        lv_obj_set_style_text_font(c->value, font_get(FONT_MONO_BOLD, big ? 52 : 36), 0);
+        lv_obj_set_width(c->value, big ? 140 : 100);
+        set_text(c->value, it->text);
+        pulse(c->chip, false);
+    } else {
+        int chip = big ? 96 : 56;
+        lv_obj_set_size(c->chip, chip, chip);
+        lv_obj_set_user_data(c->chip, (void *)(intptr_t)it->icon);
+        bool tint = it->busy || lit;
+        lv_obj_set_style_bg_color(c->chip, lv_color_hex(tint ? color : 0x1C1C1E), 0);
+        lv_obj_set_style_bg_opa(c->chip, it->busy ? 36 : tint ? 41 : LV_OPA_COVER, 0); // 14%, 16%
+        lv_obj_set_style_arc_color(c->chip, lv_color_hex(color), 0);
+        lv_obj_set_style_line_color(c->chip, lv_color_hex(color), 0);
+        lv_obj_invalidate(c->chip); // the icon may have changed with nothing else
+        pulse(c->chip, it->busy);
+        lv_obj_set_style_text_font(c->text, font_get(FONT_BOLD, big ? 20 : 16), 0);
+        set_color(c->text, color);
+        set_text(c->text, it->text);
+    }
 
     const lv_font_t *fl = font_get(FONT_BOLD, big ? 26 : 20);
     lv_obj_set_style_text_font(c->label, fl, 0);
     lv_obj_set_size(c->label, w - 24, lv_font_get_line_height(fl));
     set_text(c->label, it->label);
-    lv_obj_set_style_text_font(c->text, font_get(FONT_BOLD, big ? 20 : 16), 0);
-    set_color(c->text, color);
-    set_text(c->text, it->text);
 }
 
 static void render_fn(void)

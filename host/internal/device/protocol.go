@@ -381,9 +381,12 @@ type ItemFrame struct {
 	Kind     string `json:"kind"`
 	Label    string `json:"label"`
 	Text     string `json:"text"`
+	Icon     string `json:"icon,omitempty"`
 	On       *bool  `json:"on,omitempty"`
 	Busy     bool   `json:"busy,omitempty"`
 	Disabled bool   `json:"disabled,omitempty"`
+	AtMin    bool   `json:"at_min,omitempty"`
+	AtMax    bool   `json:"at_max,omitempty"`
 }
 
 // protoID is what page, item and kind ids may look like, so the firmware
@@ -416,14 +419,21 @@ func BuildPages(ps []model.Page) Pages {
 			if !protoID.MatchString(it.ID) || !protoID.MatchString(it.Kind) {
 				continue
 			}
+			icon := it.Icon
+			if !protoID.MatchString(icon) {
+				icon = "" // the default picture
+			}
 			pf.Items = append(pf.Items, ItemFrame{
 				ID:       it.ID,
 				Kind:     it.Kind,
 				Label:    model.Truncate(it.Label, itemLabelLen),
 				Text:     model.Truncate(it.Text, itemTextLen),
+				Icon:     icon,
 				On:       it.On,
 				Busy:     it.Busy,
 				Disabled: it.Disabled,
+				AtMin:    it.AtMin,
+				AtMax:    it.AtMax,
 			})
 		}
 		f.Pages = append(f.Pages, pf)
@@ -509,6 +519,7 @@ type DeviceMsg struct {
 	OTA     int    `json:"ota"`   // 1: can be updated over the link
 	Pages   int    `json:"pages"` // 1: shows function pages (§3.5)
 	Beep    int    `json:"beep"`  // 1: plays beep messages (§3.6)
+	IR      int    `json:"ir"`    // 1: sends infrared (§3.7)
 	// ack
 	Seq uint64 `json:"seq"`
 	// log; also the error text of ota
@@ -521,6 +532,8 @@ type DeviceMsg struct {
 	Page string `json:"page"`
 	Item string `json:"item"`
 	Act  string `json:"act"`
+	// ir_recv: what the infrared receiver picked up, µs
+	Raw []int `json:"raw"`
 }
 
 var errNotMessage = errors.New("不是协议消息")

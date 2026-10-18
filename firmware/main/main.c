@@ -1,6 +1,7 @@
 // go-dock firmware for the Waveshare ESP32-S3-Touch-AMOLED-2.41 (V2).
 #include "beep.h"
 #include "display.h"
+#include "ir.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "link.h"
@@ -35,6 +36,7 @@ void app_main(void)
 {
     ota_init();
     beep_init();
+    ir_init();
     link_start();
     xTaskCreatePinnedToCore(lvgl_task, "lvgl", 8192, NULL, 4, NULL, 1);
 }

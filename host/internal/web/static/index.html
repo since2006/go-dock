@@ -88,7 +88,7 @@
     </section>
 
     <section id="tab-plugins" class="tab" hidden>
-      <p class="lead">插件显示在屏幕上 Agent 页右边的功能页里，左右滑动切换；在「设备预览」里也能直接操作。插件通过 MQTT 控制设备，go-dock 负责连接 broker（可以有多个），屏幕本身不联网。</p>
+      <p class="lead">插件显示在屏幕上 Agent 页右边的功能页里，左右滑动切换；在「设备预览」里也能直接操作。灯光通过 MQTT 控制，go-dock 负责连接 broker（可以有多个），屏幕本身不联网；空调用屏幕外接的红外模块控制。</p>
       <form id="mqtt-form" class="panel settings" autocomplete="off">
         <div class="panel-head">
           <h2>MQTT broker</h2>
@@ -123,6 +123,38 @@
         </fieldset>
         <div class="row end">
           <span class="form-msg" id="lights-msg" role="status"></span>
+          <button type="submit" class="btn primary">保存</button>
+        </div>
+      </form>
+      <form id="aircon-form" class="panel settings" autocomplete="off">
+        <div class="panel-head">
+          <h2>空调</h2>
+          <span class="muted" id="aircon-summary"></span>
+        </div>
+        <fieldset>
+          <label class="check"><input type="checkbox" name="plugins.aircon.enabled"> 在屏幕上显示「空调」页</label>
+          <small class="muted">屏幕外接红外发射模块，像遥控器一样控制格力空调；再接一个红外接收模块，用原装遥控器调过的设定也会同步到屏幕上。红外是单向的，空调不会回报状态，页面显示的是最后一次发出或收到的设定。接线见固件说明「红外遥控（空调）」。</small>
+          <label>名称
+            <input name="plugins.aircon.name" placeholder="空调" maxlength="8">
+          </label>
+          <label>遥控器协议
+            <select name="plugins.aircon.model">
+              <option value="yaw1f">YAW1F（大多数格力遥控器）</option>
+              <option value="ybofb">YBOFB</option>
+            </select>
+            <small>不确定就用默认的。接了接收模块后，按一下原装遥控器，日志里会提示它是哪一种。</small>
+          </label>
+          <div class="ac-live">
+            <span class="pill live" id="aircon-state">—</span>
+            <button type="button" class="btn small" data-ac="power:toggle">电源</button>
+            <button type="button" class="btn small" data-ac="temp:dec">−</button>
+            <button type="button" class="btn small" data-ac="temp:inc">+</button>
+            <button type="button" class="btn small" data-ac="mode:next">模式</button>
+            <button type="button" class="btn small" data-ac="fan:next">风速</button>
+          </div>
+        </fieldset>
+        <div class="row end">
+          <span class="form-msg" id="aircon-msg" role="status"></span>
           <button type="submit" class="btn primary">保存</button>
         </div>
       </form>

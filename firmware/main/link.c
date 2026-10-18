@@ -15,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "ir.h"
 #include "ota.h"
 
 #define MAX_LINE 4096
@@ -45,11 +46,12 @@ static void send_line(const char *json)
 
 static void send_hello(void)
 {
-    char buf[176];
+    char buf[192];
     snprintf(buf, sizeof(buf),
              "{\"t\":\"hello\",\"proto\":%d,\"fw\":\"%s\",\"w\":600,\"h\":450,\"max_line\":%d%s,\"beep\":1,"
-             "\"pages\":1}",
-             DOCK_PROTO, esp_app_get_description()->version, MAX_LINE, s_ota ? ",\"ota\":1" : "");
+             "\"pages\":1%s}",
+             DOCK_PROTO, esp_app_get_description()->version, MAX_LINE, s_ota ? ",\"ota\":1" : "",
+             ir_ready() ? ",\"ir\":1" : "");
     send_line(buf);
 }
 
@@ -192,6 +194,31 @@ static bool copy_id(char *dst, const cJSON *v)
     return true;
 }
 
+static int name_index(const cJSON *v, const char *const *names, int n)
+{
+    for (int i = 0; cJSON_IsString(v) && i < n; i++) {
+        if (strcmp(v->valuestring, names[i]) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static dock_item_kind_t parse_kind(const cJSON *v)
+{
+    static const char *const names[] = {"switch", "stepper", "select"};
+    static const dock_item_kind_t kinds[] = {DOCK_ITEM_SWITCH, DOCK_ITEM_STEPPER, DOCK_ITEM_SELECT};
+    int i = name_index(v, names, 3);
+    return i < 0 ? DOCK_ITEM_OTHER : kinds[i];
+}
+
+static dock_icon_t parse_icon(const cJSON *v)
+{
+    static const char *const names[DOCK_ICON_COUNT] = {"bulb", "power", "cool", "heat", "dry", "fan", "auto"};
+    int i = name_index(v, names, DOCK_ICON_COUNT);
+    return i < 0 ? DOCK_ICON_BULB : (dock_icon_t)i;
+}
+
 // pages: the function pages, replacing the ones before. Pages and items
 // with ids the device could not echo back are left out.
 static void parse_pages(const cJSON *root, dock_pages_t *out)
@@ -222,14 +249,16 @@ static void parse_pages(const cJSON *root, dock_pages_t *out)
                 continue;
             }
             p->item_count++;
-            const cJSON *kind = cJSON_GetObjectItem(it, "kind");
-            d->kind = cJSON_IsString(kind) && strcmp(kind->valuestring, "switch") == 0 ? DOCK_ITEM_SWITCH : DOCK_ITEM_OTHER;
+            d->kind = parse_kind(cJSON_GetObjectItem(it, "kind"));
+            d->icon = parse_icon(cJSON_GetObjectItem(it, "icon"));
             copy_str(d->label, sizeof(d->label), cJSON_GetObjectItem(it, "label"));
             copy_str(d->text, sizeof(d->text), cJSON_GetObjectItem(it, "text"));
             const cJSON *on = cJSON_GetObjectItem(it, "on");
             d->on = cJSON_IsBool(on) ? (cJSON_IsTrue(on) ? 1 : 0) : -1;
             d->busy = cJSON_IsTrue(cJSON_GetObjectItem(it, "busy"));
             d->disabled = cJSON_IsTrue(cJSON_GetObjectItem(it, "disabled"));
+            d->at_min = cJSON_IsTrue(cJSON_GetObjectItem(it, "at_min"));
+            d->at_max = cJSON_IsTrue(cJSON_GetObjectItem(it, "at_max"));
         }
     }
 }
@@ -255,6 +284,47 @@ static void handle_beep(const cJSON *root)
         n++;
     }
     beep_play(notes, n);
+}
+
+// ir_send: {"hz":38000,"raw":[µs,...]}; a frame out of range is dropped
+// whole rather than sent mangled.
+static void handle_ir_send(const cJSON *root)
+{
+    static uint16_t raw[IR_MAX_RAW]; // only the reader task gets here
+    int64_t hz = num(cJSON_GetObjectItem(root, "hz"));
+    int n = 0;
+    const cJSON *d;
+    cJSON_ArrayForEach(d, cJSON_GetObjectItem(root, "raw"))
+    {
+        int64_t us = num(d);
+        if (n == IR_MAX_RAW || us < 1 || us > IR_MAX_SPAN) {
+            link_log("warn", "infrared frame out of range, not sent");
+            return;
+        }
+        raw[n++] = (uint16_t)us;
+    }
+    if (hz < 30000 || hz > 60000 || n == 0) {
+        link_log("warn", "infrared frame out of range, not sent");
+        return;
+    }
+    if (!ir_send((uint32_t)hz, raw, n)) {
+        link_log("warn", "infrared frames coming too fast, one dropped");
+    }
+}
+
+void link_send_ir(const uint16_t *raw, int count)
+{
+    char *line = heap_caps_malloc(MAX_LINE, MALLOC_CAP_SPIRAM);
+    if (!line) {
+        return;
+    }
+    int len = snprintf(line, MAX_LINE, "{\"t\":\"ir_recv\",\"raw\":[");
+    for (int i = 0; i < count && len < MAX_LINE - 16; i++) {
+        len += snprintf(line + len, MAX_LINE - len, "%s%u", i ? "," : "", raw[i]);
+    }
+    snprintf(line + len, MAX_LINE - len, "]}");
+    send_line(line);
+    heap_caps_free(line);
 }
 
 static void send_ota_error(const char *err)
@@ -356,6 +426,8 @@ static void handle_line(char *line)
         xSemaphoreGive(s_lock);
     } else if (strcmp(t->valuestring, "beep") == 0) {
         handle_beep(root);
+    } else if (strcmp(t->valuestring, "ir_send") == 0 && !s_incompatible) {
+        handle_ir_send(root);
     }
     cJSON_Delete(root);
 }

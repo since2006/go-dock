@@ -24,6 +24,9 @@ bool link_take_pages(dock_pages_t *out, uint32_t *version);
 // switch. Ids come from link_take_pages, which only passes plain ones.
 void link_send_action(const char *page, const char *item, const char *act);
 
+// Tells the host what the infrared receiver picked up (raw µs timings).
+void link_send_ir(const uint16_t *raw, int count);
+
 // esp_timer time of the last protocol message from the host, 0 if none yet.
 int64_t link_last_rx_us(void);
 

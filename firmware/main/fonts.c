@@ -13,7 +13,7 @@ extern const uint8_t mono_bold_end[] asm("_binary_JetBrainsMono_Bold_ttf_end");
 
 // Glyphs kept rendered per font; CJK labels repeat few distinct characters.
 #define GLYPH_CACHE 96
-#define MAX_FONTS 32
+#define MAX_FONTS 40
 
 typedef struct {
     font_face_t face;

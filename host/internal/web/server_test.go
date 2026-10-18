@@ -77,6 +77,7 @@ func (f *fakeBackend) DeviceBeep(sound string) error {
 }
 func (f *fakeBackend) PluginAction(ctx context.Context, a model.Action) error {
 	switch {
+	case a.Page == "aircon" && a.Item == "temp" && (a.Act == model.ActInc || a.Act == model.ActDec):
 	case a.Page != "lights" || a.Item != "main":
 		return plugins.ErrNotFound
 	case a.Act != model.ActOn && a.Act != model.ActOff && a.Act != model.ActToggle:
@@ -161,6 +162,27 @@ func TestConfigSave(t *testing.T) {
 	// Saving is POST only: some networks block PUT.
 	if w := do(h, "PUT", "127.0.0.1:47321", "/api/config", "application/json", `{}`); w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("PUT: %d", w.Code)
+	}
+}
+
+func TestConfigSaveAircon(t *testing.T) {
+	b, h := newTestServer("127.0.0.1:47321")
+	host := "127.0.0.1:47321"
+	if w := do(h, "POST", host, "/api/config", "application/json", `{"plugins":{"aircon":{"enabled":true,"name":"会议室","model":"ybofb"}}}`); w.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", w.Code, w.Body.String())
+	}
+	if a := b.cfg.Plugins.Aircon; !a.Enabled || a.Name != "会议室" || a.Model != "ybofb" || b.cfg.Plugins.Lights.Lights == nil {
+		t.Fatalf("aircon %+v", b.cfg.Plugins)
+	}
+	if w := do(h, "POST", host, "/api/config", "application/json", `{"plugins":{"aircon":{"model":"nope"}}}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad model: %d", w.Code)
+	}
+	// The stepper's acts reach the plugin as they are.
+	if w := do(h, "POST", host, "/api/plugins/aircon/temp", "application/json", `{"act":"inc"}`); w.Code != http.StatusOK {
+		t.Fatalf("inc: %d %s", w.Code, w.Body.String())
+	}
+	if n := len(b.actions); n != 1 || b.actions[0] != (model.Action{Page: "aircon", Item: "temp", Act: "inc"}) {
+		t.Fatalf("actions %+v", b.actions)
 	}
 }
 

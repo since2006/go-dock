@@ -164,6 +164,29 @@ func (m MQTTConfig) BrokerFor(id string) string {
 // PluginsConfig holds one section per function-page plugin.
 type PluginsConfig struct {
 	Lights LightsConfig `json:"lights"`
+	Aircon AirconConfig `json:"aircon"`
+}
+
+// AirconConfig is the air conditioner page: a Gree unit the screen
+// switches by infrared.
+type AirconConfig struct {
+	Enabled bool `json:"enabled"`
+	// Name is the page title, at most 8 characters.
+	Name string `json:"name"`
+	// Model is the Gree remote to imitate: yaw1f (most) or ybofb.
+	Model string `json:"model"`
+}
+
+func (a AirconConfig) validate() error {
+	if utf8.RuneCountInString(strings.TrimSpace(a.Name)) > 8 {
+		return errors.New("空调名称最多 8 个字")
+	}
+	switch a.Model {
+	case "", "yaw1f", "ybofb":
+	default:
+		return fmt.Errorf("不认识的格力遥控器型号 %q", a.Model)
+	}
+	return nil
 }
 
 type LightsConfig struct {
@@ -244,10 +267,13 @@ func Default() Config {
 			StaleAfter:  Duration(12 * time.Hour),
 			MaxSessions: 12,
 		},
-		Log:     LogConfig{Level: "info"},
-		Update:  UpdateConfig{AutoCheck: true},
-		MQTT:    MQTTConfig{Brokers: List[Broker]{}},
-		Plugins: PluginsConfig{Lights: LightsConfig{Lights: List[Light]{}}},
+		Log:    LogConfig{Level: "info"},
+		Update: UpdateConfig{AutoCheck: true},
+		MQTT:   MQTTConfig{Brokers: List[Broker]{}},
+		Plugins: PluginsConfig{
+			Lights: LightsConfig{Lights: List[Light]{}},
+			Aircon: AirconConfig{Name: "空调", Model: "yaw1f"},
+		},
 	}
 }
 
@@ -287,7 +313,10 @@ func (c Config) Validate() error {
 	if err := c.MQTT.validate(); err != nil {
 		return err
 	}
-	return c.Plugins.Lights.validate(c.MQTT)
+	if err := c.Plugins.Lights.validate(c.MQTT); err != nil {
+		return err
+	}
+	return c.Plugins.Aircon.validate()
 }
 
 // configID is what broker and light ids look like; the screen protocol

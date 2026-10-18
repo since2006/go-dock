@@ -290,6 +290,22 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .scr-card .text { font-size: 16px; font-weight: 700; color: var(--c); }
 .scr-card.big .text { font-size: 20px; }
 .scr-card.off .text { color: var(--scr-3); }
+/* A select shows its option in the colour of its icon. */
+.scr-card.plain { --c: #E9E9E5; }
+.scr-card.plain.icon-cool { --c: #5AA9FF; }
+.scr-card.plain.icon-heat { --c: #FF9F43; }
+.scr-card.plain.icon-dry { --c: #4FD1C5; }
+.scr-card.plain.icon-auto { --c: #3DD68C; }
+.scr-card.stepper { cursor: default; gap: 14px; }
+.scr-card .steps { display: flex; align-items: center; gap: 12px; }
+.scr-card .step {
+  all: unset; box-sizing: border-box; width: 56px; height: 56px; border-radius: 50%; background: #1C1C1E;
+  color: var(--scr-text); font-size: 30px; line-height: 1; display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.scr-card .step:disabled { opacity: .3; cursor: default; }
+.scr-card .value { min-width: 100px; text-align: center; font-size: 36px; font-weight: 700; }
+.scr-card.big .step { width: 72px; height: 72px; font-size: 38px; }
+.scr-card.big .value { min-width: 140px; font-size: 52px; }
 @keyframes scr-pulse { 50% { opacity: .45; } }
 .screen { touch-action: pan-y; }
 .fn-nav { display: flex; align-items: center; gap: 6px; color: var(--text); font-weight: 600; white-space: pre; }
@@ -341,6 +357,8 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .light-row .rows { display: grid; gap: 10px; }
 .light-row hr { border: 0; border-top: 1px solid var(--border); margin: 4px 0; }
 @media (max-width: 640px) { .light-row .grid.three, .light-row .field-row { grid-template-columns: 1fr; } }
+.ac-live { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ac-live .live { margin-right: auto; }
 .light-row details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .light-row details[open] summary { margin-bottom: 10px; }
 .light-row details small { display: block; margin-top: 8px; }

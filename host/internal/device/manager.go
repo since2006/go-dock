@@ -59,6 +59,8 @@ type Status struct {
 	Pages bool `json:"pages,omitempty"`
 	// Beep: the firmware plays sounds on a buzzer (if one is wired up).
 	Beep bool `json:"beep,omitempty"`
+	// IR: the firmware sends infrared (if a transmitter is wired up).
+	IR bool `json:"ir,omitempty"`
 	// Incompatible: the device speaks another protocol version; it gets no
 	// snapshots but can still be updated.
 	Incompatible bool        `json:"incompatible,omitempty"`
@@ -96,6 +98,7 @@ type Manager struct {
 	flashReq chan flashJob
 	actions  chan struct{} // bounds taps being handled at once
 	beepReq  chan []Note   // a sound to try out
+	irReq    chan irLine   // ir_send lines to write
 	// waiting holds waitingTasks as of the last snapshot sent to a device
 	// that beeps; only the serve loop uses it. It outlives connections, so
 	// replugging the device does not beep again for the same tasks.
@@ -103,6 +106,7 @@ type Manager struct {
 
 	mu          sync.Mutex
 	pages       PageSource
+	irSink      func(raw []int)
 	opts        Options
 	status      Status
 	seq         uint64
@@ -134,6 +138,7 @@ func NewManager(src SnapshotSource, opts Options, hostVersion string, log *slog.
 		flashReq:     make(chan flashJob),
 		actions:      make(chan struct{}, 4),
 		beepReq:      make(chan []Note, 1),
+		irReq:        make(chan irLine, 4),
 		opts:         opts,
 		status:       Status{State: StateSearching},
 	}
@@ -236,7 +241,7 @@ func (m *Manager) Run(ctx context.Context) {
 
 // unlinked forgets the device while searching for one.
 func unlinked(s *Status) {
-	s.State, s.Port, s.Firmware, s.OTA, s.Pages, s.Beep, s.Incompatible, s.Width, s.Height = StateSearching, "", "", false, false, false, false, 0, 0
+	s.State, s.Port, s.Firmware, s.OTA, s.Pages, s.Beep, s.IR, s.Incompatible, s.Width, s.Height = StateSearching, "", "", false, false, false, false, false, 0, 0
 }
 
 // wait sleeps for d (forever when d is 0) or until a reconnect request.
@@ -292,7 +297,7 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 	defer hello.Stop()
 	var debounce <-chan time.Time
 
-	ready, incompatible, beepOK := false, false, false
+	ready, incompatible, beepOK, irOK := false, false, false, false
 	fail := func(err error) bool {
 		m.setError(fmt.Errorf("%s: %w", name, err))
 		return false
@@ -365,9 +370,9 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 				if !ready {
 					m.log.Info("设备握手完成", "fw", msg.FW, "w", msg.W, "h", msg.H)
 				}
-				ready, pagesOK, beepOK = true, msg.Pages > 0, msg.Beep > 0
+				ready, pagesOK, beepOK, irOK = true, msg.Pages > 0, msg.Beep > 0, msg.IR > 0
 				m.update(func(s *Status) {
-					s.State, s.Incompatible, s.Pages, s.Beep, s.Width, s.Height, s.Error = StateReady, false, pagesOK, beepOK, msg.W, msg.H, ""
+					s.State, s.Incompatible, s.Pages, s.Beep, s.IR, s.Width, s.Height, s.Error = StateReady, false, pagesOK, beepOK, irOK, msg.W, msg.H, ""
 				})
 				if err := push(true); err != nil {
 					return fail(err)
@@ -375,6 +380,10 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 			case "action":
 				if ready && !incompatible {
 					m.dispatch(ctx, model.Action{Page: msg.Page, Item: msg.Item, Act: msg.Act})
+				}
+			case "ir_recv":
+				if ready && !incompatible {
+					m.irReceived(msg.Raw)
 				}
 			case "ack":
 			case "log":
@@ -396,6 +405,12 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 		case <-heartbeat.C:
 			if !incompatible {
 				if err := push(true); err != nil {
+					return fail(err)
+				}
+			}
+		case ir := <-m.irReq:
+			if ready && irOK && !incompatible && time.Since(ir.at) < irStale {
+				if err := m.write(conn, ir.line); err != nil {
 					return fail(err)
 				}
 			}

@@ -172,6 +172,26 @@ func TestValidateMQTTAndLights(t *testing.T) {
 	}
 }
 
+func TestValidateAircon(t *testing.T) {
+	c := Default()
+	if c.Plugins.Aircon.Model != "yaw1f" || c.Plugins.Aircon.Name != "空调" {
+		t.Fatalf("defaults %+v", c.Plugins.Aircon)
+	}
+	c.Plugins.Aircon = AirconConfig{Enabled: true, Name: "会议室空调", Model: "ybofb"}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, a := range map[string]AirconConfig{
+		"long name": {Name: "会议室的那台格力空调"},
+		"model":     {Model: "yx1fsf"},
+	} {
+		c.Plugins.Aircon = a
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
 func TestGetSharesNothing(t *testing.T) {
 	s, _ := Load(filepath.Join(t.TempDir(), "config.json"))
 	c := s.Get()
