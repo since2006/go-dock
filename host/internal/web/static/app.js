@@ -298,7 +298,7 @@ function scrMeter(label, w, provider, now) {
   const color = pct >= 90 ? "#FF6B5E" : pct >= 70 ? "#FFB020" : `var(--scr-${provider})`;
   return el("div", { class: "scr-meter" },
     el("div", { class: "top" },
-      el("span", { class: "reset mono" }, el("b", {}, scrReset(w && w.resets_at, now)), ` / ${label}`),
+      el("span", { class: "reset" }, el("b", { class: "mono" }, scrReset(w && w.resets_at, now)), ` / ${label}`),
       el("span", { class: "pct mono" }, pct === null ? "—" : `${pct}%`)),
     el("div", { class: "bar" },
       el("div", { class: "fill", style: `width:${pct === null ? 0 : Math.max(pct, 2)}%;background:${color}` })),
@@ -397,7 +397,7 @@ function scrAgentBody(frame, dots) {
     return el("div", { class: "scr-urow" },
       el("span", { class: `name ${p}` }, PROVIDER_NAME[p]),
       scrMeter("5h", u.five_hour, p, now),
-      scrMeter("Weekly", u.seven_day, p, now),
+      scrMeter("7d", u.seven_day, p, now),
       el("div", { class: "scr-today" }, el("span", { class: "n mono" }, fmtTokens(u.today_tokens || 0)), el("span", { class: "l" }, "今日")),
     );
   }));

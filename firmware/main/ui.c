@@ -402,23 +402,23 @@ static void build_strip(lv_obj_t *p)
 // "4h 33m / 5h" on the left, the percentage on the right, the bar below.
 static void build_meter(lv_obj_t *row, meter_t *m, int x, const char *name)
 {
-    const int w = 182;
-    m->reset = text(row, font_get(FONT_MONO, 14), C_TEXT2);
-    lv_obj_set_pos(m->reset, x, 8);
+    const int w = 174;
+    m->reset = text(row, font_get(FONT_MONO, 19), 0xBDBDB8);
+    lv_obj_set_pos(m->reset, x, 7);
 
-    m->window = text(row, font_get(FONT_MONO, 14), C_TEXT5);
+    m->window = text(row, font_get(FONT_REGULAR, 17), C_TEXT3); // narrower than mono, leaves room for "100%"
     char buf[16];
     snprintf(buf, sizeof(buf), " / %s", name);
     lv_label_set_text(m->window, buf);
 
-    m->pct = text(row, font_get(FONT_MONO_BOLD, 22), C_TEXT);
+    m->pct = text(row, font_get(FONT_MONO_BOLD, 26), C_TEXT);
     lv_obj_set_width(m->pct, 80);
     lv_obj_set_style_text_align(m->pct, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_pos(m->pct, x + w - 80, 0);
 
     m->bar = lv_bar_create(row);
     lv_obj_remove_style_all(m->bar);
-    lv_obj_set_pos(m->bar, x, 32);
+    lv_obj_set_pos(m->bar, x, 34);
     lv_obj_set_size(m->bar, w, 7);
     lv_obj_set_style_bg_color(m->bar, lv_color_hex(C_TRACK), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(m->bar, LV_OPA_COVER, LV_PART_MAIN);
@@ -432,18 +432,18 @@ static void build_usage(lv_obj_t *p)
 {
     lv_obj_t *card = box(p, PAD_X, 54, SCR_W - 2 * PAD_X, 114, C_CARD, 18);
     for (int i = 0; i < 2; i++) {
-        lv_obj_t *row = box(card, 16, 10 + i * 50, 532, 44, 0, -1);
-        lv_obj_t *name = text(row, font_get(FONT_BOLD, 21), PROVIDER_COLOR[i]);
+        lv_obj_t *row = box(card, 16, 8 + i * 50, 532, 46, 0, -1);
+        lv_obj_t *name = text(row, font_get(FONT_BOLD, 24), PROVIDER_COLOR[i]);
         lv_label_set_text(name, PROVIDER_NAME[i]);
         lv_obj_align(name, LV_ALIGN_LEFT_MID, 0, 0);
-        build_meter(row, &ui.usage[i].m[0], 84, "5h");
-        build_meter(row, &ui.usage[i].m[1], 280, "Weekly");
+        build_meter(row, &ui.usage[i].m[0], 92, "5h");
+        build_meter(row, &ui.usage[i].m[1], 280, "7d");
 
-        ui.usage[i].today = text(row, font_get(FONT_MONO, 18), C_TEXT);
-        lv_obj_set_width(ui.usage[i].today, 58);
+        ui.usage[i].today = text(row, font_get(FONT_MONO, 21), C_TEXT);
+        lv_obj_set_width(ui.usage[i].today, 68);
         lv_obj_set_style_text_align(ui.usage[i].today, LV_TEXT_ALIGN_RIGHT, 0);
-        lv_obj_set_pos(ui.usage[i].today, 474, 0);
-        lv_obj_t *l = text(row, font_get(FONT_REGULAR, 14), C_TEXT4);
+        lv_obj_set_pos(ui.usage[i].today, 464, 0);
+        lv_obj_t *l = text(row, font_get(FONT_REGULAR, 16), C_TEXT4);
         lv_label_set_text(l, "今日");
         lv_obj_align(l, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
     }
@@ -1177,7 +1177,7 @@ static void render_usage(int64_t now)
             }
             fmt_reset(buf, sizeof(buf), w[k], now);
             set_text(m->reset, buf);
-            lv_obj_align_to(m->window, m->reset, LV_ALIGN_OUT_RIGHT_MID, 0, 0);
+            lv_obj_align_to(m->window, m->reset, LV_ALIGN_OUT_RIGHT_BOTTOM, 0, 0);
         }
         fmt_tokens(buf, sizeof(buf), s_have ? u->today_tokens : 0);
         set_text(ui.usage[i].today, buf);

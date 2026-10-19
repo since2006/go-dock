@@ -201,21 +201,21 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .scr-dots i { display: block; width: 6px; height: 6px; border-radius: 3px; background: #3A3A3C; }
 .scr-dots i.on { width: 18px; background: #E9E9E5; }
 
-.scr-usage { flex: none; background: var(--scr-card); border-radius: 18px; padding: 10px 16px; display: flex; flex-direction: column; gap: 6px; }
-.scr-urow { height: 44px; display: grid; grid-template-columns: 70px minmax(0, 1fr) minmax(0, 1fr) 58px; column-gap: 16px; align-items: center; }
-.scr-urow .name { font-size: 21px; font-weight: 700; }
+.scr-usage { flex: none; background: var(--scr-card); border-radius: 18px; padding: 8px 16px 10px; display: flex; flex-direction: column; gap: 4px; }
+.scr-urow { height: 46px; display: grid; grid-template-columns: 78px 174px 174px 64px; column-gap: 14px; align-items: center; }
+.scr-urow .name { font-size: 24px; font-weight: 700; }
 .scr-urow .name.claude { color: var(--scr-claude); }
 .scr-urow .name.codex { color: var(--scr-codex); }
-.scr-meter { display: flex; flex-direction: column; gap: 5px; }
+.scr-meter { align-self: start; display: flex; flex-direction: column; }
 .scr-meter .top { display: flex; justify-content: space-between; align-items: baseline; }
-.scr-meter .reset { font-size: 14px; color: #6F6E69; white-space: pre; }
-.scr-meter .reset b { font-weight: 500; color: var(--scr-2); }
-.scr-meter .pct { font-size: 22px; font-weight: 700; }
+.scr-meter .reset { font-size: 17px; color: var(--scr-3); white-space: pre; }
+.scr-meter .reset b { font-size: 19px; font-weight: 500; color: #BDBDB8; }
+.scr-meter .pct { font-size: 26px; font-weight: 700; }
 .scr-meter .bar { height: 7px; border-radius: 4px; background: var(--scr-track); overflow: hidden; }
 .scr-meter .fill { height: 100%; border-radius: 4px; }
-.scr-today { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
-.scr-today .n { font-size: 18px; font-weight: 500; }
-.scr-today .l { font-size: 14px; color: var(--scr-4); }
+.scr-today { align-self: stretch; position: relative; }
+.scr-today .n { position: absolute; top: 0; right: 0; font-size: 21px; font-weight: 500; }
+.scr-today .l { position: absolute; bottom: 0; right: 0; font-size: 16px; color: var(--scr-4); }
 
 .scr-tasks { flex: none; height: 258px; display: flex; gap: 8px; } /* SCR_LIST_H, the firmware's TASKS_H: 2px into the bottom padding */
 .scr-list { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; overflow: hidden; }

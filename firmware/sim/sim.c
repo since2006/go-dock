@@ -391,13 +391,14 @@ int main(int argc, char **argv)
     run(2 * SEC);
     save(out, "1-mixed");
 
-    // Near the limit, with an error.
+    // Near the limit, with an error; Codex shows the widest usage texts.
     reset();
     window(&s_snap.usage[DOCK_CLAUDE].five_hour, 94, 38 * 60);
     window(&s_snap.usage[DOCK_CLAUDE].seven_day, 71, 2 * 86400);
     s_snap.usage[DOCK_CLAUDE].today_tokens = 3620000;
-    window(&s_snap.usage[DOCK_CODEX].five_hour, 47, 80 * 60);
-    s_snap.usage[DOCK_CODEX].today_tokens = 655000;
+    window(&s_snap.usage[DOCK_CODEX].five_hour, 100, 4 * 3600 + 33 * 60);
+    window(&s_snap.usage[DOCK_CODEX].seven_day, 100, 4 * 86400 + 14 * 3600);
+    s_snap.usage[DOCK_CODEX].today_tokens = 12300000;
     add(DOCK_ERROR, DOCK_CLAUDE, "go-dock", "出错", "额度已用完，0:38 后恢复", 62);
     add(DOCK_APPROVAL, DOCK_CODEX, "api-svc", "需授权", "Bash: rm -rf dist", 15);
     add(DOCK_RUNNING, DOCK_CODEX, "a-very-long-project-name-that-overflows", "进行中",
