@@ -178,8 +178,8 @@ mkdir -p out && build-sim/dock_sim out    # 生成 out/*.ppm
 
 界面文字用 TinyTTF 在运行时渲染，一个字体文件覆盖所有字号：
 
-- **Noto Sans SC 常规体**：GB2312 全部 6763 个汉字
-- **Noto Sans SC 粗体**：3755 个常用字，缺字自动回退到常规体
+- **Noto Sans SC 常规体**：GB2312 全部 6763 个汉字，以及常用符号（`§`、`•`、`–`、`≥`、`✓`、`①`、制表符、全角字符等）
+- **Noto Sans SC 粗体**：3755 个常用字和同样的符号，缺字自动回退到常规体
 - **JetBrains Mono**：数字和英文
 
 要调整字符集，用 `tools/make_fonts.py` 重新生成（需要 `pip install fonttools`）。

@@ -22,13 +22,29 @@ from fontTools.varLib import instancer
 ASCII = "".join(chr(c) for c in range(0x20, 0x7F))
 # Punctuation and symbols the UI or typical task text uses.
 EXTRA = "，。、；：？！“”‘’（）《》【】「」『』—…·～￥％　°℃×÷±←→↑↓↻●○■□▲△★☆√"
+# Unicode blocks of symbols task text uses (§, •, –, ≥, ✓, ①, box drawing in
+# command output…); only what the font has gets in.
+SYMBOLS = "".join(
+    chr(c)
+    for first, last in (
+        (0x00A0, 0x017F),  # Latin-1 Supplement, Latin Extended-A
+        (0x2010, 0x205E),  # General Punctuation
+        (0x2100, 0x214F),  # Letterlike Symbols
+        (0x2190, 0x23FF),  # Arrows, Mathematical Operators, Miscellaneous Technical
+        (0x2460, 0x27BF),  # Enclosed Alphanumerics to Dingbats
+        (0x3000, 0x303F),  # CJK Symbols and Punctuation
+        (0xFF00, 0xFFEF),  # Halfwidth and Fullwidth Forms
+    )
+    for c in range(first, last + 1)
+)
 
 
-def gb2312(last_row):
-    """GB2312 hanzi: level 1 is rows 0xB0-0xD7 (3755 common characters),
+def gb2312(first_row, last_row):
+    """GB2312 rows: 0xA1-0xA9 are symbols, kana, Greek, Cyrillic and box
+    drawing; hanzi level 1 is rows 0xB0-0xD7 (3755 common characters),
     level 2 continues to 0xF7 (3008 more)."""
     out = []
-    for hi in range(0xB0, last_row + 1):
+    for hi in range(first_row, last_row + 1):
         for lo in range(0xA1, 0xFF):
             try:
                 out.append(bytes([hi, lo]).decode("gb2312"))
@@ -56,12 +72,13 @@ def build(src, weight, text, dst):
 def main():
     noto, mono, outdir = sys.argv[1:4]
     os.makedirs(outdir, exist_ok=True)
-    common = gb2312(0xD7)
-    full = gb2312(0xF7)
+    symbols = EXTRA + SYMBOLS + gb2312(0xA1, 0xA9)
+    common = gb2312(0xB0, 0xD7)
+    full = gb2312(0xB0, 0xF7)
     # Regular covers all of GB2312 for task text; Bold only the common
     # level and falls back to Regular at runtime.
-    build(noto, 400, ASCII + EXTRA + full, os.path.join(outdir, "NotoSansSC-Regular.ttf"))
-    build(noto, 700, ASCII + EXTRA + common, os.path.join(outdir, "NotoSansSC-Bold.ttf"))
+    build(noto, 400, ASCII + symbols + full, os.path.join(outdir, "NotoSansSC-Regular.ttf"))
+    build(noto, 700, ASCII + symbols + common, os.path.join(outdir, "NotoSansSC-Bold.ttf"))
     build(mono, 500, ASCII, os.path.join(outdir, "JetBrainsMono-Medium.ttf"))
     build(mono, 700, ASCII, os.path.join(outdir, "JetBrainsMono-Bold.ttf"))
 
