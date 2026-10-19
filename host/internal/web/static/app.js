@@ -178,8 +178,8 @@ function renderSessions(snap) {
   ); }));
 }
 
-// The assistant's latest text above what the session is doing now, as on
-// the screen (scrLines); the session name sits under the project.
+// The assistant's latest text above what the session is doing now; the
+// session name sits under the project.
 function sessionLines(s) {
   const lines = [s.message, waitingText(s) || s.detail].filter(Boolean);
   return lines.length ? lines : [""];
@@ -305,24 +305,21 @@ function scrMeter(label, w, provider, now) {
   );
 }
 
-// Task list layout, shared with the firmware (docs/protocol-v1.md §7.1):
-// the project line carries the session name; below it a session row is
-// 80 px with the assistant's latest text and an action line, 60 px with one;
-// each subagent adds a 32 px row under it; groups never split across pages.
-const SCR_LIST_H = 258, SCR_MAIN_TALL = 80, SCR_MAIN = 60, SCR_SUB = 32, SCR_SUB_GAP = 4, SCR_GROUP_GAP = 6;
+// Task list layout, shared with the firmware (docs/protocol-v1.md §7.1): a
+// session row (126 px, two to a page) has the project and state, then the
+// session name and turn time, then one line of text (scrText); each
+// subagent adds a 36 px row under it; groups never split across pages.
+const SCR_LIST_H = 258, SCR_MAIN = 126, SCR_SUB = 36, SCR_SUB_GAP = 4, SCR_GROUP_GAP = 6;
 
-// Lines under the project line: the assistant's latest text, then what the
-// session is doing; older hosts only send text, which may be the title.
-// None at all leaves the project line alone, centred in the row.
-function scrLines(s) {
-  const lines = [s.msg, s.detail].filter(Boolean);
-  if (lines.length) return lines;
-  return s.text && s.text !== s.title ? [s.text] : [];
+// The line under the project line: what the session is doing, else the
+// assistant's latest text; older hosts only send text, which may be the
+// title. None leaves the project line alone, centred in the row.
+function scrText(s) {
+  return s.detail || s.msg || (s.text && s.text !== s.title ? s.text : "");
 }
 
 function scrGroupHeight(s) {
-  const main = scrLines(s).length === 2 ? SCR_MAIN_TALL : SCR_MAIN;
-  return main + (s.agents || []).length * (SCR_SUB + SCR_SUB_GAP);
+  return SCR_MAIN + (s.agents || []).length * (SCR_SUB + SCR_SUB_GAP);
 }
 
 function scrPages(sessions) {
@@ -343,26 +340,24 @@ function scrPages(sessions) {
 }
 
 function scrGroup(s, now) {
-  const lines = scrLines(s);
-  const tall = lines.length === 2;
-  const row = el("div", { class: `scr-row ${s.state} ${tall ? "tall" : ""}` },
-    el("span", { class: "chip" }, scrIcon(SCR_ICONS[s.state] ? s.state : "idle", 22, s.state === "running" || s.state === "done" ? 2.4 : 2.2)),
+  const text = scrText(s);
+  const row = el("div", { class: `scr-row ${s.state}` },
+    el("span", { class: "chip" }, scrIcon(SCR_ICONS[s.state] ? s.state : "idle", 24, s.state === "running" || s.state === "done" ? 2.4 : 2.2)),
     el("div", { class: "mid" },
-      // Project line: names on the left, state, time and this turn's output
-      // tokens ("1:55 ↓6.5K", like Claude Code's spinner) on the right, so
-      // the lines below get the full width.
+      // Project and provider, the state at the right end; then the session
+      // name, this turn's time and output tokens ("1:55 ↓6.5K", like Claude
+      // Code's spinner) at the right end.
       el("div", { class: "l1" }, el("span", { class: "project" }, s.project || "—"),
-        s.title ? el("span", { class: "sname" }, s.title) : null,
         el("span", { class: `prov ${s.p}` }, PROVIDER_NAME[s.p] || s.p),
+        el("span", { class: "end" }, el("span", { class: "label" }, s.label))),
+      el("div", { class: "l2" }, el("span", { class: "sname" }, s.title || ""),
         el("span", { class: "end" },
-          el("span", { class: "label" }, s.label),
           el("span", { class: "time mono" }, scrRowTime(s, now),
             s.turn_output ? el("span", { class: "tok" }, ` ↓${fmtTokens(s.turn_output)}`) : null))),
-      tall ? el("span", { class: "msg" }, lines[0]) : null,
-      lines.length ? el("span", { class: "detail" }, lines[lines.length - 1]) : null),
+      text ? el("span", { class: "detail" }, text) : null),
   );
   const subs = (s.agents || []).map((a) => el("div", { class: `scr-sub ${a.state}` },
-    el("span", { class: "dot" }, scrIcon(SCR_ICONS[a.state] ? a.state : "idle", 14, 2.6)),
+    el("span", { class: "dot" }, scrIcon(SCR_ICONS[a.state] ? a.state : "idle", 16, 2.6)),
     el("span", { class: "type" }, a.type),
     el("span", { class: "text" }, a.text || ""),
     el("span", { class: "end" },

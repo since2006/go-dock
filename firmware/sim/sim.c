@@ -430,7 +430,8 @@ int main(int argc, char **argv)
     run(2 * SEC);
     save(out, "5-background");
 
-    // The assistant's latest text under the project line, as in Claude Code.
+    // Under the project line what the session is doing, else the
+    // assistant's latest text.
     reset();
     window(&s_snap.usage[DOCK_CLAUDE].five_hour, 41, 4 * 3600 + 33 * 60);
     window(&s_snap.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 14 * 3600);
@@ -448,7 +449,30 @@ int main(int argc, char **argv)
     run(2 * SEC);
     save(out, "6-message");
 
-    // Turn clock and output tokens on the project line: running counts on
+    // Two sessions fill a page; swiping up shows the next two. Symbols
+    // beyond GB2312's hanzi (§, •, –, ≥, ✓) have glyphs.
+    reset();
+    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 41, 4 * 3600 + 33 * 60);
+    window(&s_snap.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 14 * 3600);
+    add(DOCK_RUNNING, DOCK_CLAUDE, "go-dock", "进行中", "Bash: idf.py build", 95);
+    title("硬件刷机");
+    turn(95, 6500);
+    detail("Bash: idf.py build");
+    add(DOCK_DONE, DOCK_CLAUDE, "host-app", "已完成", "", 300);
+    title("整理布局文档");
+    msg("§7.1 的布局说明已更新 • 行高 126px");
+    add(DOCK_DONE, DOCK_CODEX, "scripts", "已完成", "", 900);
+    msg("迁移完成 ✓ 3 张表 – 耗时 ≥ 2 分钟");
+    add(DOCK_DONE, DOCK_CLAUDE, "dotfiles", "已完成", "", 3600);
+    msg("zsh 配置整理好了，去掉了重复的 PATH。");
+    send();
+    run(2 * SEC);
+    save(out, "22-two-a-page");
+    swipe(300, 300, 0, -150);
+    run(1 * SEC);
+    save(out, "23-two-a-page-next");
+
+    // Turn clock and output tokens on the second line: running counts on
     // from turn_secs, approval holds it; a row with no text is centred.
     reset();
     window(&s_snap.usage[DOCK_CLAUDE].five_hour, 41, 4 * 3600 + 33 * 60);

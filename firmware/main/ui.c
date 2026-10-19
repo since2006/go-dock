@@ -65,22 +65,22 @@ static const struct {
 };
 
 // Task list layout, shared with the web preview (docs/protocol-v1.md
-// §7.1): the project line carries the session name on the left and the
-// state, time and turn tokens on the right; the lines below span the full
-// width. A session row is 80 px with the assistant's latest text and an
-// action line, 60 px with one or none (then the project line is centred);
-// each subagent adds a 32 px row under it; a session and its subagents
-// never split across pages.
-#define MAIN_H 60
-#define MAIN_H_TALL 80
-#define SUB_H 32
+// §7.1): a session row is 126 px, so two fill a page, with three full-width
+// lines: the project and the state; the session name and the turn's time
+// and tokens; one line of text (see row_text), without which the first two
+// are centred. Each subagent adds a 36 px row under it; a session and its
+// subagents never split across pages.
+#define MAIN_H 126
+#define SUB_H 36
 #define SUB_GAP 4
 #define GROUP_GAP 6
 #define SUB_X 52
-#define MAX_MAIN 4 // session rows that fit on a page
-#define MAX_SUB 6  // subagent rows that fit on a page
+#define SUB_TIME_W 72  // a subagent's time, right-aligned
+#define SUB_LABEL_W 72 // and its state before it
+#define MAX_MAIN 2     // session rows that fit on a page
+#define MAX_SUB 6      // subagent rows that fit on a page
 #define MAX_PAGES 32
-#define CHIP 40
+#define CHIP 44
 #define MID_X (12 + CHIP + 12)
 #define END_X (LIST_W - 14)     // right edge of the row's text
 #define LINE_W (END_X - MID_X) // lines under the project line
@@ -98,8 +98,7 @@ typedef struct {
 } meter_t;
 
 typedef struct {
-    lv_obj_t *obj, *chip, *icon, *spinner, *project, *name, *prov, *label, *time, *tok, *msg,
-        *detail;
+    lv_obj_t *obj, *chip, *icon, *spinner, *project, *name, *prov, *label, *time, *tok, *text;
 } row_t;
 
 typedef struct {
@@ -323,21 +322,16 @@ static void fmt_row_time(char *buf, size_t n, const dock_session_t *s, int64_t n
     fmt_duration(buf, n, sec);
 }
 
-static bool is_tall(const dock_session_t *s)
-{
-    return s->msg[0] && s->detail[0];
-}
-
-// The one line under the project line of a short row: msg or detail,
-// whichever there is; older hosts only send text, which may repeat the
+// The line under the project line: what the session is doing, else the
+// assistant's latest text; older hosts only send text, which may repeat the
 // session name. "" leaves the project line alone.
-static const char *only_line(const dock_session_t *s)
+static const char *row_text(const dock_session_t *s)
 {
-    if (s->msg[0]) {
-        return s->msg;
-    }
     if (s->detail[0]) {
         return s->detail;
+    }
+    if (s->msg[0]) {
+        return s->msg;
     }
     return strcmp(s->text, s->title) ? s->text : "";
 }
@@ -352,7 +346,7 @@ static void layout_pages(void)
     s_page_start[0] = 0;
     for (int i = 0; i < n; i++) {
         const dock_session_t *s = &s_snap->sessions[i];
-        int h = (is_tall(s) ? MAIN_H_TALL : MAIN_H) + s->agent_count * (SUB_H + SUB_GAP);
+        int h = MAIN_H + s->agent_count * (SUB_H + SUB_GAP);
         bool fits = mains == 0 || (used + GROUP_GAP + h <= TASKS_H && mains < MAX_MAIN && subs + s->agent_count <= MAX_SUB);
         if (!fits && s_page_count < MAX_PAGES) {
             s_page_start[s_page_count++] = i;
@@ -381,14 +375,14 @@ static int page_of(int index)
 // the link dot and the clock on the right.
 static void build_strip(lv_obj_t *p)
 {
-    ui.title = text(p, font_get(FONT_BOLD, 20), C_TEXT);
+    ui.title = text(p, font_get(FONT_BOLD, 22), C_TEXT);
     lv_label_set_text(ui.title, "Agent");
     lv_obj_set_pos(ui.title, PAD_X, TOP);
 
-    ui.summary = line(p, font_get(FONT_REGULAR, 15), C_TEXT2, 360);
+    ui.summary = line(p, font_get(FONT_REGULAR, 17), C_TEXT2, 360);
     lv_obj_align_to(ui.summary, ui.title, LV_ALIGN_OUT_RIGHT_BOTTOM, 12, -3);
 
-    ui.clock = text(p, font_get(FONT_MONO, 20), C_TEXT);
+    ui.clock = text(p, font_get(FONT_MONO, 22), C_TEXT);
     lv_label_set_text(ui.clock, "--:--");
     lv_obj_align(ui.clock, LV_ALIGN_TOP_RIGHT, -PAD_X, TOP + 2);
 
@@ -408,15 +402,15 @@ static void build_strip(lv_obj_t *p)
 static void build_meter(lv_obj_t *row, meter_t *m, int x, const char *name)
 {
     const int w = 182;
-    m->reset = text(row, font_get(FONT_MONO, 13), C_TEXT2);
-    lv_obj_set_pos(m->reset, x, 7);
+    m->reset = text(row, font_get(FONT_MONO, 14), C_TEXT2);
+    lv_obj_set_pos(m->reset, x, 8);
 
-    m->window = text(row, font_get(FONT_MONO, 13), C_TEXT5);
+    m->window = text(row, font_get(FONT_MONO, 14), C_TEXT5);
     char buf[16];
     snprintf(buf, sizeof(buf), " / %s", name);
     lv_label_set_text(m->window, buf);
 
-    m->pct = text(row, font_get(FONT_MONO_BOLD, 21), C_TEXT);
+    m->pct = text(row, font_get(FONT_MONO_BOLD, 22), C_TEXT);
     lv_obj_set_width(m->pct, 80);
     lv_obj_set_style_text_align(m->pct, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_pos(m->pct, x + w - 80, 0);
@@ -438,17 +432,17 @@ static void build_usage(lv_obj_t *p)
     lv_obj_t *card = box(p, PAD_X, 54, SCR_W - 2 * PAD_X, 114, C_CARD, 18);
     for (int i = 0; i < 2; i++) {
         lv_obj_t *row = box(card, 16, 10 + i * 50, 532, 44, 0, -1);
-        lv_obj_t *name = text(row, font_get(FONT_BOLD, 19), PROVIDER_COLOR[i]);
+        lv_obj_t *name = text(row, font_get(FONT_BOLD, 21), PROVIDER_COLOR[i]);
         lv_label_set_text(name, PROVIDER_NAME[i]);
         lv_obj_align(name, LV_ALIGN_LEFT_MID, 0, 0);
         build_meter(row, &ui.usage[i].m[0], 84, "5h");
         build_meter(row, &ui.usage[i].m[1], 280, "Weekly");
 
-        ui.usage[i].today = text(row, font_get(FONT_MONO, 17), C_TEXT);
+        ui.usage[i].today = text(row, font_get(FONT_MONO, 18), C_TEXT);
         lv_obj_set_width(ui.usage[i].today, 58);
         lv_obj_set_style_text_align(ui.usage[i].today, LV_TEXT_ALIGN_RIGHT, 0);
         lv_obj_set_pos(ui.usage[i].today, 474, 0);
-        lv_obj_t *l = text(row, font_get(FONT_REGULAR, 13), C_TEXT4);
+        lv_obj_t *l = text(row, font_get(FONT_REGULAR, 14), C_TEXT4);
         lv_label_set_text(l, "今日");
         lv_obj_align(l, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
     }
@@ -467,7 +461,7 @@ static lv_obj_t *spinner(lv_obj_t *parent, int size, int width)
     return sp;
 }
 
-// Session row; positions depend on its height and are set when rendered.
+// Session row; positions depend on its lines and are set when rendered.
 static void build_row(lv_obj_t *p, row_t *r)
 {
     r->obj = box(p, 0, 0, LIST_W, MAIN_H, C_CARD, 14);
@@ -478,26 +472,20 @@ static void build_row(lv_obj_t *p, row_t *r)
     lv_obj_set_style_bg_opa(r->chip, 41, 0); // ~16% of the state color
     r->icon = text(r->chip, &lv_font_montserrat_20, C_TEXT);
     lv_obj_center(r->icon);
-    r->spinner = spinner(r->chip, 22, 3);
+    r->spinner = spinner(r->chip, 24, 3);
     lv_obj_center(r->spinner);
 
-    const lv_font_t *fp = font_get(FONT_BOLD, 22);
-    r->project = text(r->obj, fp, C_TEXT);
-    lv_label_set_long_mode(r->project, LV_LABEL_LONG_DOT);
-    lv_obj_set_height(r->project, lv_font_get_line_height(fp)); // one line, "..." when cut
-    const lv_font_t *fn = font_get(FONT_REGULAR, 14);
-    r->name = text(r->obj, fn, C_TEXT4);
-    lv_label_set_long_mode(r->name, LV_LABEL_LONG_DOT);
-    lv_obj_set_height(r->name, lv_font_get_line_height(fn));
-    r->prov = text(r->obj, font_get(FONT_BOLD, 13), C_TEXT);
+    // Project name and provider tag, the state at the right end.
+    r->project = line(r->obj, font_get(FONT_BOLD, 30), C_TEXT, LINE_W);
+    r->prov = text(r->obj, font_get(FONT_BOLD, 16), C_TEXT);
+    r->label = text(r->obj, font_get(FONT_BOLD, 22), C_TEXT);
 
-    // State, time and " ↓6.5K" at the right end of the project line.
-    r->label = text(r->obj, font_get(FONT_BOLD, 18), C_TEXT);
-    r->time = text(r->obj, font_get(FONT_MONO, 15), C_TEXT3);
-    r->tok = text(r->obj, font_get(FONT_MONO, 15), C_TEXT5);
+    // Session name, the time and " ↓6.5K" at the right end.
+    r->name = line(r->obj, font_get(FONT_REGULAR, 20), 0xC9C9C4, LINE_W);
+    r->time = text(r->obj, font_get(FONT_MONO, 20), C_TEXT3);
+    r->tok = text(r->obj, font_get(FONT_MONO, 20), C_TEXT5);
 
-    r->msg = line(r->obj, font_get(FONT_REGULAR, 15), 0xC9C9C4, LINE_W);
-    r->detail = line(r->obj, font_get(FONT_REGULAR, 16), C_TEXT2, LINE_W);
+    r->text = line(r->obj, font_get(FONT_REGULAR, 24), C_TEXT2, LINE_W);
 }
 
 // Subagent row, indented under its session.
@@ -505,21 +493,21 @@ static void build_sub(lv_obj_t *p, sub_t *u)
 {
     const int w = LIST_W - SUB_X;
     u->obj = box(p, SUB_X, 0, w, SUB_H, 0x0B0B0C, 10);
-    u->icon = text(u->obj, &lv_font_montserrat_12, C_TEXT);
+    u->icon = text(u->obj, &lv_font_montserrat_14, C_TEXT);
     lv_obj_align(u->icon, LV_ALIGN_LEFT_MID, 11, 0);
-    u->spinner = spinner(u->obj, 14, 2);
-    lv_obj_align(u->spinner, LV_ALIGN_LEFT_MID, 9, 0);
-    u->type = text(u->obj, font_get(FONT_BOLD, 15), C_TEXT);
-    lv_obj_align(u->type, LV_ALIGN_LEFT_MID, 32, 0);
-    u->text = line(u->obj, font_get(FONT_REGULAR, 14), C_TEXT2, 200);
-    u->time = text(u->obj, font_get(FONT_MONO, 13), C_TEXT3);
-    lv_obj_set_width(u->time, 56);
+    u->spinner = spinner(u->obj, 16, 2);
+    lv_obj_align(u->spinner, LV_ALIGN_LEFT_MID, 10, 0);
+    u->type = text(u->obj, font_get(FONT_BOLD, 18), C_TEXT);
+    lv_obj_align(u->type, LV_ALIGN_LEFT_MID, 36, 0);
+    u->text = line(u->obj, font_get(FONT_REGULAR, 17), C_TEXT2, 200);
+    u->time = text(u->obj, font_get(FONT_MONO, 16), C_TEXT3);
+    lv_obj_set_width(u->time, SUB_TIME_W);
     lv_obj_set_style_text_align(u->time, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(u->time, LV_ALIGN_RIGHT_MID, -12, 0);
-    u->label = text(u->obj, font_get(FONT_BOLD, 14), C_TEXT);
-    lv_obj_set_width(u->label, 64);
+    u->label = text(u->obj, font_get(FONT_BOLD, 17), C_TEXT);
+    lv_obj_set_width(u->label, SUB_LABEL_W);
     lv_obj_set_style_text_align(u->label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_align(u->label, LV_ALIGN_RIGHT_MID, -12 - 56 - 6, 0);
+    lv_obj_align(u->label, LV_ALIGN_RIGHT_MID, -12 - SUB_TIME_W - 6, 0);
 }
 
 static void go_page(int delta)
@@ -582,12 +570,12 @@ static void build_tasks(lv_obj_t *p)
     }
 
     ui.empty = box(p, PAD_X, TASKS_Y, SCR_W - 2 * PAD_X, TASKS_H, 0x0B0B0C, 18);
-    lv_obj_t *t = text(ui.empty, font_get(FONT_BOLD, 24), C_TEXT);
+    lv_obj_t *t = text(ui.empty, font_get(FONT_BOLD, 26), C_TEXT);
     lv_label_set_text(t, "没有进行中的任务");
-    lv_obj_align(t, LV_ALIGN_CENTER, 0, -14);
-    lv_obj_t *s = text(ui.empty, font_get(FONT_REGULAR, 16), C_TEXT3);
+    lv_obj_align(t, LV_ALIGN_CENTER, 0, -16);
+    lv_obj_t *s = text(ui.empty, font_get(FONT_REGULAR, 18), C_TEXT3);
     lv_label_set_text(s, "Claude 和 Codex 都在待命");
-    lv_obj_align(s, LV_ALIGN_CENTER, 0, 22);
+    lv_obj_align(s, LV_ALIGN_CENTER, 0, 24);
 
     ui.pager = box(p, SCR_W - PAD_X - 16, TASKS_Y, 16, TASKS_H, 0, -1);
     lv_obj_add_flag(ui.pager, LV_OBJ_FLAG_CLICKABLE);
@@ -1149,9 +1137,8 @@ static void show_state_icon(lv_obj_t *icon, lv_obj_t *spin, dock_state_t st, uin
 // Lays out one session row at y and returns its height.
 static int render_main(row_t *r, const dock_session_t *s, int y, int64_t now)
 {
-    bool tall = is_tall(s);
-    const char *one = tall ? "" : only_line(s);
-    int h = tall ? MAIN_H_TALL : MAIN_H;
+    const char *text = row_text(s);
+    int h = MAIN_H;
     uint32_t color = STATE[s->state].color;
     char buf[32];
 
@@ -1167,11 +1154,10 @@ static int render_main(row_t *r, const dock_session_t *s, int y, int64_t now)
     show_state_icon(r->icon, r->spinner, s->state, color);
     lv_obj_center(r->icon);
 
-    // Project line: project name, session name in small type and provider
-    // tag on the left; state, time and this turn's output
-    // tokens ("1:55 ↓6.5K", like Claude Code's spinner) on the right. All
-    // but the names stay whole; the session name gives way first, then the
-    // project name.
+    // First line: project name and provider tag, the state at the right
+    // end. Second: the session name, then this turn's time and output tokens
+    // ("1:55 ↓6.5K", like Claude Code's spinner) at the right end. Only the
+    // names give way.
     set_text(r->prov, PROVIDER_NAME[s->provider]);
     set_color(r->prov, PROVIDER_COLOR[s->provider]);
     set_text(r->label, s->label[0] ? s->label : STATE[s->state].label);
@@ -1193,59 +1179,33 @@ static int render_main(row_t *r, const dock_session_t *s, int y, int64_t now)
     set_text(r->name, s->title);
     lv_obj_update_layout(r->obj);
 
-    int time_x = END_X - lv_obj_get_width(r->time) - (s->turn_output > 0 ? lv_obj_get_width(r->tok) : 0);
-    int label_x = time_x - 8 - lv_obj_get_width(r->label);
-    int room = label_x - 12 - MID_X - 8 - lv_obj_get_width(r->prov); // project and session name
+    // Baselines of the three lines; without text the first two are centred.
+    int b1 = text[0] ? 41 : 59, b2 = b1 + 32, b3 = b2 + 35;
+
+    int label_x = END_X - lv_obj_get_width(r->label);
+    int room = label_x - 12 - MID_X - 8 - lv_obj_get_width(r->prov);
     int pw = lv_obj_get_width(r->project);
     if (pw > room) {
         pw = room > 1 ? room : 1;
         lv_obj_set_width(r->project, pw);
     }
-    int py = tall ? 5 : one[0] ? 4 : (h - lv_obj_get_height(r->project)) / 2;
-    int base = py + ascent(r->project);
-    lv_obj_set_pos(r->project, MID_X, py);
-    int x = MID_X + pw + 8;
-    int left = room - pw - 8;
-    if (s->title[0] && left >= 32) {
-        int nw = lv_obj_get_width(r->name);
-        if (nw > left) {
-            nw = left;
-            lv_obj_set_width(r->name, nw);
-        }
-        lv_obj_remove_flag(r->name, LV_OBJ_FLAG_HIDDEN);
-        on_baseline(r->name, x, base);
-        x += nw + 8;
-    } else {
-        lv_obj_add_flag(r->name, LV_OBJ_FLAG_HIDDEN);
-    }
-    on_baseline(r->prov, x, base);
-    on_baseline(r->label, label_x, base);
-    on_baseline(r->time, time_x, base);
-    on_baseline(r->tok, time_x + lv_obj_get_width(r->time), base);
+    on_baseline(r->project, MID_X, b1);
+    on_baseline(r->prov, MID_X + pw + 8, b1);
+    on_baseline(r->label, label_x, b1);
 
-    // Full-width lines below: in tall rows the assistant's latest text, then
-    // what the session is doing; in short rows whichever there is.
-    if (tall) {
-        lv_obj_remove_flag(r->msg, LV_OBJ_FLAG_HIDDEN);
-        set_text(r->msg, s->msg);
-        lv_obj_set_pos(r->msg, MID_X, 35);
-        lv_obj_set_style_text_font(r->detail, font_get(FONT_REGULAR, 15), 0);
-        set_color(r->detail, C_TEXT3);
-        set_text(r->detail, s->detail);
-        lv_obj_set_pos(r->detail, MID_X, 56);
-    } else {
-        lv_obj_add_flag(r->msg, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_style_text_font(r->detail, font_get(FONT_REGULAR, 16), 0);
-        set_color(r->detail, C_TEXT2);
-        set_text(r->detail, one);
-        lv_obj_set_pos(r->detail, MID_X, 34);
+    int time_x = END_X - lv_obj_get_width(r->time) - (s->turn_output > 0 ? lv_obj_get_width(r->tok) : 0);
+    room = time_x - 12 - MID_X;
+    if (lv_obj_get_width(r->name) > room) {
+        lv_obj_set_width(r->name, room > 1 ? room : 1);
     }
-    if (tall || one[0]) {
-        lv_obj_remove_flag(r->detail, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(r->detail, LV_OBJ_FLAG_HIDDEN);
-    }
-    lv_obj_set_height(r->detail, lv_font_get_line_height(lv_obj_get_style_text_font(r->detail, 0)));
+    on_baseline(r->name, MID_X, b2);
+    show(r->name, s->title[0]);
+    on_baseline(r->time, time_x, b2);
+    on_baseline(r->tok, time_x + lv_obj_get_width(r->time), b2);
+
+    set_text(r->text, text);
+    on_baseline(r->text, MID_X, b3);
+    show(r->text, text[0]);
     return h;
 }
 
@@ -1277,7 +1237,7 @@ static void render_sub(sub_t *u, const dock_agent_t *a, int y, int64_t now)
     }
     lv_obj_update_layout(u->obj);
     int x = lv_obj_get_x(u->type) + lv_obj_get_width(u->type) + 8;
-    int end = LIST_W - SUB_X - 12 - 56 - 6 - (labelled ? 64 + 6 : 0);
+    int end = LIST_W - SUB_X - 12 - SUB_TIME_W - 6 - (labelled ? SUB_LABEL_W + 6 : 0);
     lv_obj_set_width(u->text, end > x ? end - x : 1);
     set_text(u->text, a->text);
     lv_obj_align(u->text, LV_ALIGN_LEFT_MID, x, 0);
