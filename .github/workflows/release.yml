@@ -75,7 +75,7 @@ jobs:
         run: echo "${GITHUB_REF_NAME#v}" > firmware/version.txt
       - uses: espressif/esp-idf-ci-action@v1.2.0
         with:
-          esp_idf_version: v5.5.4
+          esp_idf_version: v6.1
           target: esp32s3
           path: firmware
           # go-dock-firmware-v2.bin: one image from address 0x0 (bootloader,

@@ -1,6 +1,6 @@
 # go-dock 屏幕固件
 
-运行在微雪 ESP32-S3-Touch-AMOLED-2.41 上的固件：通过 USB 接收 go-dock 发来的数据，在 600×450 的屏幕上显示 Claude / Codex 的额度和任务状态。用 ESP-IDF 5.5 + LVGL 9 编写，界面与网页「设备预览」一致（见 [docs/protocol-v1.md](../docs/protocol-v1.md) §7.1）。
+运行在微雪 ESP32-S3-Touch-AMOLED-2.41 上的固件：通过 USB 接收 go-dock 发来的数据，在 600×450 的屏幕上显示 Claude / Codex 的额度和任务状态。用 ESP-IDF 6.1 + LVGL 9 编写，界面与网页「设备预览」一致（见 [docs/protocol-v1.md](../docs/protocol-v1.md) §7.1）。
 
 ## 只支持 V2 板
 
@@ -48,11 +48,11 @@ esptool.py --chip esp32s3 write_flash 0x0 go-dock-firmware-v2.bin
 
 ### 方式二：从源码编译
 
-1. 安装 ESP-IDF v5.5.4（只需一次）：
+1. 安装 ESP-IDF v6.1（只需一次；也可以用乐鑫的 [EIM 安装器](https://docs.espressif.com/projects/idf-im-ui/en/latest/)，之后用 `. ~/.espressif/tools/activate_idf_v6.1.sh` 代替下面的 `export.sh`）：
 
    ```sh
    mkdir -p ~/esp && cd ~/esp
-   git clone -b v5.5.4 --recursive https://github.com/espressif/esp-idf.git
+   git clone -b v6.1 --recursive https://github.com/espressif/esp-idf.git
    cd esp-idf && ./install.sh esp32s3
    python3 tools/idf_tools.py install cmake ninja   # macOS 上没有 cmake/ninja 时
    ```

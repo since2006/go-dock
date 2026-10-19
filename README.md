@@ -196,7 +196,7 @@ git tag v0.2.0 && git push origin v0.2.0
 固件：
 
 ```sh
-. ~/esp/esp-idf/export.sh
+. ~/esp/esp-idf/export.sh   # ESP-IDF v6.1；用 EIM 安装的是 . ~/.espressif/tools/activate_idf_v6.1.sh
 cd firmware && idf.py build
 ```
 

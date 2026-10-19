@@ -18,7 +18,7 @@ Guidance for AI coding agents working in this repository.
   - `internal/autostart/` — login item per OS (LaunchAgent / systemd user unit or XDG / HKCU Run).
   - `internal/update/` — checks GitHub Releases, verifies and replaces the executable; `cmd/go-dock/restart_*.go` restarts it.
   - `internal/config/`, `internal/logx/`, `internal/ingest/`, `internal/procutil/`, `internal/selfexe/` — support packages.
-- `firmware/` — ESP-IDF 5.5 + LVGL 9 firmware for the **V2** board only (pins differ from V1). `main/display.c` is the board bring-up, `link.c` the protocol, `ota.c` updates over the link, `ui.c` the screen (the Agent page and the function pages), `beep.c` plays alert notes on an external buzzer (GPIO1; the board has no speaker), `ir.c` sends and receives raw infrared timings through external modules (GPIO7 / GPIO8). `sim/` renders `ui.c` on the desktop to PNG-able PPM files for layout checks without hardware.
+- `firmware/` — ESP-IDF 6.1 + LVGL 9 firmware for the **V2** board only (pins differ from V1). `main/display.c` is the board bring-up, `link.c` the protocol, `ota.c` updates over the link, `ui.c` the screen (the Agent page and the function pages), `beep.c` plays alert notes on an external buzzer (GPIO1; the board has no speaker), `ir.c` sends and receives raw infrared timings through external modules (GPIO7 / GPIO8). `sim/` renders `ui.c` on the desktop to PNG-able PPM files for layout checks without hardware.
 - `docs/protocol-v1.md` — host ↔ device protocol. `docs/plans/` — implementation plans.
 
 ## Commands
@@ -30,8 +30,8 @@ go vet ./...
 go test -race ./...
 CGO_ENABLED=0 GOOS=windows go build ./cmd/go-dock   # also linux, darwin
 
-# firmware (ESP-IDF v5.5.4 in ~/esp/esp-idf)
-. ~/esp/esp-idf/export.sh && cd firmware && idf.py build
+# firmware (ESP-IDF v6.1, installed by EIM; a git checkout activates with `. ~/esp/esp-idf/export.sh`)
+. ~/.espressif/tools/activate_idf_v6.1.sh && cd firmware && idf.py build
 cmake -B build-sim -S sim && cmake --build build-sim && build-sim/dock_sim out   # UI screenshots
 ```
 

@@ -63,7 +63,7 @@ Never install integrations into the real `~/.claude/settings.json` or `~/.codex/
 
 MQTT without a real broker: `internal/mqtt/mqtttest` is a small in-process broker (wildcards, retained messages, `Kill()` for reconnect tests). For a manual run, add an entry to `mqtt.brokers` in the temp config pointing at any local broker (e.g. `mosquitto -p 1884`) and simulate a lamp that echoes its command topic to a retained state topic.
 
-Firmware UI checks without hardware: `firmware/sim` compiles `main/ui.c` against LVGL on the desktop and writes PPM screenshots. It needs `idf.py reconfigure` once (downloads LVGL into `managed_components/`) and the cmake from `. ~/esp/esp-idf/export.sh`. Sample scenarios live in `firmware/sim/sim.c`.
+Firmware UI checks without hardware: `firmware/sim` compiles `main/ui.c` against LVGL on the desktop and writes PPM screenshots. It needs `idf.py reconfigure` once (downloads LVGL into `managed_components/`) and the cmake from the activated ESP-IDF (`. ~/.espressif/tools/activate_idf_v6.1.sh`). Sample scenarios live in `firmware/sim/sim.c`.
 
 ## Claude Code data sources (undocumented, parse defensively)
 

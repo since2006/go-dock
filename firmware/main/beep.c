@@ -8,7 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-#include "soc/ledc_periph.h"
+#include "hal/ledc_periph.h"
 
 #define PIN_BUZZER 1 // J8 pin 3; pin 1 next to it is GND
 #define BEEP_MODE LEDC_LOW_SPEED_MODE
@@ -39,8 +39,8 @@ static void tone(uint32_t hz)
     ledc_update_duty(BEEP_MODE, BEEP_CHANNEL);
     // silence() took the pin off the channel; this is the routing
     // ledc_channel_config does, without reserving the pin again.
-    esp_rom_gpio_connect_out_signal(PIN_BUZZER, ledc_periph_signal[BEEP_MODE].sig_out0_idx + BEEP_CHANNEL, false,
-                                    false);
+    esp_rom_gpio_connect_out_signal(PIN_BUZZER, ledc_periph_signal[0].speed_mode[BEEP_MODE].sig_out_idx[BEEP_CHANNEL],
+                                    false, false);
 }
 
 static void beep_task(void *arg)
