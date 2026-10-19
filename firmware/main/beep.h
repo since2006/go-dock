@@ -5,7 +5,9 @@
 
 #include <stdint.h>
 
-#define BEEP_MAX_NOTES 16
+// A beep line of this many notes, the longest being [8000,1000], still fits
+// MAX_LINE in link.c (go-dock's TestBeepFitsLine).
+#define BEEP_MAX_NOTES 320
 
 typedef struct {
     uint16_t hz; // 0: rest

@@ -16,7 +16,7 @@ import (
 // sounds live here and a new one needs no firmware update.
 
 const (
-	maxNotes = 16 // the firmware's BEEP_MAX_NOTES
+	maxNotes = 320 // the firmware's BEEP_MAX_NOTES; the longest beep must fit MaxLine
 	minHz    = 100
 	maxHz    = 8000
 	minMs    = 10

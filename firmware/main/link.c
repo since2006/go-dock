@@ -296,7 +296,7 @@ static void handle_settings(const cJSON *root)
 // beep: {"notes":[[hz,ms],...]}; a frequency out of range plays as a rest.
 static void handle_beep(const cJSON *root)
 {
-    beep_note_t notes[BEEP_MAX_NOTES];
+    static beep_note_t notes[BEEP_MAX_NOTES]; // only the reader task gets here
     int n = 0;
     const cJSON *note;
     cJSON_ArrayForEach(note, cJSON_GetObjectItem(root, "notes"))

@@ -45,7 +45,7 @@ static void tone(uint32_t hz)
 
 static void beep_task(void *arg)
 {
-    melody_t m = {0};
+    static melody_t m; // too big for the task's stack
     int next = 0;
     for (;;) {
         TickType_t wait = portMAX_DELAY;
@@ -97,7 +97,8 @@ void beep_play(const beep_note_t *notes, int count)
     if (!s_queue) {
         return;
     }
-    melody_t m = {.count = count < BEEP_MAX_NOTES ? count : BEEP_MAX_NOTES};
+    static melody_t m; // only the link task plays, and m is too big for its stack
+    m.count = count < BEEP_MAX_NOTES ? count : BEEP_MAX_NOTES;
     memcpy(m.notes, notes, m.count * sizeof(*notes));
     xQueueOverwrite(s_queue, &m);
 }

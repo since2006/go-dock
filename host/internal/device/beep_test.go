@@ -39,6 +39,17 @@ func TestSounds(t *testing.T) {
 	}
 }
 
+// The longest beep a user can write still fits one line.
+func TestBeepFitsLine(t *testing.T) {
+	notes := make([]Note, maxNotes)
+	for i := range notes {
+		notes[i] = Note{maxHz, maxMs}
+	}
+	if n := len(EncodeBeep(notes)); n == 0 || n > MaxLine {
+		t.Errorf("beep of %d notes is %d bytes", maxNotes, n)
+	}
+}
+
 func TestParseNotes(t *testing.T) {
 	for text, want := range map[string][]Note{
 		"E7 100, - 40, C8 300":        {{2637, 100}, {0, 40}, {4186, 300}},
