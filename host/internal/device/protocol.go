@@ -383,6 +383,7 @@ type ItemFrame struct {
 	Text     string `json:"text"`
 	Icon     string `json:"icon,omitempty"`
 	On       *bool  `json:"on,omitempty"`
+	Buttons  bool   `json:"buttons,omitempty"`
 	Busy     bool   `json:"busy,omitempty"`
 	Disabled bool   `json:"disabled,omitempty"`
 	AtMin    bool   `json:"at_min,omitempty"`
@@ -430,6 +431,7 @@ func BuildPages(ps []model.Page) Pages {
 				Text:     model.Truncate(it.Text, itemTextLen),
 				Icon:     icon,
 				On:       it.On,
+				Buttons:  it.Buttons,
 				Busy:     it.Busy,
 				Disabled: it.Disabled,
 				AtMin:    it.AtMin,

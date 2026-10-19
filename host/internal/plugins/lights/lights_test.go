@@ -327,6 +327,32 @@ func TestOptimisticWithoutStateTopic(t *testing.T) {
 	}
 }
 
+// Lamps show on and off buttons, and each press is sent as it is: a lamp
+// switched by hand reports nothing, so "on" must go out even when the
+// plugin thinks the lamp is on already.
+func TestButtons(t *testing.T) {
+	bus := newFakeBus()
+	l := mainLight()
+	l.StateTopic = ""
+	p, _ := newTestPlugin(t, bus, l)
+	if it := item(t, p, "main"); !it.Buttons || it.Kind != model.KindSwitch {
+		t.Fatalf("no buttons: %+v", it)
+	}
+	ctx := context.Background()
+	for _, act := range []string{model.ActOn, model.ActOn, model.ActOff, model.ActOff} {
+		if err := p.Do(ctx, "main", act); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []sent{{"office/main/set", "ON"}, {"office/main/set", "ON"}, {"office/main/set", "OFF"}, {"office/main/set", "OFF"}}
+	if got := bus.sentList(); !slices.Equal(got, want) {
+		t.Fatalf("sent %v, want %v", got, want)
+	}
+	if it := item(t, p, "main"); it.Text != textOff {
+		t.Fatalf("%+v", it)
+	}
+}
+
 func TestPublishFailureAndOffline(t *testing.T) {
 	bus := newFakeBus()
 	p, _ := newTestPlugin(t, bus, mainLight())

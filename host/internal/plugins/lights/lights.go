@@ -459,9 +459,11 @@ func (p *Plugin) expire(l *lamp, gen int) {
 	p.onChange()
 }
 
-// item renders one lamp; the caller holds mu.
+// item renders one lamp, with on and off buttons: a lamp without a state
+// topic may have been switched elsewhere, so a toggle could go the wrong
+// way. The caller holds mu.
 func (p *Plugin) item(l *lamp, connected bool) model.PageItem {
-	it := model.PageItem{ID: l.cfg.ID, Kind: model.KindSwitch, Label: l.cfg.Name, Disabled: !connected}
+	it := model.PageItem{ID: l.cfg.ID, Kind: model.KindSwitch, Label: l.cfg.Name, Buttons: true, Disabled: !connected}
 	if l.on != nil {
 		v := *l.on
 		it.On = &v

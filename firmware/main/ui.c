@@ -108,6 +108,7 @@ typedef struct {
 typedef struct {
     lv_obj_t *obj, *chip, *label, *text;
     lv_obj_t *steps, *dec, *value, *inc; // a stepper's − value +
+    lv_obj_t *btns, *btn[2];             // a switch's 开 and 关
 } card_t;
 
 static struct {
@@ -678,7 +679,7 @@ static const uint32_t ICON_COLOR[DOCK_ICON_COUNT] = {
 };
 
 // Draws the chip's icon (its user data) in the chip's arc and line
-// colours: 46 px in a 96 px chip, 30 px in the 56 px one.
+// colours: 46 px in a 96 px chip, 30 px in the 56 px one, 24 px in 40.
 static void draw_icon(lv_event_t *e)
 {
     lv_obj_t *chip = lv_event_get_current_target_obj(e);
@@ -686,7 +687,7 @@ static void draw_icon(lv_event_t *e)
     dock_icon_t icon = (dock_icon_t)(intptr_t)lv_obj_get_user_data(chip);
     lv_area_t a;
     lv_obj_get_coords(chip, &a);
-    int size = lv_area_get_width(&a) >= 96 ? 46 : 30;
+    int size = lv_area_get_width(&a) >= 96 ? 46 : lv_area_get_width(&a) >= 56 ? 30 : 24;
     int w = (size * 2 + 12) / 24; // stroke 2 of 24
     int32_t ox = a.x1 + (lv_area_get_width(&a) - size) / 2;
     int32_t oy = a.y1 + (lv_area_get_height(&a) - size) / 2;
@@ -760,9 +761,9 @@ static dock_item_t *tapped(dock_page_t *pg, int i)
     return it->disabled ? NULL : it;
 }
 
-// A tap on a card: a switch toggles and shows it is switching until the
-// host's next pages; a select takes its next option, which the next pages
-// show.
+// A tap on a card: a switch without buttons toggles and shows it is
+// switching until the host's next pages; a select takes its next option,
+// which the next pages show.
 static void on_card_clicked(lv_event_t *e)
 {
     dock_page_t *pg = fn_page();
@@ -792,6 +793,35 @@ static void on_step_clicked(lv_event_t *e)
     }
 }
 
+// A tap on a switch's 开 or 关 (user data: card index * 2, plus 1 for 关):
+// sent as it is, whatever the state is thought to be, and shown switching
+// until the host's next pages.
+static void on_switch_clicked(lv_event_t *e)
+{
+    int v = (int)(intptr_t)lv_event_get_user_data(e);
+    dock_page_t *pg = fn_page();
+    dock_item_t *it = tapped(pg, v / 2);
+    if (!it || it->kind != DOCK_ITEM_SWITCH) {
+        return;
+    }
+    link_send_action(pg->id, it->id, v & 1 ? "off" : "on");
+    it->busy = true;
+    snprintf(it->text, sizeof(it->text), "切换中…");
+    render_fn();
+}
+
+static lv_obj_t *build_switch_button(lv_obj_t *row, int index, bool off)
+{
+    lv_obj_t *b = box(row, 0, 0, 72, 40, 0x1C1C1E, 12);
+    lv_obj_set_style_opa(b, 204, LV_STATE_PRESSED);
+    lv_obj_t *t = text(b, font_get(FONT_BOLD, 20), C_TEXT2);
+    lv_label_set_text(t, off ? "关" : "开");
+    lv_obj_center(t);
+    lv_obj_add_event_cb(b, on_card_pressed, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(b, on_switch_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)(index * 2 + off));
+    return b;
+}
+
 static lv_obj_t *build_step(lv_obj_t *row, int index, bool inc)
 {
     lv_obj_t *b = box(row, 0, 0, 56, 56, 0x1C1C1E, LV_RADIUS_CIRCLE);
@@ -806,8 +836,8 @@ static lv_obj_t *build_step(lv_obj_t *row, int index, bool inc)
 }
 
 // Card: an icon in a round chip (or, for a stepper, − value +), the label
-// and the state text, centred; sizes depend on the grid and are set when
-// rendered.
+// and the state text, then a switch's 开 and 关 if it has them, centred;
+// sizes depend on the grid and are set when rendered.
 static void build_card(lv_obj_t *p, card_t *c, int index)
 {
     c->obj = box(p, 0, 0, 180, 184, C_CARD, 18);
@@ -841,6 +871,14 @@ static void build_card(lv_obj_t *p, card_t *c, int index)
     c->label = line(c->obj, font_get(FONT_BOLD, 20), C_TEXT, 156);
     lv_obj_set_style_text_align(c->label, LV_TEXT_ALIGN_CENTER, 0);
     c->text = text(c->obj, font_get(FONT_BOLD, 16), C_TEXT3);
+
+    c->btns = box(c->obj, 0, 0, LV_SIZE_CONTENT, LV_SIZE_CONTENT, 0, -1);
+    lv_obj_remove_flag(c->btns, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_flex_flow(c->btns, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(c->btns, 12, 0);
+    for (int k = 0; k < 2; k++) {
+        c->btn[k] = build_switch_button(c->btns, index, k);
+    }
 }
 
 static void build_fn(lv_obj_t *p)
@@ -999,13 +1037,34 @@ static void render_step(lv_obj_t *b, bool big, bool usable)
     set_tappable(b, usable);
 }
 
+// A switch's 开 and 关: the one matching the known state stands out, amber
+// for on.
+static void render_switch_buttons(card_t *c, const dock_item_t *it, int w, bool big)
+{
+    int gap = big ? 16 : 12, bw = (w - 24 - gap) / 2, max = big ? 200 : 112;
+    lv_obj_set_style_pad_column(c->btns, gap, 0);
+    for (int k = 0; k < 2; k++) {
+        lv_obj_t *b = c->btn[k];
+        bool lit = !it->busy && it->on == (k ? 0 : 1);
+        lv_obj_set_size(b, bw < max ? bw : max, big ? 80 : 48);
+        lv_obj_set_style_radius(b, big ? 20 : 14, 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(!lit ? 0x1C1C1E : k ? 0x3A3A3C : C_LAMP), 0);
+        lv_obj_set_style_bg_opa(b, lit && !k ? 64 : LV_OPA_COVER, 0); // amber at 25%
+        lv_obj_t *t = lv_obj_get_child(b, 0);
+        lv_obj_set_style_text_font(t, font_get(FONT_BOLD, big ? 32 : 22), 0);
+        set_color(t, !lit ? C_TEXT2 : k ? C_TEXT : C_LAMP);
+        set_tappable(b, !it->disabled);
+    }
+}
+
 // Lays out card c for item it at x, y; a single row of cards gets the
 // large icon and type. A switch shows on / off (lit cards keep to a dark
-// tint and a thin ring, kind to the AMOLED panel), a select its option in
-// the colour of its icon, a stepper − value +.
+// tint and a thin ring, kind to the AMOLED panel), with buttons a smaller
+// icon; a select its option in the colour of its icon, a stepper − value +.
 static void render_card(card_t *c, const dock_item_t *it, int x, int y, int w, int h, bool big)
 {
     bool sw = it->kind == DOCK_ITEM_SWITCH, step = it->kind == DOCK_ITEM_STEPPER;
+    bool btns = sw && it->buttons;
     bool lit = sw && !it->busy && it->on == 1;
     uint32_t color = it->busy ? C_BLUE
                      : sw     ? (it->on == 1 ? C_LAMP : it->on == 0 ? C_TEXT3 : 0x5C5B57)
@@ -1017,12 +1076,16 @@ static void render_card(card_t *c, const dock_item_t *it, int x, int y, int w, i
     lv_obj_set_style_bg_color(c->obj, lv_color_hex(lit ? 0x1E1606 : C_CARD), 0);
     lv_obj_set_style_border_opa(c->obj, lit ? 102 : LV_OPA_TRANSP, 0); // 40%
     lv_obj_set_style_opa(c->obj, it->disabled ? 90 : LV_OPA_COVER, 0);  // 35%
-    lv_obj_set_style_pad_row(c->obj, step ? 14 : 8, 0);
-    set_tappable(c->obj, (sw || it->kind == DOCK_ITEM_SELECT) && !it->disabled);
+    lv_obj_set_style_pad_row(c->obj, step ? 14 : btns && !big ? 6 : 8, 0);
+    set_tappable(c->obj, ((sw && !btns) || it->kind == DOCK_ITEM_SELECT) && !it->disabled);
 
     show(c->chip, !step);
     show(c->steps, step);
     show(c->text, !step);
+    show(c->btns, btns);
+    if (btns) {
+        render_switch_buttons(c, it, w, big);
+    }
     if (step) {
         render_step(c->dec, big, !it->disabled && !it->at_min);
         render_step(c->inc, big, !it->disabled && !it->at_max);
@@ -1031,7 +1094,7 @@ static void render_card(card_t *c, const dock_item_t *it, int x, int y, int w, i
         set_text(c->value, it->text);
         pulse(c->chip, false);
     } else {
-        int chip = big ? 96 : 56;
+        int chip = big ? 96 : btns ? 40 : 56;
         lv_obj_set_size(c->chip, chip, chip);
         lv_obj_set_user_data(c->chip, (void *)(intptr_t)it->icon);
         bool tint = it->busy || lit;

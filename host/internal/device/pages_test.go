@@ -18,7 +18,7 @@ func TestBuildPages(t *testing.T) {
 	long := strings.Repeat("灯", 30)
 	in := []model.Page{
 		{ID: "lights", Title: "灯光控制面板很长了", Summary: long, Error: "MQTT 未连接", Items: []model.PageItem{
-			{ID: "main", Kind: model.KindSwitch, Label: "办公室主灯", Text: "已开", On: ptr(true)},
+			{ID: "main", Kind: model.KindSwitch, Label: "办公室主灯", Text: "已开", On: ptr(true), Buttons: true},
 			{ID: "desk", Kind: model.KindSwitch, Label: long, Text: "已关", On: ptr(false), Disabled: true},
 			{ID: "x", Kind: model.KindSwitch, Label: "未知", Text: "未知"},
 			{ID: "Bad ID", Kind: model.KindSwitch, Label: "dropped"},
@@ -65,6 +65,12 @@ func TestBuildPages(t *testing.T) {
 	}
 	if _, ok := items[0]["busy"]; ok {
 		t.Fatal("busy false must be omitted")
+	}
+	if items[0]["buttons"] != true {
+		t.Fatalf("buttons %v", items[0])
+	}
+	if _, ok := items[1]["buttons"]; ok {
+		t.Fatal("buttons false must be omitted")
 	}
 
 	empty, _ := EncodePages(BuildPages(nil))

@@ -442,24 +442,37 @@ function scrFnBody(page, now, dots) {
 }
 
 // A card: its icon (a lamp unless the item names another), label and
-// text. A switch toggles and shows on / off; a select takes the next
-// option, coloured by its icon; a stepper is drawn by scrStepper. Cards of
-// kinds the screen does not know show their texts but take no taps.
+// text. A switch shows on / off and toggles, or with buttons takes only
+// 开 and 关 (the one matching its state stands out); a select takes the
+// next option, coloured by its icon; a stepper is drawn by scrStepper.
+// Cards of kinds the screen does not know show their texts but take no
+// taps.
 function scrCard(page, it, big) {
   if (it.kind === "stepper") return scrStepper(page, it, big);
   const sw = it.kind === "switch";
+  const btns = sw && it.buttons;
   const st = it.busy ? "busy" : !sw ? "plain" : it.on === true ? "on" : it.on === false ? "off" : "unknown";
-  const tappable = (sw || it.kind === "select") && !it.disabled && hostConnected;
+  const live = !it.disabled && hostConnected;
   const icon = SCR_ICONS[it.icon] ? it.icon : "bulb";
+  const content = [
+    el("span", { class: "chip" }, scrIcon(icon, big ? 46 : btns ? 24 : 30, 2)),
+    el("span", { class: "label" }, it.label),
+    el("span", { class: "text" }, it.text),
+  ];
+  const cls = `scr-card ${st} icon-${icon} ${big ? "big" : ""} ${it.disabled ? "disabled" : ""}`;
+  if (btns) {
+    const button = (act, name, lit) => el("button", {
+      type: "button", class: `sw-btn ${act} ${lit ? "lit" : ""}`, disabled: live ? null : "",
+      onclick: () => previewTap(page.id, it, act),
+    }, name);
+    return el("div", { class: `${cls} with-btns` }, ...content, el("span", { class: "sw-btns" },
+      button("on", "开", !it.busy && it.on === true), button("off", "关", !it.busy && it.on === false)));
+  }
   return el("button", {
-    type: "button",
-    class: `scr-card ${st} icon-${icon} ${big ? "big" : ""} ${it.disabled ? "disabled" : ""}`,
-    disabled: tappable ? null : "",
+    type: "button", class: cls,
+    disabled: (sw || it.kind === "select") && live ? null : "",
     onclick: () => previewTap(page.id, it, sw ? "toggle" : "next"),
-  },
-  el("span", { class: "chip" }, scrIcon(icon, big ? 46 : 30, 2)),
-  el("span", { class: "label" }, it.label),
-  el("span", { class: "text" }, it.text));
+  }, ...content);
 }
 
 // A stepper card: the value between − and +, its label below; a button

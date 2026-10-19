@@ -285,13 +285,15 @@ static void page(const char *id, const char *title, const char *summary, const c
     snprintf(p->error, sizeof(p->error), "%s", error);
 }
 
-// on: 1, 0 or -1 (unknown); text NULL says what on and busy mean.
+// A lamp as the lights plugin sends it, with 开 and 关; on: 1, 0 or -1
+// (unknown); text NULL says what on and busy mean.
 static void lamp(const char *id, const char *label, int on, bool busy, bool disabled, const char *text)
 {
     dock_page_t *p = &s_pages.pages[s_pages.count - 1];
     dock_item_t *it = &p->items[p->item_count++];
     snprintf(it->id, sizeof(it->id), "%s", id);
     it->kind = DOCK_ITEM_SWITCH;
+    it->buttons = true;
     snprintf(it->label, sizeof(it->label), "%s", label);
     it->on = (int8_t)on;
     it->busy = busy;
@@ -501,13 +503,14 @@ int main(int argc, char **argv)
     run(1 * SEC);
     save(out, "10-agent-dots");
 
-    // Swiping left shows the lights; tapping a card toggles it and shows it
-    // switching until the host's next pages.
+    // Swiping left shows the lights; 开 and 关 are sent as they are and show
+    // the lamp switching until the host's next pages; the rest of the card
+    // takes no taps.
     swipe(500, 250, -300, 0);
     run(1 * SEC);
     save(out, "11-lights-3");
-    tap(18 + 90 + 192, 244);
-    check(s_actions == 1 && strcmp(s_action, "lights/desk toggle") == 0, "tap sends a toggle");
+    tapped(18 + 192 + 90, 160, NULL, "a tap beside the buttons does nothing");
+    tapped(18 + 192 + 48, 337, "lights/desk on", "开 sends on");
     run(1 * SEC);
     save(out, "12-lights-tap");
 
@@ -536,6 +539,7 @@ int main(int argc, char **argv)
     save(out, "14-lights-4-offline");
     tap(18 + 138, 54 + 92);
     check(s_actions == 1, "a disabled card takes no taps");
+    tapped(18 + 36 + 48, 203, NULL, "a disabled card's buttons take no taps");
 
     reset_pages();
     page("lights", "灯光", "2 / 6 盏亮着 · 1 盏未知", "");
@@ -557,10 +561,24 @@ int main(int argc, char **argv)
     send_pages();
     run(1 * SEC);
     check(ui_brightness() < 200, "dim after five idle minutes");
-    tap(18 + 90, 54 + 92);
-    check(s_actions == 1, "the waking tap toggles nothing");
-    tap(18 + 90, 54 + 92);
-    check(s_actions == 2 && strcmp(s_action, "lights/main toggle") == 0, "the next tap toggles");
+    tap(18 + 48, 203);
+    check(s_actions == 1, "the waking tap switches nothing");
+    tap(18 + 132, 203);
+    check(s_actions == 2 && strcmp(s_action, "lights/main off") == 0, "the next tap switches off");
+
+    // From a dim Agent page a swipe wakes the screen and shows the lights;
+    // the screen stays lit and the buttons answer.
+    swipe(100, 250, 300, 0);
+    run(1 * SEC);
+    s_now_us += 6 * 60 * SEC;
+    send();
+    send_pages();
+    run(1 * SEC);
+    check(ui_brightness() < 200, "dim again on the Agent page");
+    swipe(500, 250, -300, 0);
+    run(2 * SEC);
+    check(ui_brightness() == 200, "a swipe wakes the screen, which stays lit");
+    tapped(18 + 48, 203, "lights/main on", "开 answers after a waking swipe");
 
     // The page shown went away: back to the Agent page, without dots.
     reset_pages();

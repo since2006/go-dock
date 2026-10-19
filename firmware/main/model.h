@@ -101,6 +101,7 @@ typedef struct {
     char label[52]; // <= 12 runes
     char text[36];  // <= 8 runes: 已开, 已关, 切换中…, 26°C, 制冷
     int8_t on;      // 1 on, 0 off, -1 unknown
+    bool buttons;   // a switch with an on and an off button instead of a toggle
     bool busy;      // a command is on its way
     bool disabled;  // cannot be used now (MQTT down): greyed, no taps
     bool at_min;    // a stepper's value cannot go lower

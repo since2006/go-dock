@@ -255,6 +255,7 @@ static void parse_pages(const cJSON *root, dock_pages_t *out)
             copy_str(d->text, sizeof(d->text), cJSON_GetObjectItem(it, "text"));
             const cJSON *on = cJSON_GetObjectItem(it, "on");
             d->on = cJSON_IsBool(on) ? (cJSON_IsTrue(on) ? 1 : 0) : -1;
+            d->buttons = cJSON_IsTrue(cJSON_GetObjectItem(it, "buttons"));
             d->busy = cJSON_IsTrue(cJSON_GetObjectItem(it, "busy"));
             d->disabled = cJSON_IsTrue(cJSON_GetObjectItem(it, "disabled"));
             d->at_min = cJSON_IsTrue(cJSON_GetObjectItem(it, "at_min"));

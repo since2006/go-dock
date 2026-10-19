@@ -293,6 +293,21 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .scr-card.plain.icon-heat { --c: #FF9F43; }
 .scr-card.plain.icon-dry { --c: #4FD1C5; }
 .scr-card.plain.icon-auto { --c: #3DD68C; }
+/* A switch with 开 and 关 takes taps only on them; the one matching its
+   state stands out, amber for on. */
+.scr-card.with-btns { cursor: default; }
+.scr-card.with-btns:not(.big) { gap: 6px; }
+.scr-card.with-btns:not(.big) .chip { width: 40px; height: 40px; }
+.scr-card .sw-btns { display: flex; gap: 12px; width: 100%; justify-content: center; }
+.scr-card.big .sw-btns { gap: 16px; }
+.scr-card .sw-btn {
+  all: unset; box-sizing: border-box; flex: 0 1 112px; height: 48px; border-radius: 14px; background: #1C1C1E;
+  color: var(--scr-2); font-size: 22px; font-weight: 700; display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.scr-card.big .sw-btn { flex-basis: 200px; height: 80px; border-radius: 20px; font-size: 32px; }
+.scr-card .sw-btn.on.lit { background: rgba(255,193,77,.25); color: #FFC14D; }
+.scr-card .sw-btn.off.lit { background: #3A3A3C; color: var(--scr-text); }
+.scr-card .sw-btn:disabled { cursor: default; }
 .scr-card.stepper { cursor: default; gap: 14px; }
 .scr-card .steps { display: flex; align-items: center; gap: 12px; }
 .scr-card .step {

@@ -20,9 +20,12 @@ type PageItem struct {
 	// Icon names the picture on the card (Icon* below); empty is a bulb.
 	Icon string `json:"icon,omitempty"`
 	// On is a switch's state; nil means unknown.
-	On       *bool `json:"on,omitempty"`
-	Busy     bool  `json:"busy,omitempty"` // a command is on its way
-	Disabled bool  `json:"disabled,omitempty"`
+	On *bool `json:"on,omitempty"`
+	// Buttons: a switch shows an on and an off button instead of toggling
+	// on a tap, for things whose state cannot be trusted.
+	Buttons  bool `json:"buttons,omitempty"`
+	Busy     bool `json:"busy,omitempty"` // a command is on its way
+	Disabled bool `json:"disabled,omitempty"`
 	// AtMin and AtMax: a stepper's value cannot go lower or higher.
 	AtMin bool `json:"at_min,omitempty"`
 	AtMax bool `json:"at_max,omitempty"`
@@ -30,7 +33,7 @@ type PageItem struct {
 
 // Item kinds.
 const (
-	KindSwitch  = "switch"  // on or off: on, off, toggle
+	KindSwitch  = "switch"  // on or off: on, off, toggle (on and off with Buttons)
 	KindStepper = "stepper" // a value with − and +: dec, inc
 	KindSelect  = "select"  // one of a few options, a tap takes the next: next
 )
