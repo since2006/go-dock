@@ -22,8 +22,14 @@ type Options struct {
 	MaxSessions int
 	ShowIdle    bool
 	// BeepNotes is what the device plays when a task starts waiting for the
-	// user; none plays nothing.
+	// user, DoneNotes when one finishes; none plays nothing.
 	BeepNotes []Note
+	DoneNotes []Note
+	// Brightness in percent; the screen dims to DimBrightness after
+	// DimAfter without an active task (0: never). See EncodeSettings.
+	Brightness    int
+	DimBrightness int
+	DimAfter      time.Duration
 }
 
 // SnapshotSource is what the manager mirrors to the device; *hub.Hub
@@ -61,6 +67,8 @@ type Status struct {
 	Beep bool `json:"beep,omitempty"`
 	// IR: the firmware sends infrared (if a transmitter is wired up).
 	IR bool `json:"ir,omitempty"`
+	// Settings: the firmware takes brightness settings.
+	Settings bool `json:"settings,omitempty"`
 	// Incompatible: the device speaks another protocol version; it gets no
 	// snapshots but can still be updated.
 	Incompatible bool        `json:"incompatible,omitempty"`
@@ -99,10 +107,12 @@ type Manager struct {
 	actions  chan struct{} // bounds taps being handled at once
 	beepReq  chan []Note   // a sound to try out
 	irReq    chan irLine   // ir_send lines to write
-	// waiting holds waitingTasks as of the last snapshot sent to a device
-	// that beeps; only the serve loop uses it. It outlives connections, so
-	// replugging the device does not beep again for the same tasks.
-	waiting map[string]bool
+	settings chan struct{} // the brightness settings changed
+	// waiting and active hold waitingTasks and activeTasks as of the last
+	// snapshot sent to a device that beeps; only the serve loop uses them.
+	// They outlive connections, so replugging the device does not beep
+	// again for the same tasks.
+	waiting, active map[string]bool
 
 	mu          sync.Mutex
 	pages       PageSource
@@ -139,6 +149,7 @@ func NewManager(src SnapshotSource, opts Options, hostVersion string, log *slog.
 		actions:      make(chan struct{}, 4),
 		beepReq:      make(chan []Note, 1),
 		irReq:        make(chan irLine, 4),
+		settings:     make(chan struct{}, 1),
 		opts:         opts,
 		status:       Status{State: StateSearching},
 	}
@@ -153,6 +164,12 @@ func (m *Manager) SetOptions(o Options) {
 	m.mu.Unlock()
 	if old.Enabled != o.Enabled || old.Port != o.Port {
 		m.Reconnect()
+	}
+	if !sameSettings(old, o) {
+		select {
+		case m.settings <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -241,7 +258,7 @@ func (m *Manager) Run(ctx context.Context) {
 
 // unlinked forgets the device while searching for one.
 func unlinked(s *Status) {
-	s.State, s.Port, s.Firmware, s.OTA, s.Pages, s.Beep, s.IR, s.Incompatible, s.Width, s.Height = StateSearching, "", "", false, false, false, false, false, 0, 0
+	s.State, s.Port, s.Firmware, s.OTA, s.Pages, s.Beep, s.IR, s.Settings, s.Incompatible, s.Width, s.Height = StateSearching, "", "", false, false, false, false, false, false, 0, 0
 }
 
 // wait sleeps for d (forever when d is 0) or until a reconnect request.
@@ -297,7 +314,7 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 	defer hello.Stop()
 	var debounce <-chan time.Time
 
-	ready, incompatible, beepOK, irOK := false, false, false, false
+	ready, incompatible, beepOK, irOK, settingsOK := false, false, false, false, false
 	fail := func(err error) bool {
 		m.setError(fmt.Errorf("%s: %w", name, err))
 		return false
@@ -370,10 +387,15 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 				if !ready {
 					m.log.Info("设备握手完成", "fw", msg.FW, "w", msg.W, "h", msg.H)
 				}
-				ready, pagesOK, beepOK, irOK = true, msg.Pages > 0, msg.Beep > 0, msg.IR > 0
+				ready, pagesOK, beepOK, irOK, settingsOK = true, msg.Pages > 0, msg.Beep > 0, msg.IR > 0, msg.Settings > 0
 				m.update(func(s *Status) {
-					s.State, s.Incompatible, s.Pages, s.Beep, s.IR, s.Width, s.Height, s.Error = StateReady, false, pagesOK, beepOK, irOK, msg.W, msg.H, ""
+					s.State, s.Incompatible, s.Pages, s.Beep, s.IR, s.Settings, s.Width, s.Height, s.Error = StateReady, false, pagesOK, beepOK, irOK, settingsOK, msg.W, msg.H, ""
 				})
+				if settingsOK {
+					if err := m.write(conn, EncodeSettings(m.options())); err != nil {
+						return fail(err)
+					}
+				}
 				if err := push(true); err != nil {
 					return fail(err)
 				}
@@ -411,6 +433,12 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 		case ir := <-m.irReq:
 			if ready && irOK && !incompatible && time.Since(ir.at) < irStale {
 				if err := m.write(conn, ir.line); err != nil {
+					return fail(err)
+				}
+			}
+		case <-m.settings:
+			if ready && settingsOK && !incompatible {
+				if err := m.write(conn, EncodeSettings(m.options())); err != nil {
 					return fail(err)
 				}
 			}
@@ -500,7 +528,7 @@ func (m *Manager) sendSnapshot(conn io.WriteCloser) (model.Snapshot, error) {
 }
 
 // alert beeps when a task started waiting for the user since the last
-// snapshot a beeping device got.
+// snapshot a beeping device got, else when one finished.
 func (m *Manager) alert(conn io.WriteCloser, s model.Snapshot) error {
 	now := waitingTasks(s)
 	fresh := false
@@ -508,12 +536,18 @@ func (m *Manager) alert(conn io.WriteCloser, s model.Snapshot) error {
 		fresh = fresh || !m.waiting[k]
 	}
 	m.waiting = now
-	notes := m.options().BeepNotes
-	if !fresh || len(notes) == 0 {
-		return nil
+	var finished bool
+	m.active, finished = activeTasks(s, m.active)
+	opts := m.options()
+	switch {
+	case fresh && len(opts.BeepNotes) > 0:
+		m.log.Debug("有任务等待处理，设备响铃", "notes", len(opts.BeepNotes))
+		return m.write(conn, EncodeBeep(opts.BeepNotes))
+	case finished && len(opts.DoneNotes) > 0:
+		m.log.Debug("有任务完成，设备响铃", "notes", len(opts.DoneNotes))
+		return m.write(conn, EncodeBeep(opts.DoneNotes))
 	}
-	m.log.Debug("有任务等待处理，设备响铃", "notes", len(notes))
-	return m.write(conn, EncodeBeep(notes))
+	return nil
 }
 
 // Beep plays notes on the device now, to try a sound out.

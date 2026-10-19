@@ -27,6 +27,7 @@ import (
 	"github.com/since2006/go-dock/host/internal/plugins"
 	"github.com/since2006/go-dock/host/internal/plugins/aircon"
 	"github.com/since2006/go-dock/host/internal/plugins/lights"
+	"github.com/since2006/go-dock/host/internal/plugins/screen"
 	"github.com/since2006/go-dock/host/internal/providers"
 	"github.com/since2006/go-dock/host/internal/providers/claude"
 	"github.com/since2006/go-dock/host/internal/providers/codex"
@@ -60,6 +61,7 @@ type App struct {
 	mqtt    *mqtt.Pool
 	lights  *lights.Plugin
 	aircon  *aircon.Plugin
+	screen  *screen.Plugin
 	plugins *plugins.Host
 	listen  string // loopback-reachable address hooks call back to
 
@@ -121,7 +123,11 @@ func Run(ctx context.Context, o Options) error {
 	a.lights.SetOptions(lightsOptions(cfg))
 	a.aircon = aircon.New(a.device, filepath.Join(dir, "aircon.json"), lg.Logger, a.hub.Touch)
 	a.aircon.SetOptions(airconOptions(cfg))
-	a.plugins = plugins.New(a.lights, a.aircon)
+	a.screen = screen.New(a.device, func(f func(*config.DeviceConfig)) error {
+		return store.Update(func(c *config.Config) { f(&c.Device) })
+	}, lg.Logger, a.hub.Touch)
+	a.screen.SetOptions(screenOptions(cfg))
+	a.plugins = plugins.New(a.lights, a.aircon, a.screen)
 	a.device.SetPages(a.plugins)
 	a.device.SetIRSink(a.aircon.Received)
 	a.applyProviders(cfg)
@@ -170,9 +176,15 @@ func hubOptions(c config.Config) hub.Options {
 }
 
 func deviceOptions(c config.Config) device.Options {
-	o := device.Options{Enabled: c.Device.Enabled, Port: c.Device.Port, MaxSessions: c.Display.MaxSessions, ShowIdle: c.Display.ShowIdle}
-	if c.Device.Beep {
+	o := device.Options{
+		Enabled: c.Device.Enabled, Port: c.Device.Port, MaxSessions: c.Display.MaxSessions, ShowIdle: c.Display.ShowIdle,
+		Brightness: c.Device.Brightness, DimBrightness: c.Device.DimBrightness, DimAfter: c.Device.DimAfter.D(),
+	}
+	if c.Device.Beep && !c.Device.Mute {
 		o.BeepNotes = beepNotes(c.Device.BeepSound, c.Device.BeepCustom)
+	}
+	if c.Device.BeepDone && !c.Device.Mute {
+		o.DoneNotes = beepNotes(c.Device.BeepDoneSound, c.Device.BeepDoneCustom)
 	}
 	return o
 }
@@ -215,6 +227,14 @@ func lightsOptions(c config.Config) lights.Options {
 func airconOptions(c config.Config) aircon.Options {
 	a := c.Plugins.Aircon
 	return aircon.Options{Enabled: a.Enabled, Name: a.Name, Model: ir.GreeModel(a.Model)}
+}
+
+func screenOptions(c config.Config) screen.Options {
+	d := c.Device
+	return screen.Options{
+		Enabled: d.SettingsPage, Brightness: d.Brightness, DimBrightness: d.DimBrightness, DimAfter: d.DimAfter.D(),
+		Alerts: d.Beep || d.BeepDone, Mute: d.Mute,
+	}
 }
 
 func codexOptions(c config.Config) codex.Options {
@@ -267,6 +287,7 @@ func (a *App) onConfigChange(old, cur config.Config) {
 	a.mqtt.SetOptions(mqttOptions(cur))
 	a.lights.SetOptions(lightsOptions(cur))
 	a.aircon.SetOptions(airconOptions(cur))
+	a.screen.SetOptions(screenOptions(cur))
 	a.applyProviders(cur)
 	if old.Update.Prerelease != cur.Update.Prerelease {
 		a.updater.SetBeta(cur.Update.Prerelease)
@@ -286,6 +307,11 @@ func (a *App) SetConfig(c config.Config) error {
 	if c.Device.BeepSound == device.CustomSound {
 		if _, err := device.ParseNotes(c.Device.BeepCustom); err != nil {
 			return fmt.Errorf("自定义提示音：%w", err)
+		}
+	}
+	if c.Device.BeepDoneSound == device.CustomSound {
+		if _, err := device.ParseNotes(c.Device.BeepDoneCustom); err != nil {
+			return fmt.Errorf("自定义完成提示音：%w", err)
 		}
 	}
 	return a.store.Set(c)
@@ -387,6 +413,7 @@ func (a *App) PluginAction(ctx context.Context, act model.Action) error {
 var (
 	_ lights.Bus        = (*mqtt.Client)(nil)
 	_ aircon.Remote     = (*device.Manager)(nil)
+	_ screen.Device     = (*device.Manager)(nil)
 	_ device.PageSource = (*plugins.Host)(nil)
 )
 

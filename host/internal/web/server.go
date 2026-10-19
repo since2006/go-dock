@@ -93,6 +93,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/device/pages", s.getPages)
 	mux.HandleFunc("GET /api/device/sounds", s.getSounds)
 	mux.HandleFunc("POST /api/device/beep", s.postBeep)
+	mux.HandleFunc("POST /api/device/notes", s.postNotes)
 	mux.HandleFunc("POST /api/device/reconnect", s.postReconnect)
 	mux.HandleFunc("POST /api/device/firmware", s.postFirmware)
 	mux.HandleFunc("POST /api/ingest/{provider}/{kind}", s.postIngest)
@@ -272,20 +273,38 @@ func (s *Server) getSounds(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.backend.DeviceSounds())
 }
 
-// postBeep plays a sound on the device; 409 means the device cannot play
-// it now (not connected, firmware without a buzzer).
-func (s *Server) postBeep(w http.ResponseWriter, r *http.Request) {
+// soundNotes reads {"sound": id, "custom": notes for sound "custom"} and
+// resolves it to notes; on an error it has answered the request.
+func (s *Server) soundNotes(w http.ResponseWriter, r *http.Request) ([][2]int, bool) {
 	var body struct {
 		Sound  string `json:"sound"`
-		Custom string `json:"custom"` // the notes, for sound "custom"
+		Custom string `json:"custom"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
-		return
+		return nil, false
 	}
 	notes, err := s.backend.SoundNotes(body.Sound, body.Custom)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
+		return nil, false
+	}
+	return notes, true
+}
+
+// postNotes gives the notes of a sound without playing it, for the
+// browser to play.
+func (s *Server) postNotes(w http.ResponseWriter, r *http.Request) {
+	if notes, ok := s.soundNotes(w, r); ok {
+		writeJSON(w, http.StatusOK, map[string]any{"notes": notes})
+	}
+}
+
+// postBeep plays a sound on the device; 409 means the device cannot play
+// it now (not connected, firmware without a buzzer).
+func (s *Server) postBeep(w http.ResponseWriter, r *http.Request) {
+	notes, ok := s.soundNotes(w, r)
+	if !ok {
 		return
 	}
 	// The notes come back either way, so the browser can play them when

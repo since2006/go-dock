@@ -47,6 +47,8 @@ const (
 	IconDry   = "dry"
 	IconFan   = "fan"
 	IconAuto  = "auto"
+	IconMoon  = "moon"
+	IconBell  = "bell"
 )
 
 // Action is a tap on a page item, from the screen or the web UI.

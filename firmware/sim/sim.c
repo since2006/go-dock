@@ -10,11 +10,13 @@
 #include "link.h"
 #include "lvgl.h"
 #include "ota.h"
+#include "settings.h"
 #include "ui.h"
 
 #define W 600
 #define H 450
 #define SEC 1000000LL
+#define FULL (80 * 255 / 100) // the panel level at the default brightness
 
 // ---- stand-ins for the ESP-IDF pieces ui.c uses ----
 
@@ -61,6 +63,10 @@ void link_send_action(const char *page, const char *item, const char *act)
     snprintf(s_action, sizeof(s_action), "%s/%s %s", page, item, act);
     printf("action %s\n", s_action);
 }
+
+static settings_t s_settings = {.brightness = 80, .dim_brightness = 20, .dim_after = 300};
+
+settings_t settings_get(void) { return s_settings; }
 
 static ota_state_t s_ota;
 static int s_ota_pct;
@@ -561,7 +567,7 @@ int main(int argc, char **argv)
     send();
     send_pages();
     run(1 * SEC);
-    check(ui_brightness() < 200, "dim after five idle minutes");
+    check(ui_brightness() == 20 * 255 / 100, "dim after five idle minutes");
     tap(18 + 48, 203);
     check(s_actions == 1, "the waking tap switches nothing");
     tap(18 + 132, 203);
@@ -575,10 +581,10 @@ int main(int argc, char **argv)
     send();
     send_pages();
     run(1 * SEC);
-    check(ui_brightness() < 200, "dim again on the Agent page");
+    check(ui_brightness() < FULL, "dim again on the Agent page");
     swipe(500, 250, -300, 0);
     run(2 * SEC);
-    check(ui_brightness() == 200, "a swipe wakes the screen, which stays lit");
+    check(ui_brightness() == FULL, "a swipe wakes the screen, which stays lit");
     tapped(18 + 48, 203, "lights/main on", "开 answers after a waking swipe");
 
     // The page shown went away: back to the Agent page, without dots.
@@ -636,6 +642,57 @@ int main(int argc, char **argv)
     run(1 * SEC);
     save(out, "21-icons");
     reset_pages();
+    page("aircon", "图标", "", "");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_BULB, "a", "bulb", "灯泡");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_MOON, "b", "moon", "变暗");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_BELL, "c", "bell", "提示音");
+    send_pages();
+    run(1 * SEC);
+    save(out, "21-icons-2");
+
+    // The 屏幕 page: brightness and dimmed brightness, when it dims and the
+    // alert sound, 2x2.
+    reset_pages();
+    send_pages();
+    run(1 * SEC);
+    page("screen", "屏幕", "", "");
+    item(DOCK_ITEM_STEPPER, DOCK_ICON_BULB, "bright", "亮度", "80%");
+    item(DOCK_ITEM_STEPPER, DOCK_ICON_BULB, "dim", "变暗后亮度", "熄屏")->at_min = true;
+    item(DOCK_ITEM_SELECT, DOCK_ICON_MOON, "dim_after", "无任务后变暗", "10 分钟");
+    item(DOCK_ITEM_SWITCH, DOCK_ICON_BELL, "beep", "提示音", "已开")->on = 1;
+    send_pages();
+    run(1 * SEC);
+    swipe(500, 250, -300, 0);
+    run(1 * SEC);
+    save(out, "24-screen");
+    tapped(246, 124, "screen/bright inc", "+ raises the brightness");
+    tapped(354, 124, NULL, "- at the bottom takes no taps");
+    tapped(156, 342, "screen/dim_after next", "the delay card sends next");
+    tapped(444, 342, "screen/beep toggle", "the beep card toggles");
+
+    // Brightness as go-dock sets it: half, the screen off a minute after the
+    // last task, a touch back to half; never dimming keeps it there.
+    reset_pages();
+    send_pages();
+    s_settings = (settings_t){.brightness = 50, .dim_brightness = 0, .dim_after = 60};
+    reset();
+    add(DOCK_DONE, DOCK_CODEX, "notes", "已完成", "", 900);
+    send();
+    run(1 * SEC);
+    check(ui_brightness() == 50 * 255 / 100, "lit at the brightness set");
+    s_now_us += 2 * 60 * SEC;
+    send();
+    run(1 * SEC);
+    check(ui_brightness() == 0, "off a minute after the last task");
+    tap(300, 30);
+    check(ui_brightness() == 50 * 255 / 100, "a touch lights it again");
+    s_settings.dim_after = 0;
+    s_now_us += 10 * 60 * SEC;
+    send();
+    run(1 * SEC);
+    check(ui_brightness() == 50 * 255 / 100, "never dims");
+    s_settings = (settings_t){.brightness = 80, .dim_brightness = 20, .dim_after = 300};
+    reset_pages();
     send_pages();
     run(1 * SEC);
 
@@ -658,5 +715,7 @@ int main(int argc, char **argv)
     s_now_us += 120 * SEC;
     run(2 * SEC);
     save(out, "4-offline");
+    s_settings.brightness = 10;
+    check(ui_brightness() == 10 * 255 / 100, "away, never brighter than the brightness set");
     return 0;
 }

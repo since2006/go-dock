@@ -13,6 +13,7 @@
 #include "model.h"
 #include "ota.h"
 #include "sdkconfig.h"
+#include "settings.h"
 
 #define SCR_W 600
 #define SCR_H 450
@@ -24,12 +25,10 @@
 #define MAX_DOTS 8
 
 #define OFFLINE_AFTER_US (15 * 1000000LL)
-#define DIM_AFTER_US (5 * 60 * 1000000LL)  // no active task for this long
 #define TOUCH_WAKE_US (60 * 1000000LL)
 #define SHIFT_EVERY_US (60 * 1000000LL)    // pixel shift against burn-in
 
-#define BRIGHT_FULL 200
-#define BRIGHT_DIM 50
+// Panel levels with go-dock away, never above the brightness set (settings.h).
 #define BRIGHT_OFFLINE 40
 #define BRIGHT_ASLEEP 12
 
@@ -149,7 +148,7 @@ static uint32_t s_pages_version;
 static int s_fn;                       // page shown: 0 Agent, i the function page s_pages->pages[i - 1]
 static char s_fn_id[DOCK_ID_LEN];      // its id, to stay on it when the pages change
 static bool s_wake_tap;                // the press under way woke a dim screen: no tap
-static uint8_t s_bright = BRIGHT_FULL; // as last asked for, before any new touch
+static uint8_t s_bright = UINT8_MAX;   // as last asked for, before any new touch
 
 // ---------- helpers ----------
 
@@ -660,6 +659,11 @@ static const stroke_t ICON_AUTO[] = {
     ARC(120, 120, 80, 0, 138), ARC(120, 120, 80, 180, 318),
     LINE(180, 30, 180, 67), LINE(180, 67, 143, 67), LINE(60, 210, 60, 173), LINE(60, 173, 97, 173),
 };
+static const stroke_t ICON_MOON[] = {ARC(126, 114, 80, 23, 247), ARC(169, 71, 80, 67, 203)};
+static const stroke_t ICON_BELL[] = {
+    ARC(120, 90, 60, 180, 360), LINE(60, 90, 60, 140), LINE(180, 90, 180, 140),
+    LINE(60, 140, 40, 165), LINE(180, 140, 200, 165), LINE(40, 165, 200, 165), ARC(120, 195, 20, 0, 180),
+};
 
 #define STROKES(a) {a, sizeof(a) / sizeof(a[0])}
 static const struct {
@@ -669,13 +673,15 @@ static const struct {
     [DOCK_ICON_BULB] = STROKES(ICON_BULB), [DOCK_ICON_POWER] = STROKES(ICON_POWER),
     [DOCK_ICON_COOL] = STROKES(ICON_COOL), [DOCK_ICON_HEAT] = STROKES(ICON_HEAT),
     [DOCK_ICON_DRY] = STROKES(ICON_DRY),   [DOCK_ICON_FAN] = STROKES(ICON_FAN),
-    [DOCK_ICON_AUTO] = STROKES(ICON_AUTO),
+    [DOCK_ICON_AUTO] = STROKES(ICON_AUTO), [DOCK_ICON_MOON] = STROKES(ICON_MOON),
+    [DOCK_ICON_BELL] = STROKES(ICON_BELL),
 };
 
 // A select card shows its option in the colour of its icon.
 static const uint32_t ICON_COLOR[DOCK_ICON_COUNT] = {
     [DOCK_ICON_BULB] = 0xE9E9E5, [DOCK_ICON_POWER] = 0xE9E9E5, [DOCK_ICON_COOL] = 0x5AA9FF, [DOCK_ICON_HEAT] = 0xFF9F43,
     [DOCK_ICON_DRY] = 0x4FD1C5,  [DOCK_ICON_FAN] = 0xE9E9E5,   [DOCK_ICON_AUTO] = 0x3DD68C,
+    [DOCK_ICON_MOON] = 0xE9E9E5, [DOCK_ICON_BELL] = 0xE9E9E5,
 };
 
 // Draws the chip's icon (its user data) in the chip's arc and line
@@ -745,10 +751,16 @@ static void draw_step(lv_event_t *e)
     }
 }
 
+// The panel level for the brightness set.
+static uint8_t full_level(void)
+{
+    return (uint8_t)(settings_get().brightness * 255 / 100);
+}
+
 static void on_card_pressed(lv_event_t *e)
 {
     (void)e;
-    s_wake_tap = s_bright < BRIGHT_FULL; // a dim screen only wakes up
+    s_wake_tap = s_bright < full_level(); // a dim screen only wakes up
 }
 
 // The item tapped, if a tap may go to the host now.
@@ -1536,22 +1548,26 @@ void ui_poll(void)
 
 static uint8_t brightness(void)
 {
+    settings_t st = settings_get();
+    uint8_t full = full_level();
     int64_t now_us = esp_timer_get_time();
     int64_t last = link_last_rx_us();
     if (ota_status(NULL, NULL) != OTA_IDLE) {
-        return BRIGHT_FULL;
+        return full;
     }
     if (last == 0 || now_us - last > OFFLINE_AFTER_US) {
         bool long_gone = last == 0 ? now_us > 10 * 60 * 1000000LL : now_us - last > 10 * 60 * 1000000LL;
-        return now_us - s_touch_us < TOUCH_WAKE_US ? BRIGHT_FULL : (long_gone ? BRIGHT_ASLEEP : BRIGHT_OFFLINE);
+        uint8_t away = long_gone ? BRIGHT_ASLEEP : BRIGHT_OFFLINE;
+        return now_us - s_touch_us < TOUCH_WAKE_US || away > full ? full : away;
     }
     if (s_have && (s_snap->counts[DOCK_APPROVAL] || s_snap->counts[DOCK_INPUT] || s_snap->counts[DOCK_ERROR])) {
-        return BRIGHT_FULL; // needs the user: never dim
+        return full; // needs the user: never dim
     }
-    if (now_us - s_touch_us < TOUCH_WAKE_US || now_us - s_active_us < DIM_AFTER_US) {
-        return BRIGHT_FULL;
+    if (st.dim_after == 0 || now_us - s_touch_us < TOUCH_WAKE_US || now_us - s_active_us < st.dim_after * 1000000LL) {
+        return full;
     }
-    return BRIGHT_DIM;
+    uint8_t dim = (uint8_t)(st.dim_brightness * 255 / 100);
+    return dim < full ? dim : full;
 }
 
 uint8_t ui_brightness(void)

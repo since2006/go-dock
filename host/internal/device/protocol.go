@@ -522,6 +522,8 @@ type DeviceMsg struct {
 	Pages   int    `json:"pages"` // 1: shows function pages (§3.5)
 	Beep    int    `json:"beep"`  // 1: plays beep messages (§3.6)
 	IR      int    `json:"ir"`    // 1: sends infrared (§3.7)
+	// 1: takes brightness settings (§3.3)
+	Settings int `json:"settings"`
 	// ack
 	Seq uint64 `json:"seq"`
 	// log; also the error text of ota

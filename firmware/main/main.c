@@ -10,6 +10,7 @@
 #include "link.h"
 #include "lvgl.h"
 #include "ota.h"
+#include "settings.h"
 #include "ui.h"
 
 #define STACK_CHECK_US (10 * 1000000LL)
@@ -65,6 +66,7 @@ static void lvgl_task(void *arg)
 
 void app_main(void)
 {
+    settings_init();
     ota_init();
     beep_init();
     ir_init();

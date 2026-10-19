@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 #include "ir.h"
 #include "ota.h"
+#include "settings.h"
 
 #define MAX_LINE 4096
 
@@ -49,7 +50,7 @@ static void send_hello(void)
     char buf[192];
     snprintf(buf, sizeof(buf),
              "{\"t\":\"hello\",\"proto\":%d,\"fw\":\"%s\",\"w\":600,\"h\":450,\"max_line\":%d%s,\"beep\":1,"
-             "\"pages\":1%s}",
+             "\"pages\":1,\"settings\":1%s}",
              DOCK_PROTO, esp_app_get_description()->version, MAX_LINE, s_ota ? ",\"ota\":1" : "",
              ir_ready() ? ",\"ir\":1" : "");
     send_line(buf);
@@ -214,7 +215,7 @@ static dock_item_kind_t parse_kind(const cJSON *v)
 
 static dock_icon_t parse_icon(const cJSON *v)
 {
-    static const char *const names[DOCK_ICON_COUNT] = {"bulb", "power", "cool", "heat", "dry", "fan", "auto"};
+    static const char *const names[DOCK_ICON_COUNT] = {"bulb", "power", "cool", "heat", "dry", "fan", "auto", "moon", "bell"};
     int i = name_index(v, names, DOCK_ICON_COUNT);
     return i < 0 ? DOCK_ICON_BULB : (dock_icon_t)i;
 }
@@ -261,6 +262,34 @@ static void parse_pages(const cJSON *root, dock_pages_t *out)
             d->at_min = cJSON_IsTrue(cJSON_GetObjectItem(it, "at_min"));
             d->at_max = cJSON_IsTrue(cJSON_GetObjectItem(it, "at_max"));
         }
+    }
+}
+
+// A number field cut to lo..hi; def when it is missing.
+static int64_t num_in(const cJSON *v, int64_t lo, int64_t hi, int64_t def)
+{
+    if (!cJSON_IsNumber(v)) {
+        return def;
+    }
+    int64_t n = num(v);
+    return n < lo ? lo : n > hi ? hi : n;
+}
+
+// settings: the screen's brightness; a field left out keeps its value.
+static void handle_settings(const cJSON *root)
+{
+    settings_t s = settings_get();
+    s.brightness = (uint8_t)num_in(cJSON_GetObjectItem(root, "brightness"), 10, 100, s.brightness);
+    s.dim_brightness = (uint8_t)num_in(cJSON_GetObjectItem(root, "dim_brightness"), 0, 100, s.dim_brightness);
+    s.dim_after = (uint32_t)num_in(cJSON_GetObjectItem(root, "dim_after"), 0, 24 * 3600, s.dim_after);
+    if (!settings_set(s)) {
+        return;
+    }
+    if (s.dim_after) {
+        link_log("info", "屏幕亮度 %u%%，无任务 %lu 秒后降到 %u%%", s.brightness, (unsigned long)s.dim_after,
+                 s.dim_brightness);
+    } else {
+        link_log("info", "屏幕亮度 %u%%，不自动变暗", s.brightness);
     }
 }
 
@@ -425,6 +454,8 @@ static void handle_line(char *line)
         s_pages_scratch = tmp;
         s_pages_version++;
         xSemaphoreGive(s_lock);
+    } else if (strcmp(t->valuestring, "settings") == 0 && !s_incompatible) {
+        handle_settings(root);
     } else if (strcmp(t->valuestring, "beep") == 0) {
         handle_beep(root);
     } else if (strcmp(t->valuestring, "ir_send") == 0 && !s_incompatible) {

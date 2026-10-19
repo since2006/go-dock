@@ -239,7 +239,7 @@ const SCR_ICONS = {
   running: '<path d="M12 3.5a8.5 8.5 0 1 1-8.5 8.5"/>',
   done: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
   idle: '<circle cx="12" cy="12" r="2.5"/>',
-  moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>',
+  moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>', // also a function page icon
   bulb: '<path d="M9 18h6"/><path d="M10 21h4"/><path d="M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.4 1.1 2.2h5c0-.8.4-1.6 1.1-2.2A6 6 0 0 0 12 3z"/>',
   // Function page icons (item.icon), lines and arcs only, as the firmware draws them.
   power: '<path d="M12 3v8"/><path d="M6.4 6.4a8 8 0 1 0 11.2 0"/>',
@@ -248,6 +248,7 @@ const SCR_ICONS = {
   dry: '<path d="M12 3 6.8 11.5A6 6 0 1 0 17.2 11.5z"/>',
   fan: '<path d="M3 8h9a2.5 2.5 0 1 0-2.5-2.5"/><path d="M3 12h15a2.5 2.5 0 1 1-2.5 2.5"/><path d="M3 16h7a2 2 0 1 1-2 2"/>',
   auto: '<path d="M20 12a8 8 0 0 1-14 5.3"/><path d="M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v3.7h-3.7M6 21v-3.7h3.7"/>',
+  bell: '<path d="M6 14V9a6 6 0 0 1 12 0v5l2 2.5H4z"/><path d="M10 19.5a2 2 0 0 0 4 0"/>',
   unplug: '<path d="M9 7V3M15 7V3"/><path d="M6 7h12v4a6 6 0 0 1-6 6 6 6 0 0 1-6-6z"/><path d="M12 17v4"/><path d="M3 3l18 18"/>',
 };
 
@@ -868,7 +869,10 @@ function fillForm(f, cfg) {
     if (!input.name) continue;
     const v = getPath(cfg, input.name);
     if (input.type === "checkbox") input.checked = !!v;
-    else input.value = v ?? "";
+    else if (input.tagName === "SELECT" && v != null && ![...input.options].some((o) => o.value === String(v))) {
+      input.append(el("option", { value: v }, String(v))); // a value written by hand stays as it is
+      input.value = v;
+    } else input.value = v ?? "";
   }
 }
 
@@ -877,7 +881,7 @@ function readForm(f) {
   for (const input of f.elements) {
     if (!input.name) continue;
     let v = input.type === "checkbox" ? input.checked : input.type === "password" ? input.value : input.value.trim();
-    if (input.type === "number") v = Number(v);
+    if (input.type === "number" || "num" in input.dataset) v = Number(v);
     setPath(out, input.name, v);
   }
   return out;
@@ -911,22 +915,28 @@ form.addEventListener("submit", async (ev) => {
   }
 });
 
-// Alert sounds come from the host, so the list and the browser preview
-// play the same notes as the device.
+// Alert sounds come from the host, so the lists and the browser play the
+// same notes as the device. Each sound select names its custom notes field
+// (data-custom).
+const soundSelects = [...form.querySelectorAll("select[data-custom]")];
 let sounds = null;
 async function loadSounds() {
   if (sounds) return;
   sounds = (await api("/api/device/sounds")) || [];
-  form.elements["device.beep_sound"].replaceChildren(
-    ...sounds.map((s) => el("option", { value: s.id }, s.name)),
-    el("option", { value: "custom" }, "自定义…"));
+  for (const select of soundSelects) {
+    select.replaceChildren(
+      ...sounds.map((s) => el("option", { value: s.id }, s.name)),
+      el("option", { value: "custom" }, "自定义…"));
+  }
 }
 
-// The notes field only matters for the custom sound.
+// A notes field only matters for the custom sound.
 function showCustomSound() {
-  $("#beep-custom-row").hidden = form.elements["device.beep_sound"].value !== "custom";
+  for (const select of soundSelects) {
+    form.elements[select.dataset.custom].closest("label").hidden = select.value !== "custom";
+  }
 }
-form.elements["device.beep_sound"].addEventListener("change", showCustomSound);
+for (const select of soundSelects) select.addEventListener("change", showCustomSound);
 
 // playNotes stands in for the buzzer with a quiet square wave.
 let audio = null;
@@ -948,25 +958,24 @@ function playNotes(notes) {
   }
 }
 
-// Tries the sound chosen, custom notes as written (saved or not): on the
-// device if it can, else in the browser with the notes the host sends back.
-$("#beep-test").addEventListener("click", async () => {
-  const body = { sound: form.elements["device.beep_sound"].value, custom: form.elements["device.beep_custom"].value };
+// Tries the sound chosen, custom notes as written (saved or not), on the
+// screen's buzzer or in the browser.
+async function trySound(button) {
+  const select = form.elements[button.dataset.sound];
+  const body = { sound: select.value, custom: form.elements[select.dataset.custom].value };
   try {
-    const res = await fetch("/api/device/beep", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    const data = await res.json().catch(() => ({}));
-    if (res.ok) {
-      showMsg("#settings-msg", "已发到设备播放");
-    } else if (data.notes) {
-      playNotes(data.notes);
-      showMsg("#settings-msg", `${data.error}（已在浏览器里模拟播放）`);
-    } else {
-      showMsg("#settings-msg", data.error || res.statusText, true);
+    if (button.dataset.try === "browser") {
+      playNotes((await api("/api/device/notes", { method: "POST", body })).notes);
+      showMsg("#settings-msg", "正在电脑上播放");
+      return;
     }
+    await api("/api/device/beep", { method: "POST", body });
+    showMsg("#settings-msg", "已发到屏幕播放；没接蜂鸣器时听不到");
   } catch (e) {
     showMsg("#settings-msg", e.message, true);
   }
-});
+}
+for (const b of form.querySelectorAll("button[data-try]")) b.addEventListener("click", () => trySound(b));
 
 $("#scan-ports").addEventListener("click", async () => {
   const box = $("#ports");

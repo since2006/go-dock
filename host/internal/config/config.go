@@ -85,6 +85,35 @@ type DeviceConfig struct {
 	Beep       bool   `json:"beep"`
 	BeepSound  string `json:"beep_sound"`
 	BeepCustom string `json:"beep_custom"`
+	// BeepDone sounds it when a task finishes, with a melody of its own
+	// picked the same way.
+	BeepDone       bool   `json:"beep_done"`
+	BeepDoneSound  string `json:"beep_done_sound"`
+	BeepDoneCustom string `json:"beep_done_custom"`
+	// Mute silences both for a while, keeping which are on; the 屏幕 page
+	// switches it.
+	Mute bool `json:"mute"`
+	// Brightness is the screen's brightness in percent. It dims to
+	// DimBrightness (0 turns it off) after DimAfter without an active task;
+	// a DimAfter of 0 never dims.
+	Brightness    int      `json:"brightness"`
+	DimBrightness int      `json:"dim_brightness"`
+	DimAfter      Duration `json:"dim_after"`
+	// SettingsPage adds a 屏幕 page to change these and the beep on the
+	// screen itself.
+	SettingsPage bool `json:"settings_page"`
+}
+
+func (d DeviceConfig) validate() error {
+	switch {
+	case d.Brightness < 10 || d.Brightness > 100:
+		return errors.New("屏幕亮度需在 10%-100% 之间")
+	case d.DimBrightness < 0 || d.DimBrightness > 100:
+		return errors.New("变暗后的亮度需在 0%-100% 之间")
+	case d.DimAfter != 0 && (d.DimAfter.D() < time.Minute || d.DimAfter.D() > 24*time.Hour):
+		return errors.New("变暗时间需在 1m-24h 之间，0 为不变暗")
+	}
+	return nil
 }
 
 type ClaudeConfig struct {
@@ -256,8 +285,11 @@ type Price struct {
 
 func Default() Config {
 	return Config{
-		Web:    WebConfig{Listen: DefaultListen, OpenBrowser: true},
-		Device: DeviceConfig{Enabled: true, Port: "auto", Beep: true, BeepSound: "chime"},
+		Web: WebConfig{Listen: DefaultListen, OpenBrowser: true},
+		Device: DeviceConfig{
+			Enabled: true, Port: "auto", Beep: true, BeepSound: "chime", BeepDoneSound: "rise",
+			Brightness: 80, DimBrightness: 20, DimAfter: Duration(5 * time.Minute), SettingsPage: true,
+		},
 		Claude: ClaudeConfig{Enabled: true},
 		Codex: CodexConfig{
 			Enabled:           true,
@@ -297,6 +329,9 @@ func (c Config) Validate() error {
 	}
 	if c.Device.Port == "" {
 		return errors.New("device.port 不能为空（自动检测请填 auto）")
+	}
+	if err := c.Device.validate(); err != nil {
+		return err
 	}
 	if c.Display.DoneTTL < 0 || c.Display.StaleAfter <= 0 {
 		return errors.New("display 时长必须为正数")
@@ -487,11 +522,25 @@ func (s *Store) Get() Config {
 
 // Set validates, saves and publishes a new config.
 func (s *Store) Set(c Config) error {
+	s.setMu.Lock()
+	defer s.setMu.Unlock()
+	return s.set(c)
+}
+
+// Update changes the current config with f and sets the result, with no
+// other change in between.
+func (s *Store) Update(f func(*Config)) error {
+	s.setMu.Lock()
+	defer s.setMu.Unlock()
+	c := s.Get()
+	f(&c)
+	return s.set(c)
+}
+
+func (s *Store) set(c Config) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
-	s.setMu.Lock()
-	defer s.setMu.Unlock()
 	if err := s.save(c); err != nil {
 		return err
 	}

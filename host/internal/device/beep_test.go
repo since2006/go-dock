@@ -181,3 +181,76 @@ func TestManagerBeep(t *testing.T) {
 		t.Fatalf("notes %v", got)
 	}
 }
+
+func TestActiveTasks(t *testing.T) {
+	s := model.Snapshot{Sessions: []model.Session{
+		{ID: "a", State: model.StateRunning},
+		{ID: "b", State: model.StateApproval},
+		{ID: "c", State: model.StateDone, Agents: []model.Agent{{ID: "x", State: model.StateRunning}}},
+		{ID: "d", State: model.StateDone},
+		{ID: "e", State: model.StateError},
+	}}
+	now, finished := activeTasks(s, nil)
+	if len(now) != 3 || !now["a"] || !now["b"] || !now["c"] || finished {
+		t.Fatalf("first %v %v", now, finished)
+	}
+	// a ends in an error, b is answered and runs: nothing finished yet.
+	s.Sessions[0].State, s.Sessions[1].State = model.StateError, model.StateRunning
+	if now, finished = activeTasks(s, now); finished || len(now) != 2 {
+		t.Fatalf("error %v %v", now, finished)
+	}
+	// c's subagent is done: c finished.
+	s.Sessions[2].Agents[0].State = model.StateDone
+	if now, finished = activeTasks(s, now); !finished || now["c"] {
+		t.Fatalf("subagent done %v %v", now, finished)
+	}
+}
+
+func TestManagerDoneBeep(t *testing.T) {
+	const helloBeep = `{"t":"hello","proto":1,"fw":"0.2.0","w":600,"h":450,"max_line":4096,"beep":1}`
+	chime, rise := SoundByID("chime").Notes, SoundByID("rise").Notes
+	src := &fakeSource{snap: sampleSnapshot(), ch: make(chan struct{}, 1)} // a: approval, b: running, c: done
+	m, devices := newTestManager(t, src, io.Discard)
+	m.opts.BeepNotes, m.opts.DoneNotes = chime, rise
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	// claude:c was done before go-dock saw it work: only a's question rings.
+	dev := <-devices
+	dev.send(t, helloBeep)
+	if got := notesOf(t, dev.next(t, "beep")); !slices.Equal(got, chime) {
+		t.Fatalf("first %v", got)
+	}
+	dev.none(t, "beep", 100*time.Millisecond)
+
+	// codex:b finishes: the done sound, once.
+	s := sampleSnapshot()
+	s.Sessions[1].State = model.StateDone
+	src.set(s)
+	if got := notesOf(t, dev.next(t, "beep")); !slices.Equal(got, rise) {
+		t.Fatalf("done %v", got)
+	}
+	src.ch <- struct{}{}
+	dev.next(t, "snapshot")
+	dev.none(t, "beep", 100*time.Millisecond)
+
+	// A task that starts waiting rings its own sound even when another
+	// finishes with it.
+	s.Sessions = slices.Clone(s.Sessions) // the manager may still read the last one
+	s.Sessions[0].State = model.StateDone
+	s.Sessions[2].State, s.Sessions[2].Since = model.StateInput, t0
+	src.set(s)
+	if got := notesOf(t, dev.next(t, "beep")); !slices.Equal(got, chime) {
+		t.Fatalf("waiting and done %v", got)
+	}
+	dev.none(t, "beep", 100*time.Millisecond)
+
+	// With the done sound off, finishing is quiet.
+	m.SetOptions(Options{Enabled: true, Port: "auto", MaxSessions: 12, BeepNotes: chime})
+	s.Sessions = slices.Clone(s.Sessions)
+	s.Sessions[2].State = model.StateDone
+	src.set(s)
+	dev.next(t, "snapshot")
+	dev.none(t, "beep", 100*time.Millisecond)
+}

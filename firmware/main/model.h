@@ -91,6 +91,8 @@ typedef enum {
     DOCK_ICON_DRY,
     DOCK_ICON_FAN,
     DOCK_ICON_AUTO,
+    DOCK_ICON_MOON,
+    DOCK_ICON_BELL,
     DOCK_ICON_COUNT,
 } dock_icon_t;
 

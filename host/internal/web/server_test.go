@@ -279,6 +279,15 @@ func TestBeep(t *testing.T) {
 	if w := do(h, "POST", host, "/api/device/beep", "application/json", `nope`); w.Code != http.StatusBadRequest {
 		t.Fatalf("bad body: %d", w.Code)
 	}
+
+	// Only the notes, for the browser: nothing goes to the device.
+	n := len(b.beeps)
+	if w := do(h, "POST", host, "/api/device/notes", "application/json", `{"sound":"custom","custom":"E7 100"}`); w.Code != http.StatusOK || w.Body.String() != `{"notes":[[2637,100]]}`+"\n" || len(b.beeps) != n {
+		t.Fatalf("notes: %d %q %d beeps", w.Code, w.Body.String(), len(b.beeps))
+	}
+	if w := do(h, "POST", host, "/api/device/notes", "application/json", `{"sound":"custom"}`); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "还没有填音符") {
+		t.Fatalf("bad notes: %d %s", w.Code, w.Body.String())
+	}
 }
 
 func TestStaticEmbedded(t *testing.T) {

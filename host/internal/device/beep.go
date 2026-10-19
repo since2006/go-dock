@@ -172,3 +172,20 @@ func waitingTasks(s model.Snapshot) map[string]bool {
 }
 
 func needsUser(s model.State) bool { return s == model.StateApproval || s == model.StateInput }
+
+// activeTasks lists the sessions working or waiting for the user (their
+// subagents included), and reports whether one listed in was has finished
+// since. A session that ends in an error, or was already done when first
+// seen, has not just finished.
+func activeTasks(s model.Snapshot, was map[string]bool) (map[string]bool, bool) {
+	now, finished := map[string]bool{}, false
+	for _, ss := range s.Sessions {
+		switch st, _ := ss.Effective(); st {
+		case model.StateRunning, model.StateApproval, model.StateInput:
+			now[ss.ID] = true
+		case model.StateDone:
+			finished = finished || was[ss.ID]
+		}
+	}
+	return now, finished
+}
