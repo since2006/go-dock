@@ -142,6 +142,19 @@ func TestStatusline(t *testing.T) {
 	if u := sink.usage[P]; u.FiveHour.UsedPct != 70 || u.SevenDay == nil {
 		t.Fatalf("usage after partial = %+v", u)
 	}
+	// An idle session repeats the limits of its last reply: a lower number
+	// in the same window and an earlier window change nothing, not even
+	// when the limits were updated.
+	updated := sink.usage[P].LimitsUpdated
+	p.HandleStatusline([]byte(`{"rate_limits":{"five_hour":{"used_percentage":40,"resets_at":1792210000},"seven_day":{"used_percentage":90,"resets_at":1792000000}}}`))
+	if u := sink.usage[P]; u.FiveHour.UsedPct != 70 || u.SevenDay.UsedPct != 31 || !u.LimitsUpdated.Equal(updated) {
+		t.Fatalf("usage after a stale session = %+v", u)
+	}
+	// A new window starts low.
+	p.HandleStatusline([]byte(`{"rate_limits":{"five_hour":{"used_percentage":3,"resets_at":1792228000}}}`))
+	if u := sink.usage[P]; u.FiveHour.UsedPct != 3 || u.FiveHour.ResetsAt.Unix() != 1792228000 || u.SevenDay.UsedPct != 31 {
+		t.Fatalf("usage after a new window = %+v", u)
+	}
 	// API-key sessions have no rate_limits.
 	if err := p.HandleStatusline([]byte(`{"session_id":"s"}`)); err != nil {
 		t.Fatal(err)

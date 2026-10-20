@@ -166,16 +166,34 @@ func (p *Provider) HandleStatusline(body []byte) error {
 	}
 	now := time.Now()
 	p.sink.UpdateUsage(P, func(u *model.Usage) {
-		// Claude Code drops a window once it resets. Keep the old one; the
-		// hub reports a window past its reset time as 0%.
-		if five != nil {
-			u.FiveHour = five
+		f, s := fresher(u.FiveHour, five), fresher(u.SevenDay, seven)
+		if f == u.FiveHour && s == u.SevenDay {
+			return // an idle session repeating older limits
 		}
-		if seven != nil {
-			u.SevenDay = seven
-		}
+		u.FiveHour, u.SevenDay = f, s
 		u.LimitsUpdated = now
 		u.LimitsSource = "statusline"
 	})
 	return nil
+}
+
+// fresher picks between the window we have and one a statusline reported.
+// Every open Claude Code session runs its statusline, an idle one with the
+// limits of its last API reply, maybe from yesterday, so the last report is
+// not always the newest. Usage only grows within a window: the later window
+// wins, and within the same one the higher number.
+func fresher(cur, in *model.Window) *model.Window {
+	switch {
+	case in == nil:
+		// Claude Code drops a window once it resets. Keep the old one; the
+		// hub reports a window past its reset time as 0%.
+		return cur
+	case cur == nil || cur.ResetsAt.IsZero() || in.ResetsAt.IsZero():
+		return in
+	case in.ResetsAt.After(cur.ResetsAt):
+		return in
+	case in.ResetsAt.Equal(cur.ResetsAt) && in.UsedPct >= cur.UsedPct:
+		return in
+	}
+	return cur
 }

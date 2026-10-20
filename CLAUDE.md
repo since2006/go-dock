@@ -70,7 +70,7 @@ Firmware UI checks without hardware: `firmware/sim` compiles `main/ui.c` against
 
 - `~/.claude/sessions/<pid>.json`: live status (`busy|idle|waiting`, `waitingFor`); a file whose PID is no longer alive means the session ended.
 - `~/.claude/projects/**/<session>.jsonl`: token usage (deduplicated per `message.id`, max per field), `ai-title` / `custom-title` lines for session titles (a `/rename` title wins), the last assistant text block for `Session.Message` (cleared by the next user prompt); `subagents/agent-<id>.jsonl` + `.meta.json` for subagents without hooks.
-- statusLine stdin `rate_limits` is the only source of Claude 5h/7d percentages; go-dock wraps the user's existing statusLine command (`statusline --chain <base64 of original>`).
+- statusLine stdin `rate_limits` is the only source of Claude 5h/7d percentages; go-dock wraps the user's existing statusLine command (`statusline --chain <base64 of original>`). Every open session runs it, an idle one with the limits of its last API reply, so `claude.fresher` keeps the later window and, within one window (same `resets_at`), the higher number instead of the last report.
 
 ## Codex data sources (undocumented, parse defensively)
 
