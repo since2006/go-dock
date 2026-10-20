@@ -34,7 +34,11 @@ func TestSounds(t *testing.T) {
 	if SoundByID("nope").ID != DefaultSound || SoundByID("rise").ID != "rise" {
 		t.Fatal("SoundByID")
 	}
-	if got := string(EncodeBeep([]Note{{2000, 100}, {0, 50}})); got != `{"t":"beep","notes":[[2000,100],[0,50]]}`+"\n" {
+	// Full volume leaves vol out, as older go-dock sent it.
+	if got := string(EncodeBeep([]Note{{2000, 100}, {0, 50}}, 100)); got != `{"t":"beep","notes":[[2000,100],[0,50]]}`+"\n" {
+		t.Fatalf("encoded %q", got)
+	}
+	if got := string(EncodeBeep([]Note{{2000, 100}}, 30)); got != `{"t":"beep","notes":[[2000,100]],"vol":30}`+"\n" {
 		t.Fatalf("encoded %q", got)
 	}
 }
@@ -45,7 +49,7 @@ func TestBeepFitsLine(t *testing.T) {
 	for i := range notes {
 		notes[i] = Note{maxHz, maxMs}
 	}
-	if n := len(EncodeBeep(notes)); n == 0 || n > MaxLine {
+	if n := len(EncodeBeep(notes, 99)); n == 0 || n > MaxLine {
 		t.Errorf("beep of %d notes is %d bytes", maxNotes, n)
 	}
 }
@@ -130,8 +134,8 @@ func TestManagerBeep(t *testing.T) {
 	)
 	src := &fakeSource{snap: sampleSnapshot(), ch: make(chan struct{}, 1)} // claude:a needs approval
 	m, devices := newTestManager(t, src, io.Discard)
-	m.opts.BeepNotes = SoundByID("chime").Notes
-	if err := m.Beep(SoundByID("rise").Notes); err == nil || !strings.Contains(err.Error(), "未连接") {
+	m.opts.BeepNotes, m.opts.Volume = SoundByID("chime").Notes, 60
+	if err := m.Beep(SoundByID("rise").Notes, 30); err == nil || !strings.Contains(err.Error(), "未连接") {
 		t.Fatalf("beep with no device: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -143,7 +147,7 @@ func TestManagerBeep(t *testing.T) {
 	dev.send(t, helloPlain)
 	waitFor(t, "ready", func() bool { return m.Status().State == StateReady })
 	dev.none(t, "beep", 100*time.Millisecond)
-	if err := m.Beep(SoundByID("rise").Notes); err == nil || !strings.Contains(err.Error(), "不支持") {
+	if err := m.Beep(SoundByID("rise").Notes, 30); err == nil || !strings.Contains(err.Error(), "不支持") {
 		t.Fatalf("beep on old firmware: %v", err)
 	}
 
@@ -151,11 +155,12 @@ func TestManagerBeep(t *testing.T) {
 	m.Reconnect()
 	dev = <-devices
 	dev.send(t, helloBeep)
-	if got := notesOf(t, dev.next(t, "beep")); !slices.Equal(got, SoundByID("chime").Notes) {
-		t.Fatalf("notes %v", got)
+	msg := dev.next(t, "beep")
+	if got := notesOf(t, msg); !slices.Equal(got, SoundByID("chime").Notes) || msg["vol"] != 60.0 {
+		t.Fatalf("beep %v", msg)
 	}
-	if !m.Status().Beep {
-		t.Fatal("status says no beep")
+	if st := m.Status(); !st.Beep || st.Volume {
+		t.Fatalf("status %+v: beep without volume", st)
 	}
 	src.ch <- struct{}{}
 	dev.next(t, "snapshot")
@@ -185,11 +190,11 @@ func TestManagerBeep(t *testing.T) {
 	dev.none(t, "beep", 100*time.Millisecond)
 
 	// ... but trying a sound still plays it.
-	if err := m.Beep(SoundByID("rise").Notes); err != nil {
+	if err := m.Beep(SoundByID("rise").Notes, 30); err != nil {
 		t.Fatal(err)
 	}
-	if got := notesOf(t, dev.next(t, "beep")); !slices.Equal(got, SoundByID("rise").Notes) {
-		t.Fatalf("notes %v", got)
+	if msg := dev.next(t, "beep"); !slices.Equal(notesOf(t, msg), SoundByID("rise").Notes) || msg["vol"] != 30.0 {
+		t.Fatalf("try %v", msg)
 	}
 }
 
@@ -218,7 +223,7 @@ func TestActiveTasks(t *testing.T) {
 }
 
 func TestManagerDoneBeep(t *testing.T) {
-	const helloBeep = `{"t":"hello","proto":1,"fw":"0.2.0","w":600,"h":450,"max_line":4096,"beep":1}`
+	const helloBeep = `{"t":"hello","proto":1,"fw":"0.3.0","w":600,"h":450,"max_line":4096,"beep":2}`
 	chime, rise := SoundByID("chime").Notes, SoundByID("rise").Notes
 	src := &fakeSource{snap: sampleSnapshot(), ch: make(chan struct{}, 1)} // a: approval, b: running, c: done
 	m, devices := newTestManager(t, src, io.Discard)
@@ -232,6 +237,9 @@ func TestManagerDoneBeep(t *testing.T) {
 	dev.send(t, helloBeep)
 	if got := notesOf(t, dev.next(t, "beep")); !slices.Equal(got, chime) {
 		t.Fatalf("first %v", got)
+	}
+	if !m.Status().Volume {
+		t.Fatal("beep:2 plays the volume sent")
 	}
 	dev.none(t, "beep", 100*time.Millisecond)
 

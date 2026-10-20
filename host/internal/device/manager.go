@@ -25,6 +25,8 @@ type Options struct {
 	// user, DoneNotes when one finishes; none plays nothing.
 	BeepNotes []Note
 	DoneNotes []Note
+	Volume    int // percent, for both
+
 	// Brightness in percent; the screen dims to DimBrightness after
 	// DimAfter without an active task (0: never). See EncodeSettings.
 	Brightness    int
@@ -65,6 +67,8 @@ type Status struct {
 	Pages bool `json:"pages,omitempty"`
 	// Beep: the firmware plays sounds on a buzzer (if one is wired up).
 	Beep bool `json:"beep,omitempty"`
+	// Volume: it plays them at the volume sent.
+	Volume bool `json:"volume,omitempty"`
 	// IR: the firmware sends infrared (if a transmitter is wired up).
 	IR bool `json:"ir,omitempty"`
 	// Settings: the firmware takes brightness settings.
@@ -105,7 +109,7 @@ type Manager struct {
 	kick     chan struct{}
 	flashReq chan flashJob
 	actions  chan struct{} // bounds taps being handled at once
-	beepReq  chan []Note   // a sound to try out
+	beepReq  chan []byte   // the beep line of a sound to try out
 	irReq    chan irLine   // ir_send lines to write
 	settings chan struct{} // the brightness settings changed
 	// waiting and active hold waitingTasks and activeTasks as of the last
@@ -147,7 +151,7 @@ func NewManager(src SnapshotSource, opts Options, hostVersion string, log *slog.
 		kick:         make(chan struct{}, 1),
 		flashReq:     make(chan flashJob),
 		actions:      make(chan struct{}, 4),
-		beepReq:      make(chan []Note, 1),
+		beepReq:      make(chan []byte, 1),
 		irReq:        make(chan irLine, 4),
 		settings:     make(chan struct{}, 1),
 		opts:         opts,
@@ -258,7 +262,7 @@ func (m *Manager) Run(ctx context.Context) {
 
 // unlinked forgets the device while searching for one.
 func unlinked(s *Status) {
-	s.State, s.Port, s.Firmware, s.OTA, s.Pages, s.Beep, s.IR, s.Settings, s.Incompatible, s.Width, s.Height = StateSearching, "", "", false, false, false, false, false, false, 0, 0
+	s.State, s.Port, s.Firmware, s.OTA, s.Pages, s.Beep, s.Volume, s.IR, s.Settings, s.Incompatible, s.Width, s.Height = StateSearching, "", "", false, false, false, false, false, false, false, 0, 0
 }
 
 // wait sleeps for d (forever when d is 0) or until a reconnect request.
@@ -389,7 +393,7 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 				}
 				ready, pagesOK, beepOK, irOK, settingsOK = true, msg.Pages > 0, msg.Beep > 0, msg.IR > 0, msg.Settings > 0
 				m.update(func(s *Status) {
-					s.State, s.Incompatible, s.Pages, s.Beep, s.IR, s.Settings, s.Width, s.Height, s.Error = StateReady, false, pagesOK, beepOK, irOK, settingsOK, msg.W, msg.H, ""
+					s.State, s.Incompatible, s.Pages, s.Beep, s.Volume, s.IR, s.Settings, s.Width, s.Height, s.Error = StateReady, false, pagesOK, beepOK, msg.Beep >= 2, irOK, settingsOK, msg.W, msg.H, ""
 				})
 				if settingsOK {
 					if err := m.write(conn, EncodeSettings(m.options())); err != nil {
@@ -442,9 +446,9 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 					return fail(err)
 				}
 			}
-		case notes := <-m.beepReq:
+		case line := <-m.beepReq:
 			if ready && beepOK && !incompatible {
-				if err := m.write(conn, EncodeBeep(notes)); err != nil {
+				if err := m.write(conn, line); err != nil {
 					return fail(err)
 				}
 			}
@@ -542,16 +546,16 @@ func (m *Manager) alert(conn io.WriteCloser, s model.Snapshot) error {
 	switch {
 	case fresh && len(opts.BeepNotes) > 0:
 		m.log.Debug("有任务等待处理，设备响铃", "notes", len(opts.BeepNotes))
-		return m.write(conn, EncodeBeep(opts.BeepNotes))
+		return m.write(conn, EncodeBeep(opts.BeepNotes, opts.Volume))
 	case finished && len(opts.DoneNotes) > 0:
 		m.log.Debug("有任务完成，设备响铃", "notes", len(opts.DoneNotes))
-		return m.write(conn, EncodeBeep(opts.DoneNotes))
+		return m.write(conn, EncodeBeep(opts.DoneNotes, opts.Volume))
 	}
 	return nil
 }
 
-// Beep plays notes on the device now, to try a sound out.
-func (m *Manager) Beep(notes []Note) error {
+// Beep plays notes on the device now at vol percent, to try a sound out.
+func (m *Manager) Beep(notes []Note, vol int) error {
 	switch st := m.Status(); {
 	case st.State != StateReady:
 		return errors.New("设备未连接")
@@ -559,7 +563,7 @@ func (m *Manager) Beep(notes []Note) error {
 		return errors.New("设备固件不支持蜂鸣器，请先升级固件")
 	}
 	select {
-	case m.beepReq <- notes:
+	case m.beepReq <- EncodeBeep(notes, vol):
 	default: // one is on its way already
 	}
 	return nil

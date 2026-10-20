@@ -179,6 +179,7 @@ func deviceOptions(c config.Config) device.Options {
 	o := device.Options{
 		Enabled: c.Device.Enabled, Port: c.Device.Port, MaxSessions: c.Display.MaxSessions, ShowIdle: c.Display.ShowIdle,
 		Brightness: c.Device.Brightness, DimBrightness: c.Device.DimBrightness, DimAfter: c.Device.DimAfter.D(),
+		Volume: c.Device.Volume,
 	}
 	if c.Device.Beep && !c.Device.Mute {
 		o.BeepNotes = beepNotes(c.Device.BeepSound, c.Device.BeepCustom)
@@ -402,7 +403,12 @@ func (a *App) SoundNotes(sound, custom string) ([][2]int, error) {
 	return device.SoundByID(sound).Notes, nil
 }
 
-func (a *App) DeviceBeep(notes [][2]int) error { return a.device.Beep(notes) }
+func (a *App) DeviceBeep(notes [][2]int, volume int) error {
+	if volume == 0 {
+		volume = a.store.Get().Device.Volume
+	}
+	return a.device.Beep(notes, volume)
+}
 
 func (a *App) MQTTStatus() any { return a.mqtt.Status() }
 

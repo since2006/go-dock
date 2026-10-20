@@ -938,10 +938,12 @@ function showCustomSound() {
 }
 for (const select of soundSelects) select.addEventListener("change", showCustomSound);
 
-// playNotes stands in for the buzzer with a quiet square wave.
+// playNotes stands in for the buzzer with a quiet square wave. Each volume
+// percent below 100 takes 0.5 dB off, as the firmware's beep.c does.
 let audio = null;
-function playNotes(notes) {
+function playNotes(notes, volume) {
   audio = audio || new AudioContext();
+  const level = 0.05 * 10 ** ((volume - 100) * 0.5 / 20);
   let t = audio.currentTime + 0.05;
   for (const [hz, ms] of notes) {
     if (hz > 0) {
@@ -949,7 +951,7 @@ function playNotes(notes) {
       const gain = audio.createGain();
       osc.type = "square";
       osc.frequency.value = hz;
-      gain.gain.value = 0.05;
+      gain.gain.value = level;
       osc.connect(gain).connect(audio.destination);
       osc.start(t);
       osc.stop(t + ms / 1000);
@@ -958,19 +960,23 @@ function playNotes(notes) {
   }
 }
 
-// Tries the sound chosen, custom notes as written (saved or not), on the
-// screen's buzzer or in the browser.
+// Tries the sound chosen, custom notes as written and the volume chosen
+// (saved or not), on the screen's buzzer or in the browser.
 async function trySound(button) {
   const select = form.elements[button.dataset.sound];
-  const body = { sound: select.value, custom: form.elements[select.dataset.custom].value };
+  const volume = Number(form.elements["device.volume"].value);
+  const body = { sound: select.value, custom: form.elements[select.dataset.custom].value, volume };
   try {
     if (button.dataset.try === "browser") {
-      playNotes((await api("/api/device/notes", { method: "POST", body })).notes);
+      playNotes((await api("/api/device/notes", { method: "POST", body })).notes, volume);
       showMsg("#settings-msg", "正在电脑上播放");
       return;
     }
     await api("/api/device/beep", { method: "POST", body });
-    showMsg("#settings-msg", "已发到屏幕播放；没接蜂鸣器时听不到");
+    const dev = (state && state.device) || {};
+    showMsg("#settings-msg", volume < 100 && !dev.volume
+      ? "已发到屏幕播放；屏幕固件较旧，按 100% 音量响，升级固件后音量才生效"
+      : "已发到屏幕播放；没接蜂鸣器时听不到");
   } catch (e) {
     showMsg("#settings-msg", e.message, true);
   }

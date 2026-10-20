@@ -246,10 +246,11 @@ func TestBrokerFor(t *testing.T) {
 func TestValidateBrightness(t *testing.T) {
 	c := Default()
 	if d := c.Device; d.Brightness != 80 || d.DimBrightness != 20 || d.DimAfter.D() != 5*time.Minute || !d.SettingsPage ||
-		d.BeepDone || d.BeepDoneSound != "rise" || d.Mute {
+		d.BeepDone || d.BeepDoneSound != "rise" || d.Mute || d.Volume != 100 {
 		t.Fatalf("defaults %+v", d)
 	}
 	c.Device.DimBrightness, c.Device.DimAfter = 0, 0 // off when idle; never dims
+	c.Device.Volume = 5                              // the quietest
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -259,6 +260,8 @@ func TestValidateBrightness(t *testing.T) {
 		"dim below":  func(d *DeviceConfig) { d.DimBrightness = -1 },
 		"too soon":   func(d *DeviceConfig) { d.DimAfter = Duration(30 * time.Second) },
 		"too late":   func(d *DeviceConfig) { d.DimAfter = Duration(25 * time.Hour) },
+		"too quiet":  func(d *DeviceConfig) { d.Volume = 4 },
+		"too loud":   func(d *DeviceConfig) { d.Volume = 101 },
 	} {
 		c := Default()
 		f(&c.Device)

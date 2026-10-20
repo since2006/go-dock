@@ -49,7 +49,7 @@ static void send_hello(void)
 {
     char buf[192];
     snprintf(buf, sizeof(buf),
-             "{\"t\":\"hello\",\"proto\":%d,\"fw\":\"%s\",\"w\":600,\"h\":450,\"max_line\":%d%s,\"beep\":1,"
+             "{\"t\":\"hello\",\"proto\":%d,\"fw\":\"%s\",\"w\":600,\"h\":450,\"max_line\":%d%s,\"beep\":2,"
              "\"pages\":1,\"settings\":1%s}",
              DOCK_PROTO, esp_app_get_description()->version, MAX_LINE, s_ota ? ",\"ota\":1" : "",
              ir_ready() ? ",\"ir\":1" : "");
@@ -293,7 +293,8 @@ static void handle_settings(const cJSON *root)
     }
 }
 
-// beep: {"notes":[[hz,ms],...]}; a frequency out of range plays as a rest.
+// beep: {"notes":[[hz,ms],...],"vol":percent}; a frequency out of range
+// plays as a rest, no vol plays at full volume.
 static void handle_beep(const cJSON *root)
 {
     static beep_note_t notes[BEEP_MAX_NOTES]; // only the reader task gets here
@@ -313,7 +314,7 @@ static void handle_beep(const cJSON *root)
         notes[n].ms = ms > 1000 ? 1000 : (uint16_t)ms;
         n++;
     }
-    beep_play(notes, n);
+    beep_play(notes, n, (int)num_in(cJSON_GetObjectItem(root, "vol"), 1, 100, 100));
 }
 
 // ir_send: {"hz":38000,"raw":[µs,...]}; a frame out of range is dropped

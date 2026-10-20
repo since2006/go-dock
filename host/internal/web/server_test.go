@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ type fakeBackend struct {
 	flashing  bool
 	actions   []model.Action
 	beeps     [][][2]int
+	volumes   []int
 }
 
 func (f *fakeBackend) Snapshot() model.Snapshot             { return model.Snapshot{} }
@@ -80,11 +82,12 @@ func (f *fakeBackend) SoundNotes(sound, custom string) ([][2]int, error) {
 	}
 	return nil, errors.New("no such sound")
 }
-func (f *fakeBackend) DeviceBeep(notes [][2]int) error {
+func (f *fakeBackend) DeviceBeep(notes [][2]int, volume int) error {
 	if f.cfg.Device.Port == "none" {
 		return errors.New("设备未连接")
 	}
 	f.beeps = append(f.beeps, notes)
+	f.volumes = append(f.volumes, volume)
 	return nil
 }
 func (f *fakeBackend) PluginAction(ctx context.Context, a model.Action) error {
@@ -265,8 +268,15 @@ func TestBeep(t *testing.T) {
 	if w := do(h, "POST", host, "/api/device/beep", "application/json", `{"sound":"rise"}`); w.Code != http.StatusOK || len(b.beeps) != 1 || b.beeps[0][0] != [2]int{2093, 100} {
 		t.Fatalf("beep: %d %s %v", w.Code, w.Body.String(), b.beeps)
 	}
-	if w := do(h, "POST", host, "/api/device/beep", "application/json", `{"sound":"custom","custom":"E7 100"}`); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"notes":[[2637,100]]`) {
+	if w := do(h, "POST", host, "/api/device/beep", "application/json", `{"sound":"custom","custom":"E7 100","volume":40}`); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"notes":[[2637,100]]`) {
 		t.Fatalf("custom: %d %s", w.Code, w.Body.String())
+	}
+	// The volume chosen in the form, saved or not; none means the one set.
+	if !slices.Equal(b.volumes, []int{0, 40}) {
+		t.Fatalf("volumes %v", b.volumes)
+	}
+	if w := do(h, "POST", host, "/api/device/beep", "application/json", `{"sound":"rise","volume":101}`); w.Code != http.StatusBadRequest || len(b.beeps) != 2 {
+		t.Fatalf("loud: %d %s", w.Code, w.Body.String())
 	}
 	if w := do(h, "POST", host, "/api/device/beep", "application/json", `{"sound":"custom"}`); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "还没有填音符") {
 		t.Fatalf("empty custom: %d %s", w.Code, w.Body.String())

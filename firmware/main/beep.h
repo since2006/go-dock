@@ -17,5 +17,6 @@ typedef struct {
 // Sets up the PWM output and starts the player task. Call once at boot.
 void beep_init(void);
 
-// Plays notes in the background, cutting off whatever is playing.
-void beep_play(const beep_note_t *notes, int count);
+// Plays notes in the background at a volume in percent (1-100), cutting
+// off whatever is playing.
+void beep_play(const beep_note_t *notes, int count, int volume);

@@ -93,6 +93,8 @@ type DeviceConfig struct {
 	// Mute silences both for a while, keeping which are on; the 屏幕 page
 	// switches it.
 	Mute bool `json:"mute"`
+	// Volume is how loud both play, in percent (5-100).
+	Volume int `json:"volume"`
 	// Brightness is the screen's brightness in percent. It dims to
 	// DimBrightness (0 turns it off) after DimAfter without an active task;
 	// a DimAfter of 0 never dims.
@@ -112,6 +114,8 @@ func (d DeviceConfig) validate() error {
 		return errors.New("变暗后的亮度需在 0%-100% 之间")
 	case d.DimAfter != 0 && (d.DimAfter.D() < time.Minute || d.DimAfter.D() > 24*time.Hour):
 		return errors.New("变暗时间需在 1m-24h 之间，0 为不变暗")
+	case d.Volume < 5 || d.Volume > 100:
+		return errors.New("提示音音量需在 5%-100% 之间")
 	}
 	return nil
 }
@@ -287,7 +291,7 @@ func Default() Config {
 	return Config{
 		Web: WebConfig{Listen: DefaultListen, OpenBrowser: true},
 		Device: DeviceConfig{
-			Enabled: true, Port: "auto", Beep: true, BeepSound: "chime", BeepDoneSound: "rise",
+			Enabled: true, Port: "auto", Beep: true, BeepSound: "chime", BeepDoneSound: "rise", Volume: 100,
 			Brightness: 80, DimBrightness: 20, DimAfter: Duration(5 * time.Minute), SettingsPage: true,
 		},
 		Claude: ClaudeConfig{Enabled: true},

@@ -43,10 +43,11 @@ type Backend interface {
 	DevicePorts() (any, error)
 	// DeviceSounds lists the built-in alert sounds. SoundNotes gives the
 	// notes of one, or of custom notes as written in the settings; DeviceBeep
-	// plays notes on the device to try them out.
+	// plays notes on the device to try them out, at a volume in percent (0:
+	// the one set).
 	DeviceSounds() any
 	SoundNotes(sound, custom string) ([][2]int, error)
-	DeviceBeep(notes [][2]int) error
+	DeviceBeep(notes [][2]int, volume int) error
 	ReconnectDevice()
 	ApplyFirmware() error
 	UpdateStatus() any
@@ -273,29 +274,35 @@ func (s *Server) getSounds(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.backend.DeviceSounds())
 }
 
-// soundNotes reads {"sound": id, "custom": notes for sound "custom"} and
-// resolves it to notes; on an error it has answered the request.
-func (s *Server) soundNotes(w http.ResponseWriter, r *http.Request) ([][2]int, bool) {
+// soundNotes reads {"sound": id, "custom": notes for sound "custom",
+// "volume": percent} and resolves it to notes and the volume (0 when not
+// given); on an error it has answered the request.
+func (s *Server) soundNotes(w http.ResponseWriter, r *http.Request) ([][2]int, int, bool) {
 	var body struct {
 		Sound  string `json:"sound"`
 		Custom string `json:"custom"`
+		Volume int    `json:"volume"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
-		return nil, false
+		return nil, 0, false
+	}
+	if body.Volume < 0 || body.Volume > 100 {
+		writeErr(w, http.StatusBadRequest, errors.New("音量需在 0-100 之间"))
+		return nil, 0, false
 	}
 	notes, err := s.backend.SoundNotes(body.Sound, body.Custom)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
-		return nil, false
+		return nil, 0, false
 	}
-	return notes, true
+	return notes, body.Volume, true
 }
 
 // postNotes gives the notes of a sound without playing it, for the
 // browser to play.
 func (s *Server) postNotes(w http.ResponseWriter, r *http.Request) {
-	if notes, ok := s.soundNotes(w, r); ok {
+	if notes, _, ok := s.soundNotes(w, r); ok {
 		writeJSON(w, http.StatusOK, map[string]any{"notes": notes})
 	}
 }
@@ -303,13 +310,13 @@ func (s *Server) postNotes(w http.ResponseWriter, r *http.Request) {
 // postBeep plays a sound on the device; 409 means the device cannot play
 // it now (not connected, firmware without a buzzer).
 func (s *Server) postBeep(w http.ResponseWriter, r *http.Request) {
-	notes, ok := s.soundNotes(w, r)
+	notes, volume, ok := s.soundNotes(w, r)
 	if !ok {
 		return
 	}
 	// The notes come back either way, so the browser can play them when
 	// the device cannot.
-	if err := s.backend.DeviceBeep(notes); err != nil {
+	if err := s.backend.DeviceBeep(notes, volume); err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "notes": notes})
 		return
 	}

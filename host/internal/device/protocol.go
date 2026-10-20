@@ -520,7 +520,7 @@ type DeviceMsg struct {
 	MaxLine int    `json:"max_line"`
 	OTA     int    `json:"ota"`   // 1: can be updated over the link
 	Pages   int    `json:"pages"` // 1: shows function pages (§3.5)
-	Beep    int    `json:"beep"`  // 1: plays beep messages (§3.6)
+	Beep    int    `json:"beep"`  // 1: plays beep messages (§3.6); 2: at their vol
 	IR      int    `json:"ir"`    // 1: sends infrared (§3.7)
 	// 1: takes brightness settings (§3.3)
 	Settings int `json:"settings"`

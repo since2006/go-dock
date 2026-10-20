@@ -144,11 +144,19 @@ func SoundByID(id string) Sound {
 type Beep struct {
 	T     string `json:"t"`
 	Notes []Note `json:"notes"`
+	// Vol is the volume in percent, left out for full volume. Firmware that
+	// announces "beep":2 plays it; older firmware plays everything at 100.
+	Vol int `json:"vol,omitempty"`
 }
 
-// EncodeBeep encodes the beep message for notes.
-func EncodeBeep(notes []Note) []byte {
-	line, _ := encodeLine(Beep{T: "beep", Notes: notes})
+// EncodeBeep encodes the beep message for notes at a volume in percent;
+// 100 or more plays at full volume.
+func EncodeBeep(notes []Note, vol int) []byte {
+	b := Beep{T: "beep", Notes: notes}
+	if vol < 100 {
+		b.Vol = max(vol, 1)
+	}
+	line, _ := encodeLine(b)
 	return line
 }
 

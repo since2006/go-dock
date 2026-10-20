@@ -220,6 +220,22 @@
             <input name="device.beep_done_custom" placeholder="C7 100, E7 100, G7 200" maxlength="4000" spellcheck="false">
             <small>写法和上面的自定义提示音一样。</small>
           </label>
+          <label>提示音音量
+            <select name="device.volume" data-num>
+              <option value="5">5%</option>
+              <option value="10">10%</option>
+              <option value="20">20%</option>
+              <option value="30">30%</option>
+              <option value="40">40%</option>
+              <option value="50">50%</option>
+              <option value="60">60%</option>
+              <option value="70">70%</option>
+              <option value="80">80%</option>
+              <option value="90">90%</option>
+              <option value="100">100%</option>
+            </select>
+            <small>两种提示音共用，试听按这里选的音量播放（不用先保存）。调音量需要较新的固件，旧固件一直按 100% 响。</small>
+          </label>
           <label class="check"><input type="checkbox" name="device.mute"> 静音：暂时不响任何提示音，上面的设置保留（屏幕上的「屏幕」页也能切换）</label>
           <label>屏幕亮度
             <select name="device.brightness" data-num>

@@ -1,5 +1,6 @@
 #include "beep.h"
 
+#include <math.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -14,11 +15,14 @@
 #define BEEP_MODE LEDC_LOW_SPEED_MODE
 #define BEEP_TIMER LEDC_TIMER_0
 #define BEEP_CHANNEL LEDC_CHANNEL_0
-#define BEEP_RES LEDC_TIMER_10_BIT
-#define BEEP_DUTY (1 << 9) // a square wave: the loudest a passive buzzer gets
+// 13 bits is the finest the 80 MHz APB clock allows at 8000 Hz (a divider
+// of 1.22); the quietest volumes need the small steps.
+#define BEEP_RES LEDC_TIMER_13_BIT
+#define BEEP_PERIOD (1 << 13) // duty counts in a period at BEEP_RES
 
 typedef struct {
     int count;
+    uint32_t duty;
     beep_note_t notes[BEEP_MAX_NOTES];
 } melody_t;
 
@@ -32,10 +36,23 @@ static void silence(void)
     gpio_set_direction(PIN_BUZZER, GPIO_MODE_DISABLE);
 }
 
-static void tone(uint32_t hz)
+// The duty for a volume in percent. What a passive buzzer plays is mostly
+// the square wave's fundamental, whose amplitude goes with sin(pi * duty):
+// loudest at half, and the same for duty and 1 - duty, so a narrower pulse
+// is quieter whether the module switches on a high or a low level. Each
+// percent below 100 takes 0.5 dB off, 45 dB at 10%; go-dock's browser
+// preview (app.js playNotes) follows the same curve.
+static uint32_t volume_duty(int volume)
+{
+    float amp = powf(10.0f, (volume - 100) * 0.5f / 20.0f);
+    uint32_t duty = (uint32_t)(asinf(amp) / (float)M_PI * BEEP_PERIOD + 0.5f);
+    return duty ? duty : 1;
+}
+
+static void tone(uint32_t hz, uint32_t duty)
 {
     ledc_set_freq(BEEP_MODE, BEEP_TIMER, hz);
-    ledc_set_duty(BEEP_MODE, BEEP_CHANNEL, BEEP_DUTY);
+    ledc_set_duty(BEEP_MODE, BEEP_CHANNEL, duty);
     ledc_update_duty(BEEP_MODE, BEEP_CHANNEL);
     // silence() took the pin off the channel; this is the routing
     // ledc_channel_config does, without reserving the pin again.
@@ -52,7 +69,7 @@ static void beep_task(void *arg)
         if (next < m.count) {
             const beep_note_t *n = &m.notes[next++];
             if (n->hz) {
-                tone(n->hz);
+                tone(n->hz, m.duty);
             } else {
                 silence();
             }
@@ -74,7 +91,7 @@ void beep_init(void)
         .duty_resolution = BEEP_RES,
         .timer_num = BEEP_TIMER,
         .freq_hz = 2000,
-        .clk_cfg = LEDC_AUTO_CLK,
+        .clk_cfg = LEDC_USE_APB_CLK, // see BEEP_RES
     };
     ESP_ERROR_CHECK(ledc_timer_config(&timer));
     ledc_channel_config_t ch = {
@@ -92,13 +109,14 @@ void beep_init(void)
     xTaskCreate(beep_task, "beep", 2048, NULL, 3, NULL);
 }
 
-void beep_play(const beep_note_t *notes, int count)
+void beep_play(const beep_note_t *notes, int count, int volume)
 {
     if (!s_queue) {
         return;
     }
     static melody_t m; // only the link task plays, and m is too big for its stack
     m.count = count < BEEP_MAX_NOTES ? count : BEEP_MAX_NOTES;
+    m.duty = volume_duty(volume < 1 ? 1 : volume > 100 ? 100 : volume);
     memcpy(m.notes, notes, m.count * sizeof(*notes));
     xQueueOverwrite(s_queue, &m);
 }
