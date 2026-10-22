@@ -13,7 +13,7 @@
 #include "link.h"
 
 #define PIN_IR_TX 7       // J8 pin 13
-#define PIN_IR_RX 8       // J8 pin 15
+#define PIN_IR_RX 38      // IO38 on the board silkscreen
 #define IR_TX_INVERT 0    // 1 for a transmitter module that lights on a low level
 #define RESOLUTION 1000000 // 1 µs per tick
 #define RX_SYMBOLS 192     // all four RX memory blocks: 384 timings

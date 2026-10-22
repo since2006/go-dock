@@ -11,7 +11,7 @@
 #include "freertos/task.h"
 #include "hal/ledc_periph.h"
 
-#define PIN_BUZZER 1 // J8 pin 3; pin 1 next to it is GND
+#define PIN_BUZZER 8 // J8 pin 15
 #define BEEP_MODE LEDC_LOW_SPEED_MODE
 #define BEEP_TIMER LEDC_TIMER_0
 #define BEEP_CHANNEL LEDC_CHANNEL_0

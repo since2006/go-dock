@@ -1,5 +1,5 @@
-// Alert sounds on a passive buzzer wired to the pin header (J8 pin 3 =
-// GPIO1, pin 1 = GND). The board has no speaker of its own; go-dock sends
+// Alert sounds on a passive buzzer wired to the pin header (J8 pin 15 =
+// GPIO8, pin 1 = GND). The board has no speaker of its own; go-dock sends
 // the notes to play in a beep message (docs/protocol-v1.md §3.6).
 #pragma once
 

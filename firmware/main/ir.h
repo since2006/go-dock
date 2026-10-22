@@ -1,5 +1,5 @@
 // Infrared through modules wired to the pin header: a 38 kHz transmitter
-// on J8 pin 13 (GPIO7) and a receiver on pin 15 (GPIO8). go-dock encodes
+// on J8 pin 13 (GPIO7) and a receiver on GPIO38. go-dock encodes
 // the frames (docs/protocol-v1.md §3.7, §4.6); this only sends and
 // receives raw timings in µs, mark and space in turn, from a mark.
 #pragma once
