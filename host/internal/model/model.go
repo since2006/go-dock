@@ -112,6 +112,12 @@ func (s State) Active() bool {
 	return s == StateApproval || s == StateInput || s == StateError || s == StateRunning
 }
 
+// Busy reports whether the state is still working or waiting for the user.
+// An error is Active but not Busy: a subagent that failed has stopped.
+func (s State) Busy() bool {
+	return s == StateApproval || s == StateInput || s == StateRunning
+}
+
 // Effective returns the most urgent state among the session and its
 // agents, and the agent it comes from (nil for the session itself). A
 // session waiting for its next prompt while a subagent asks for approval

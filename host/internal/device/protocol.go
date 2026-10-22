@@ -210,18 +210,20 @@ func sessionFrame(ss model.Session, st model.State, from *model.Agent) SessionFr
 		// The session's own turn ended while background subagents work.
 		active := 0
 		for _, a := range ss.Agents {
-			if a.State.Active() {
+			if a.State.Busy() {
 				active++
 			}
 		}
-		sf.Detail = fmt.Sprintf("等待 %d 个子任务完成", active)
+		if active > 0 {
+			sf.Detail = fmt.Sprintf("等待 %d 个子任务完成", active)
+		}
 	}
 	if sf.Title == sf.Detail {
 		sf.Title = "" // nothing new on a second line
 	}
 	for _, a := range ss.Agents {
 		sf.AgentsTotal++
-		if a.State.Active() {
+		if a.State.Busy() {
 			sf.AgentsActive++
 		}
 		if len(sf.Agents) < maxAgents {

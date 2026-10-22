@@ -564,4 +564,17 @@ func TestFrameWaitsForBackgroundAgents(t *testing.T) {
 	if s.State != "running" || s.Label != "进行中" || s.Detail != "等待 2 个子任务完成" || s.Title != "规划 host 端" {
 		t.Fatalf("row = %+v", s)
 	}
+
+	// A failed subagent is shown but no longer waited for.
+	failed := model.Agent{ID: "4", Type: "Explore", Detail: "rate_limit", State: model.StateError, Since: t0}
+	ss.Agents = append(ss.Agents, failed)
+	s = BuildFrame(model.Snapshot{Now: t0, Sessions: []model.Session{ss}}, Options{MaxSessions: 12}, 1).Sessions[0]
+	if s.State != "error" || s.Detail != "等待 2 个子任务完成" || s.AgentsTotal != 4 || s.AgentsActive != 2 {
+		t.Fatalf("with a failed agent: %+v", s)
+	}
+	ss.Agents = []model.Agent{failed}
+	s = BuildFrame(model.Snapshot{Now: t0, Sessions: []model.Session{ss}}, Options{MaxSessions: 12}, 1).Sessions[0]
+	if s.State != "error" || s.Detail != fitLine(ss.Detail) || s.AgentsActive != 0 {
+		t.Fatalf("only a failed agent: %+v", s)
+	}
 }

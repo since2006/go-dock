@@ -19,8 +19,13 @@ type Options struct {
 	StaleAfter time.Duration // drop sessions with no news for this long
 }
 
-// agentLinger keeps a finished subagent listed for a short while.
+// agentLinger keeps a finished or failed subagent listed for a short while.
 const agentLinger = 3 * time.Minute
+
+// agentQuiet drops a running subagent with no news for this long. Claude
+// Code's internal agents may report one tool call and never stop; the
+// transcript tracker gives up on a quiet subagent after the same time.
+const agentQuiet = 30 * time.Minute
 
 // pendingTTL drops subagent launches no agent ever claimed.
 const pendingTTL = 10 * time.Minute
@@ -115,7 +120,7 @@ func (h *Hub) observe(o model.Observation) bool {
 		return ok
 	}
 	if !ok {
-		if o.State == "" || (o.AgentID != "" && !o.State.Active()) {
+		if o.State == "" || (o.AgentID != "" && !o.State.Busy()) {
 			return false // metadata, or the end of an agent we never saw
 		}
 		e = &entry{
@@ -180,8 +185,10 @@ func (h *Hub) observe(o model.Observation) bool {
 func (h *Hub) observeAgent(e *entry, o model.Observation) {
 	a := e.agents[o.AgentID]
 	if a == nil {
-		if !o.State.Active() {
-			return // e.g. Claude's internal agents only report their stop
+		if !o.State.Busy() {
+			// Claude's internal agents only report their stop, or a
+			// failure (a rate limit, retried under a new id each time).
+			return
 		}
 		a = &model.Agent{ID: o.AgentID, Type: o.AgentType, State: o.State, Detail: o.Detail, Since: o.At, Updated: o.At}
 		e.agents[o.AgentID] = a
@@ -198,7 +205,7 @@ func (h *Hub) observeAgent(e *entry, o model.Observation) {
 	}
 	switch {
 	case o.End:
-		if a.State.Active() {
+		if a.State.Busy() {
 			a.State, a.Detail = model.StateDone, ""
 		}
 	case o.State != "" && !o.At.Before(a.Updated):
@@ -253,11 +260,8 @@ func (e *entry) effective() model.State {
 // starts with a prompt or when a finished session gets busy, and ends when
 // it is finished again; waits for approval or input do not count.
 func (e *entry) clock(before, after model.State, newTurn bool, at time.Time) {
-	busy := func(st model.State) bool {
-		return st == model.StateRunning || st == model.StateApproval || st == model.StateInput
-	}
 	waiting := after == model.StateApproval || after == model.StateInput
-	if newTurn || (!busy(before) && busy(after)) {
+	if newTurn || (!before.Busy() && after.Busy()) {
 		e.turnStart, e.turnEnd, e.paused, e.pauseStart = at, time.Time{}, 0, time.Time{}
 	}
 	if e.turnStart.IsZero() {
@@ -272,7 +276,7 @@ func (e *entry) clock(before, after model.State, newTurn bool, at time.Time) {
 	if waiting && e.pauseStart.IsZero() {
 		e.pauseStart = at
 	}
-	if busy(before) && !busy(after) {
+	if before.Busy() && !after.Busy() {
 		e.turnEnd = at
 	}
 }
@@ -349,8 +353,8 @@ func usageEqual(a, b model.Usage) bool {
 		a.Today == b.Today && a.Week == b.Week
 }
 
-// Tick ages done sessions to idle and drops stale sessions, finished
-// agents and unclaimed launches.
+// Tick ages done sessions to idle and drops stale sessions, finished,
+// failed or quiet agents and unclaimed launches.
 func (h *Hub) Tick() {
 	now := h.now()
 	changed := false
@@ -368,7 +372,10 @@ func (h *Hub) Tick() {
 			changed = true
 		}
 		for id, a := range e.agents {
-			if (!a.State.Active() && now.Sub(a.Updated) > agentLinger) || now.Sub(a.Updated) > h.opts.StaleAfter {
+			// A failed agent has stopped: Claude Code sends no SubagentStop
+			// after a StopFailure.
+			quiet := now.Sub(a.Updated)
+			if (!a.State.Busy() && quiet > agentLinger) || (a.State == model.StateRunning && quiet > agentQuiet) || quiet > h.opts.StaleAfter {
 				delete(e.agents, id)
 				changed = true
 			}

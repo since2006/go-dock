@@ -324,6 +324,64 @@ func TestAgentLifecycle(t *testing.T) {
 	}
 }
 
+// A subagent that hit a rate limit has stopped: no SubagentStop follows the
+// StopFailure. Claude's internal agents report only that failure, under a
+// new id on every retry.
+func TestAgentFailures(t *testing.T) {
+	now := t0
+	h := newTestHub(&now)
+
+	h.Observe(agentObs("ghost", "x", model.StateError, t0, "rate_limit"))
+	if n := len(h.Snapshot().Sessions); n != 0 {
+		t.Fatalf("failure created a session")
+	}
+
+	h.Observe(obs("s", model.StateDone, t0, ""))
+	h.Observe(agentObs("s", "internal", model.StateError, t0, "rate_limit"))
+	h.Observe(agentObs("s", "a1", model.StateRunning, t0, "Read: main.go"))
+	h.Observe(agentObs("s", "a1", model.StateError, t0.Add(time.Second), "rate_limit"))
+	s := h.Snapshot().Sessions[0]
+	if len(s.Agents) != 1 || s.Agents[0].ID != "a1" || s.Agents[0].Detail != "rate_limit" {
+		t.Fatalf("agents = %+v", s.Agents)
+	}
+	if st, _ := s.Effective(); st != model.StateError {
+		t.Fatalf("effective = %s, want the failure shown", st)
+	}
+
+	now = t0.Add(time.Second + agentLinger + time.Second)
+	h.Observe(obs("s", model.StateDone, now, "")) // keep the session fresh
+	h.Tick()
+	s = h.Snapshot().Sessions[0]
+	if len(s.Agents) != 0 {
+		t.Fatalf("failed agent kept: %+v", s.Agents)
+	}
+	if st, _ := s.Effective(); st != model.StateDone {
+		t.Fatalf("effective = %s", st)
+	}
+}
+
+// A running subagent that goes quiet (Claude's internal agents report a
+// tool call and nothing more) is dropped; one waiting for the user is not.
+func TestQuietAgents(t *testing.T) {
+	now := t0
+	h := newTestHub(&now)
+	h.Observe(obs("s", model.StateDone, t0, ""))
+	h.Observe(agentObs("s", "quiet", model.StateRunning, t0, "SubagentHandback"))
+	h.Observe(agentObs("s", "asks", model.StateApproval, t0, "Bash: rm -rf dist"))
+	h.Observe(agentObs("s", "busy", model.StateRunning, t0, "Read: main.go"))
+
+	now = t0.Add(agentQuiet + time.Second)
+	h.Observe(agentObs("s", "busy", model.StateRunning, now, "Read: go.mod"))
+	h.Tick()
+	var ids []string
+	for _, a := range h.Snapshot().Sessions[0].Agents {
+		ids = append(ids, a.ID)
+	}
+	if len(ids) != 2 || ids[0] != "asks" || ids[1] != "busy" {
+		t.Fatalf("agents = %v, want asks and busy", ids)
+	}
+}
+
 func TestToolTally(t *testing.T) {
 	now := t0
 	h := newTestHub(&now)

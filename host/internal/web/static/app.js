@@ -189,11 +189,12 @@ function sessionLines(s) {
 // is waiting for them, not done.
 function waitingText(s) {
   if (s.state !== "done" && s.state !== "idle") return "";
-  const n = (s.agents || []).filter((a) => ACTIVE.includes(a.state)).length;
+  const n = (s.agents || []).filter((a) => BUSY.includes(a.state)).length;
   return n ? `等待 ${n} 个子任务完成` : "";
 }
 
 const ACTIVE = ["approval", "input", "error", "running"];
+const BUSY = ["approval", "input", "running"]; // a failed subagent has stopped
 
 // The most urgent of a session's own state and its agents' states.
 function effectiveState(s) {
