@@ -70,7 +70,7 @@ Firmware UI checks without hardware: `firmware/sim` compiles `main/ui.c` against
 
 - `~/.claude/sessions/<pid>.json`: live status (`busy|idle|waiting`, `waitingFor`); a file whose PID is no longer alive means the session ended.
 - `~/.claude/projects/**/<session>.jsonl`: token usage (deduplicated per `message.id`, max per field), `ai-title` / `custom-title` lines for session titles (a `/rename` title wins), the last assistant text block for `Session.Message` (cleared by the next user prompt); `subagents/agent-<id>.jsonl` + `.meta.json` for subagents without hooks.
-- statusLine stdin `rate_limits` is the only source of Claude 5h/7d percentages; go-dock wraps the user's existing statusLine command (`statusline --chain <base64 of original>`). Every open session runs it, an idle one with the limits of its last API reply, so `claude.fresher` keeps the later window and, within one window (same `resets_at`), the higher number instead of the last report.
+- statusLine stdin `rate_limits` is the only source of Claude 5h/7d percentages; go-dock wraps the user's existing statusLine command (`statusline --chain <base64 of original>`). Every open session runs it, an idle one with the limits of its last API reply, so the last report is not always the newest: `claude.limitTracker` remembers each session's last report and counts one as fresh only when that session got a reply since (`cost.total_api_duration_ms` grew, or the window changed). A fresh report wins even when lower (users can reset their usage within a window); until one arrives (after go-dock starts) `claude.pick` keeps the later window and, within one window (same `resets_at`), the higher number. An older window never wins.
 
 ## Codex data sources (undocumented, parse defensively)
 

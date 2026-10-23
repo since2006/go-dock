@@ -3,6 +3,7 @@ package claude
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/since2006/go-dock/host/internal/model"
@@ -128,7 +129,10 @@ func hookObservations(body []byte, now time.Time) ([]model.Observation, error) {
 
 // statuslinePayload is the part of the statusLine stdin JSON go-dock uses.
 type statuslinePayload struct {
-	SessionID  string `json:"session_id"`
+	SessionID string `json:"session_id"`
+	Cost      *struct {
+		APIDurationMs *float64 `json:"total_api_duration_ms"` // grows with every API reply
+	} `json:"cost"`
 	RateLimits *struct {
 		FiveHour *rateWindow `json:"five_hour"`
 		SevenDay *rateWindow `json:"seven_day"`
@@ -157,43 +161,113 @@ func (p *Provider) HandleStatusline(body []byte) error {
 	if err := json.Unmarshal(body, &s); err != nil {
 		return fmt.Errorf("statusline payload: %w", err)
 	}
-	if s.RateLimits == nil {
-		return nil // API-key users and fresh sessions have none
+	r := limitReport{at: time.Now()}
+	if s.Cost != nil && s.Cost.APIDurationMs != nil {
+		r.apiMs = *s.Cost.APIDurationMs
 	}
-	five, seven := s.RateLimits.FiveHour.window(300), s.RateLimits.SevenDay.window(10080)
-	if five == nil && seven == nil {
+	if s.RateLimits != nil { // API-key users and fresh sessions have none
+		r.five, r.seven = s.RateLimits.FiveHour.window(300), s.RateLimits.SevenDay.window(10080)
+	}
+
+	t := &p.limits
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	freshFive, freshSeven := t.report(s.SessionID, r)
+	if r.five == nil && r.seven == nil {
 		return nil
 	}
-	now := time.Now()
 	p.sink.UpdateUsage(P, func(u *model.Usage) {
-		f, s := fresher(u.FiveHour, five), fresher(u.SevenDay, seven)
-		if f == u.FiveHour && s == u.SevenDay {
+		f, ff := pick(u.FiveHour, r.five, freshFive, t.fiveFresh)
+		w, wf := pick(u.SevenDay, r.seven, freshSeven, t.sevenFresh)
+		if f == u.FiveHour && w == u.SevenDay {
 			return // an idle session repeating older limits
 		}
-		u.FiveHour, u.SevenDay = f, s
-		u.LimitsUpdated = now
+		u.FiveHour, u.SevenDay = f, w
+		t.fiveFresh, t.sevenFresh = ff, wf
+		u.LimitsUpdated = r.at
 		u.LimitsSource = "statusline"
 	})
 	return nil
 }
 
-// fresher picks between the window we have and one a statusline reported.
-// Every open Claude Code session runs its statusline, an idle one with the
-// limits of its last API reply, maybe from yesterday, so the last report is
-// not always the newest. Usage only grows within a window: the later window
-// wins, and within the same one the higher number.
-func fresher(cur, in *model.Window) *model.Window {
+// limitForget drops what a session reported after this long without a
+// report; its next one counts as a first.
+const limitForget = 24 * time.Hour
+
+// limitTracker tells news from repeats in statusline reports. Every open
+// Claude Code session runs its statusline, an idle one with the limits of
+// its last API reply, maybe from yesterday or from before the user reset
+// their usage, so the last report is not always the newest.
+type limitTracker struct {
+	mu       sync.Mutex
+	sessions map[string]limitReport // last report by session id
+	// Whether the current windows came from a fresh report.
+	fiveFresh, sevenFresh bool
+}
+
+type limitReport struct {
+	apiMs       float64
+	five, seven *model.Window
+	at          time.Time
+}
+
+// report records a session's report and tells which of its windows are
+// fresh: the session got an API reply since its previous report (its API
+// time grew, or the window changed). The first report of a session may be
+// old.
+func (t *limitTracker) report(id string, r limitReport) (five, seven bool) {
+	if id == "" {
+		return false, false
+	}
+	if t.sessions == nil {
+		t.sessions = map[string]limitReport{}
+	}
+	for k, old := range t.sessions {
+		if r.at.Sub(old.at) > limitForget {
+			delete(t.sessions, k)
+		}
+	}
+	prev, ok := t.sessions[id]
+	t.sessions[id] = r
+	if !ok {
+		return false, false
+	}
+	replied := r.apiMs > prev.apiMs
+	// A window that disappears (Claude Code drops one once it resets) is
+	// no reply, and leaves the other window as old as it was.
+	return r.five != nil && (replied || !sameWindow(r.five, prev.five)),
+		r.seven != nil && (replied || !sameWindow(r.seven, prev.seven))
+}
+
+func sameWindow(a, b *model.Window) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.UsedPct == b.UsedPct && a.ResetsAt.Equal(b.ResetsAt)
+}
+
+// pick chooses between the window we have (fresh or not) and one a
+// statusline reported. A fresh report wins, lower or not: usage drops
+// within a window when the user resets it. Until one arrives, e.g. after
+// go-dock starts, the later window wins, and within the same one the
+// higher number. An older window never does.
+func pick(cur, in *model.Window, fresh, curFresh bool) (*model.Window, bool) {
+	known := in != nil && cur != nil && !in.ResetsAt.IsZero() && !cur.ResetsAt.IsZero()
 	switch {
 	case in == nil:
-		// Claude Code drops a window once it resets. Keep the old one; the
-		// hub reports a window past its reset time as 0%.
-		return cur
-	case cur == nil || cur.ResetsAt.IsZero() || in.ResetsAt.IsZero():
-		return in
-	case in.ResetsAt.After(cur.ResetsAt):
-		return in
-	case in.ResetsAt.Equal(cur.ResetsAt) && in.UsedPct >= cur.UsedPct:
-		return in
+		// Keep the old window; the hub reports a window past its reset
+		// time as 0%.
+		return cur, curFresh
+	case cur == nil:
+		return in, fresh
+	case known && in.ResetsAt.Before(cur.ResetsAt):
+		return cur, curFresh
+	case fresh:
+		return in, true
+	case known && in.ResetsAt.After(cur.ResetsAt):
+		return in, false // newer, though maybe not the newest
+	case !curFresh && in.UsedPct > cur.UsedPct:
+		return in, false
 	}
-	return cur
+	return cur, curFresh
 }

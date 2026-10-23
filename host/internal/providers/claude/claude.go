@@ -30,6 +30,7 @@ type Provider struct {
 
 	sessions    *sessionsWatcher
 	transcripts *transcripts
+	limits      limitTracker
 
 	mu     sync.Mutex
 	titles map[string]string     // sessionID -> title from transcripts

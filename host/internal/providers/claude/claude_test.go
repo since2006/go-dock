@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -129,7 +130,7 @@ func (f *fakeSink) UpdateUsage(p model.Provider, fn func(*model.Usage)) {
 func TestStatusline(t *testing.T) {
 	sink := &fakeSink{}
 	p := &Provider{sink: sink, titles: map[string]string{}}
-	body := `{"session_id":"s","rate_limits":{"five_hour":{"used_percentage":62.5,"resets_at":1792210000},"seven_day":{"used_percentage":31,"resets_at":1792600000}}}`
+	body := `{"session_id":"a","cost":{"total_api_duration_ms":1000},"rate_limits":{"five_hour":{"used_percentage":62.5,"resets_at":1792210000},"seven_day":{"used_percentage":31,"resets_at":1792600000}}}`
 	if err := p.HandleStatusline([]byte(body)); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +139,7 @@ func TestStatusline(t *testing.T) {
 		t.Fatalf("usage = %+v", u)
 	}
 	// A later payload without seven_day keeps the old window.
-	p.HandleStatusline([]byte(`{"rate_limits":{"five_hour":{"used_percentage":70,"resets_at":1792210000}}}`))
+	p.HandleStatusline([]byte(`{"session_id":"a","cost":{"total_api_duration_ms":2000},"rate_limits":{"five_hour":{"used_percentage":70,"resets_at":1792210000}}}`))
 	if u := sink.usage[P]; u.FiveHour.UsedPct != 70 || u.SevenDay == nil {
 		t.Fatalf("usage after partial = %+v", u)
 	}
@@ -146,18 +147,82 @@ func TestStatusline(t *testing.T) {
 	// in the same window and an earlier window change nothing, not even
 	// when the limits were updated.
 	updated := sink.usage[P].LimitsUpdated
-	p.HandleStatusline([]byte(`{"rate_limits":{"five_hour":{"used_percentage":40,"resets_at":1792210000},"seven_day":{"used_percentage":90,"resets_at":1792000000}}}`))
+	p.HandleStatusline([]byte(`{"session_id":"b","cost":{"total_api_duration_ms":500},"rate_limits":{"five_hour":{"used_percentage":40,"resets_at":1792210000},"seven_day":{"used_percentage":90,"resets_at":1792000000}}}`))
 	if u := sink.usage[P]; u.FiveHour.UsedPct != 70 || u.SevenDay.UsedPct != 31 || !u.LimitsUpdated.Equal(updated) {
 		t.Fatalf("usage after a stale session = %+v", u)
 	}
 	// A new window starts low.
-	p.HandleStatusline([]byte(`{"rate_limits":{"five_hour":{"used_percentage":3,"resets_at":1792228000}}}`))
+	p.HandleStatusline([]byte(`{"session_id":"a","cost":{"total_api_duration_ms":3000},"rate_limits":{"five_hour":{"used_percentage":3,"resets_at":1792228000}}}`))
 	if u := sink.usage[P]; u.FiveHour.UsedPct != 3 || u.FiveHour.ResetsAt.Unix() != 1792228000 || u.SevenDay.UsedPct != 31 {
 		t.Fatalf("usage after a new window = %+v", u)
 	}
 	// API-key sessions have no rate_limits.
 	if err := p.HandleStatusline([]byte(`{"session_id":"s"}`)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// After the user resets their usage, the same window (same resets_at)
+// reports a lower number. Only a session that got a reply since its last
+// report brings it; idle ones keep repeating the old, higher one.
+func TestStatuslineReset(t *testing.T) {
+	sink := &fakeSink{}
+	p := &Provider{sink: sink, titles: map[string]string{}}
+	report := func(session string, apiMs int, five, seven float64) {
+		t.Helper()
+		body := fmt.Sprintf(`{"session_id":%q,"cost":{"total_api_duration_ms":%d},"rate_limits":{"five_hour":{"used_percentage":%v,"resets_at":1792210000},"seven_day":{"used_percentage":%v,"resets_at":1792600000}}}`,
+			session, apiMs, five, seven)
+		if err := p.HandleStatusline([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := func(step string, five, seven float64) {
+		t.Helper()
+		if u := sink.usage[P]; u.FiveHour.UsedPct != five || u.SevenDay.UsedPct != seven {
+			t.Fatalf("%s: 5h %v 7d %v, want %v %v", step, u.FiveHour.UsedPct, u.SevenDay.UsedPct, five, seven)
+		}
+	}
+
+	// go-dock just started: nothing tells which session is current, so
+	// the higher number wins.
+	report("a", 1000, 2, 1)
+	report("b", 500, 15, 10)
+	want("first reports", 15, 10)
+
+	// a gets a reply: it is current, though lower.
+	report("a", 1200, 2, 1)
+	want("a replied", 2, 1)
+	report("b", 500, 15, 10)
+	want("b repeats", 2, 1)
+
+	// b's 5h window ran out and Claude Code dropped it: its 7d window is
+	// still the old one.
+	p.HandleStatusline([]byte(`{"session_id":"b","cost":{"total_api_duration_ms":500},"rate_limits":{"seven_day":{"used_percentage":10,"resets_at":1792600000}}}`))
+	want("b dropped a window", 2, 1)
+
+	// Without the API time, a changed window is the sign of a reply.
+	p.HandleStatusline([]byte(`{"session_id":"c","rate_limits":{"five_hour":{"used_percentage":20,"resets_at":1792210000}}}`))
+	want("c first", 2, 1)
+	p.HandleStatusline([]byte(`{"session_id":"c","rate_limits":{"five_hour":{"used_percentage":4,"resets_at":1792210000}}}`))
+	want("c changed", 4, 1)
+
+	// A session that started after go-dock: its first limits follow a
+	// report without any.
+	p.HandleStatusline([]byte(`{"session_id":"d","cost":{"total_api_duration_ms":0}}`))
+	report("d", 300, 0.5, 0.2)
+	want("new session", 0.5, 0.2)
+}
+
+func TestLimitTrackerForgets(t *testing.T) {
+	var lt limitTracker
+	w := &model.Window{UsedPct: 5, ResetsAt: time.Unix(1792210000, 0)}
+	at := time.Unix(1792200000, 0)
+	lt.report("a", limitReport{apiMs: 100, five: w, at: at})
+	if f, _ := lt.report("a", limitReport{apiMs: 200, five: w, at: at.Add(time.Hour)}); !f {
+		t.Fatal("reply not fresh")
+	}
+	if f, _ := lt.report("a", limitReport{apiMs: 300, five: w, at: at.Add(time.Hour + limitForget + time.Second)}); f {
+		t.Fatal("a forgotten session's report counted as fresh")
 	}
 }
 
