@@ -200,7 +200,31 @@ func (m MQTTConfig) BrokerFor(id string) string {
 type PluginsConfig struct {
 	Lights LightsConfig `json:"lights"`
 	Aircon AirconConfig `json:"aircon"`
+	Perf   PerfConfig   `json:"perf"`
 }
+
+// PerfConfig is the 性能 page: the computer's CPU, GPU, memory, fans,
+// network and disk.
+type PerfConfig struct {
+	Enabled bool `json:"enabled"`
+	// Order lists the cards by id, the first two big; the screen and the
+	// web preview reorder them by dragging. Unknown ids are skipped and
+	// missing ones follow in their usual order.
+	Order []string `json:"order,omitempty"`
+}
+
+func (p PerfConfig) validate() error {
+	seen := map[string]bool{}
+	for _, id := range p.Order {
+		if !pageID.MatchString(id) || seen[id] {
+			return fmt.Errorf("性能页的排列有误：%q", id)
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
+var pageID = regexp.MustCompile(`^[a-z0-9_-]{1,16}$`)
 
 // AirconConfig is the air conditioner page: a Gree unit the screen
 // switches by infrared.
@@ -323,6 +347,7 @@ func (c Config) Clone() Config {
 	}
 	c.MQTT.Brokers = slices.Clone(c.MQTT.Brokers)
 	c.Plugins.Lights.Lights = slices.Clone(c.Plugins.Lights.Lights)
+	c.Plugins.Perf.Order = slices.Clone(c.Plugins.Perf.Order)
 	return c
 }
 
@@ -357,7 +382,10 @@ func (c Config) Validate() error {
 	if err := c.Plugins.Lights.validate(c.MQTT); err != nil {
 		return err
 	}
-	return c.Plugins.Aircon.validate()
+	if err := c.Plugins.Aircon.validate(); err != nil {
+		return err
+	}
+	return c.Plugins.Perf.validate()
 }
 
 // configID is what broker and light ids look like; the screen protocol

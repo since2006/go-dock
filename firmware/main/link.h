@@ -24,6 +24,10 @@ bool link_take_pages(dock_pages_t *out, uint32_t *version);
 // switch. Ids come from link_take_pages, which only passes plain ones.
 void link_send_action(const char *page, const char *item, const char *act);
 
+// Tells the host the user dragged item onto to on a movable page; the two
+// trade places.
+void link_send_swap(const char *page, const char *item, const char *to);
+
 // Tells the host what the infrared receiver picked up (raw µs timings).
 void link_send_ir(const uint16_t *raw, int count);
 

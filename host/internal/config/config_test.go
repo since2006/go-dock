@@ -193,6 +193,29 @@ func TestValidateAircon(t *testing.T) {
 	}
 }
 
+func TestValidatePerf(t *testing.T) {
+	c := Default()
+	if c.Plugins.Perf.Enabled || c.Plugins.Perf.Order != nil {
+		t.Fatalf("defaults %+v", c.Plugins.Perf)
+	}
+	// Unknown ids are the page's to skip; only malformed or repeated ones
+	// are refused.
+	c.Plugins.Perf.Order = []string{"mem", "cpu", "later"}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, order := range map[string][]string{
+		"repeated":  {"mem", "mem"},
+		"malformed": {"Mem!"},
+		"empty id":  {""},
+	} {
+		c.Plugins.Perf.Order = order
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
 func TestGetSharesNothing(t *testing.T) {
 	s, _ := Load(filepath.Join(t.TempDir(), "config.json"))
 	c := s.Get()

@@ -40,7 +40,13 @@ const (
 	pageTitleLen = 8
 	pageNoteLen  = 24 // summary and error
 	itemLabelLen = 12
-	itemTextLen  = 8
+	itemTextLen  = 8 // also a meter's sub and a row's text
+	itemUnitLen  = 4
+	itemNoteLen  = 16
+	maxHist      = 30
+	maxSeries    = 3
+	maxRows      = 4
+	rowLabelLen  = 6
 )
 
 // Hello is the host's handshake message.
@@ -373,23 +379,44 @@ type PageFrame struct {
 	Title   string      `json:"title"`
 	Summary string      `json:"summary,omitempty"`
 	Error   string      `json:"error,omitempty"`
+	Movable bool        `json:"movable,omitempty"`
 	Items   []ItemFrame `json:"items"`
 }
 
 // ItemFrame is one widget; On is omitted while a switch's state is
 // unknown.
 type ItemFrame struct {
-	ID       string `json:"id"`
-	Kind     string `json:"kind"`
-	Label    string `json:"label"`
-	Text     string `json:"text"`
-	Icon     string `json:"icon,omitempty"`
-	On       *bool  `json:"on,omitempty"`
-	Buttons  bool   `json:"buttons,omitempty"`
-	Busy     bool   `json:"busy,omitempty"`
-	Disabled bool   `json:"disabled,omitempty"`
-	AtMin    bool   `json:"at_min,omitempty"`
-	AtMax    bool   `json:"at_max,omitempty"`
+	ID       string        `json:"id"`
+	Kind     string        `json:"kind"`
+	Label    string        `json:"label"`
+	Text     string        `json:"text"`
+	Icon     string        `json:"icon,omitempty"`
+	On       *bool         `json:"on,omitempty"`
+	Buttons  bool          `json:"buttons,omitempty"`
+	Busy     bool          `json:"busy,omitempty"`
+	Disabled bool          `json:"disabled,omitempty"`
+	AtMin    bool          `json:"at_min,omitempty"`
+	AtMax    bool          `json:"at_max,omitempty"`
+	Unit     string        `json:"unit,omitempty"`
+	Sub      string        `json:"sub,omitempty"`
+	Pct      *int          `json:"pct,omitempty"`
+	Hist     []int         `json:"hist,omitempty"`
+	Level    string        `json:"level,omitempty"`
+	Big      bool          `json:"big,omitempty"`
+	Note     string        `json:"note,omitempty"`
+	Series   []SeriesFrame `json:"series,omitempty"`
+	Rows     []RowFrame    `json:"rows,omitempty"`
+}
+
+type SeriesFrame struct {
+	C    string `json:"c"`
+	Hist []int  `json:"hist"`
+}
+
+type RowFrame struct {
+	Label string `json:"label"`
+	Text  string `json:"text"`
+	C     string `json:"c"`
 }
 
 // protoID is what page, item and kind ids may look like, so the firmware
@@ -413,6 +440,7 @@ func BuildPages(ps []model.Page) Pages {
 			Title:   model.Truncate(p.Title, pageTitleLen),
 			Summary: model.Truncate(p.Summary, pageNoteLen),
 			Error:   model.Truncate(p.Error, pageNoteLen),
+			Movable: p.Movable,
 			Items:   []ItemFrame{},
 		}
 		for _, it := range p.Items {
@@ -438,11 +466,79 @@ func BuildPages(ps []model.Page) Pages {
 				Disabled: it.Disabled,
 				AtMin:    it.AtMin,
 				AtMax:    it.AtMax,
+				Unit:     model.Truncate(it.Unit, itemUnitLen),
+				Sub:      model.Truncate(it.Sub, itemTextLen),
+				Pct:      clampPct(it.Pct),
+				Hist:     meterHist(it.Hist),
+				Level:    meterLevel(it.Level),
+				Big:      it.Big,
+				Note:     model.Truncate(it.Note, itemNoteLen),
+				Series:   meterSeries(it.Series),
+				Rows:     meterRows(it.Rows),
 			})
 		}
 		f.Pages = append(f.Pages, pf)
 	}
 	return f
+}
+
+func clampPct(p *int) *int {
+	if p == nil {
+		return nil
+	}
+	v := min(max(*p, 0), 100)
+	return &v
+}
+
+// meterHist keeps the last maxHist readings, each 0–100.
+func meterHist(h []int) []int {
+	if len(h) == 0 {
+		return nil
+	}
+	h = h[max(len(h)-maxHist, 0):]
+	out := make([]int, len(h))
+	for i, v := range h {
+		out[i] = min(max(v, 0), 100)
+	}
+	return out
+}
+
+var colors = map[string]bool{
+	model.ColorBlue: true, model.ColorRed: true, model.ColorTeal: true, model.ColorGreen: true,
+	model.ColorOrange: true, model.ColorPurple: true, model.ColorGray: true,
+}
+
+// meterColor keeps the colours the screen knows; "" draws in the card's.
+func meterColor(c string) string {
+	if colors[c] {
+		return c
+	}
+	return ""
+}
+
+func meterSeries(ss []model.Series) []SeriesFrame {
+	var out []SeriesFrame
+	for _, s := range ss[:min(len(ss), maxSeries)] {
+		if h := meterHist(s.Hist); len(h) > 0 {
+			out = append(out, SeriesFrame{C: meterColor(s.Color), Hist: h})
+		}
+	}
+	return out
+}
+
+func meterRows(rs []model.Row) []RowFrame {
+	var out []RowFrame
+	for _, r := range rs[:min(len(rs), maxRows)] {
+		out = append(out, RowFrame{Label: model.Truncate(r.Label, rowLabelLen), Text: model.Truncate(r.Text, itemTextLen), C: meterColor(r.Color)})
+	}
+	return out
+}
+
+func meterLevel(l string) string {
+	if l == model.LevelWarn || l == model.LevelCrit {
+		return l
+	}
+	return ""
 }
 
 // EncodePages encodes f as one line of at most MaxLine bytes, dropping
@@ -538,6 +634,7 @@ type DeviceMsg struct {
 	Page string `json:"page"`
 	Item string `json:"item"`
 	Act  string `json:"act"`
+	To   string `json:"to"` // swap: the item dropped on
 	// ir_recv: what the infrared receiver picked up, µs
 	Raw []int `json:"raw"`
 }

@@ -26,6 +26,12 @@ type Plugin interface {
 	Do(ctx context.Context, item, act string) error
 }
 
+// Swapper is a plugin whose page is movable: Swap trades the places of
+// two of its items, one dropped on the other.
+type Swapper interface {
+	Swap(ctx context.Context, item, to string) error
+}
+
 var (
 	ErrNotFound = errors.New("没有这个功能页或控件")
 	ErrBadAct   = errors.New("不支持的操作")
@@ -60,6 +66,13 @@ func (h *Host) Do(ctx context.Context, a model.Action) error {
 		if p.ID() == a.Page {
 			if _, ok := p.Page(); !ok {
 				return ErrNotFound
+			}
+			if a.Act == model.ActSwap {
+				s, ok := p.(Swapper)
+				if !ok {
+					return ErrBadAct
+				}
+				return s.Swap(ctx, a.Item, a.To)
 			}
 			return p.Do(ctx, a.Item, a.Act)
 		}

@@ -48,3 +48,28 @@ func TestHost(t *testing.T) {
 		t.Fatal("no plugins should give an empty list, not nil")
 	}
 }
+
+type swapPlugin struct {
+	fakePlugin
+	swaps []string
+}
+
+func (s *swapPlugin) Swap(ctx context.Context, item, to string) error {
+	s.swaps = append(s.swaps, item+">"+to)
+	return nil
+}
+
+// A swap goes to plugins whose cards move, and is refused by the others.
+func TestHostSwap(t *testing.T) {
+	m, f := &swapPlugin{fakePlugin: fakePlugin{id: "m", shown: true}}, &fakePlugin{id: "f", shown: true}
+	h := New(m, f)
+	if err := h.Do(context.Background(), model.Action{Page: "m", Item: "mem", Act: model.ActSwap, To: "gpu"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.swaps) != 1 || m.swaps[0] != "mem>gpu" || len(m.called) != 0 {
+		t.Fatalf("swaps %v, taps %v", m.swaps, m.called)
+	}
+	if err := h.Do(context.Background(), model.Action{Page: "f", Item: "x", Act: model.ActSwap, To: "y"}); !errors.Is(err, ErrBadAct) || len(f.called) != 0 {
+		t.Fatalf("swap on a page that does not move: %v, taps %v", err, f.called)
+	}
+}

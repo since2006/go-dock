@@ -56,7 +56,7 @@
               <span id="fn-name">Agent</span>
               <button type="button" class="btn small ghost" id="fn-next" aria-label="下一个功能页">▶</button>
             </div>
-            <span>左右拖动屏幕（或按 ← →）切换功能页；点列表右侧的竖向圆点翻任务页。功能页上的开关点一下就会真的执行。</span>
+            <span>左右拖动屏幕（或按 ← →）切换功能页；点列表右侧的竖向圆点翻任务页。功能页上的开关点一下就会真的执行。「性能」页的卡片可以用鼠标直接拖到另一张上交换位置（触屏和屏幕上要先按住半秒），这一页切换功能页请用 ◀ ▶ 或方向键。</span>
             <span class="form-msg" id="preview-msg" role="status"></span>
           </div>
         </div>
@@ -88,7 +88,7 @@
     </section>
 
     <section id="tab-plugins" class="tab" hidden>
-      <p class="lead">插件显示在屏幕上 Agent 页右边的功能页里，左右滑动切换；在「设备预览」里也能直接操作。灯光通过 MQTT 控制，go-dock 负责连接 broker（可以有多个），屏幕本身不联网；空调用屏幕外接的红外模块控制。</p>
+      <p class="lead">插件显示在屏幕上 Agent 页右边的功能页里，左右滑动切换；在「设备预览」里也能直接操作。灯光通过 MQTT 控制，go-dock 负责连接 broker（可以有多个），屏幕本身不联网；空调用屏幕外接的红外模块控制；性能页显示这台电脑的 CPU、GPU、内存等读数。</p>
       <form id="mqtt-form" class="panel settings" autocomplete="off">
         <div class="panel-head">
           <h2>MQTT broker</h2>
@@ -155,6 +155,22 @@
         </fieldset>
         <div class="row end">
           <span class="form-msg" id="aircon-msg" role="status"></span>
+          <button type="submit" class="btn primary">保存</button>
+        </div>
+      </form>
+      <form id="perf-form" class="panel settings" autocomplete="off">
+        <div class="panel-head">
+          <h2>性能</h2>
+          <span class="muted" id="perf-summary"></span>
+        </div>
+        <fieldset>
+          <label class="check"><input type="checkbox" name="plugins.perf.enabled"> 在屏幕上显示「性能」页</label>
+          <small class="muted">显示运行 go-dock 的这台电脑的 CPU、GPU、内存、风扇、网络和磁盘，每 2 秒读一次，图表是最近一分钟。Mac 上内存和「活动监视器」的「已使用内存」一样算（App 内存 + 联动 + 被压缩），卡片颜色跟着内存压力变，内存紧张时页面顶上会提示。读不到的项不显示：Windows 读不到风扇，GPU 只支持 Mac 和 NVIDIA 显卡（Linux 上还有 AMD）。只在开启时读取。</small>
+          <small class="muted">上面两张是大卡片（图表 + 明细），下面是小卡片。在屏幕上或「设备预览」里按住一张卡片约半秒，拖到另一张上松手，两张就交换位置；排列会保存下来。</small>
+        </fieldset>
+        <div class="row end">
+          <span class="form-msg" id="perf-msg" role="status"></span>
+          <button type="button" class="btn ghost" id="perf-reset">恢复默认排列</button>
           <button type="submit" class="btn primary">保存</button>
         </div>
       </form>

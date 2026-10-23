@@ -207,17 +207,77 @@ static int name_index(const cJSON *v, const char *const *names, int n)
 
 static dock_item_kind_t parse_kind(const cJSON *v)
 {
-    static const char *const names[] = {"switch", "stepper", "select"};
-    static const dock_item_kind_t kinds[] = {DOCK_ITEM_SWITCH, DOCK_ITEM_STEPPER, DOCK_ITEM_SELECT};
-    int i = name_index(v, names, 3);
+    static const char *const names[] = {"switch", "stepper", "select", "meter"};
+    static const dock_item_kind_t kinds[] = {DOCK_ITEM_SWITCH, DOCK_ITEM_STEPPER, DOCK_ITEM_SELECT, DOCK_ITEM_METER};
+    int i = name_index(v, names, 4);
     return i < 0 ? DOCK_ITEM_OTHER : kinds[i];
 }
 
 static dock_icon_t parse_icon(const cJSON *v)
 {
-    static const char *const names[DOCK_ICON_COUNT] = {"bulb", "power", "cool", "heat", "dry", "fan", "auto", "moon", "bell"};
+    static const char *const names[DOCK_ICON_COUNT] = {
+        "bulb", "power", "cool", "heat", "dry", "fan", "auto", "moon", "bell",
+        "cpu", "gpu", "memory", "rotor", "net", "disk",
+    };
     int i = name_index(v, names, DOCK_ICON_COUNT);
     return i < 0 ? DOCK_ICON_BULB : (dock_icon_t)i;
+}
+
+static dock_color_t parse_color(const cJSON *v)
+{
+    static const char *const names[] = {"blue", "red", "teal", "green", "orange", "purple", "gray"};
+    int i = name_index(v, names, DOCK_COLOR_COUNT - 1);
+    return i < 0 ? DOCK_COLOR_NONE : (dock_color_t)(i + 1);
+}
+
+// The last DOCK_MAX_HIST readings of an array, each held to 0-100.
+static void parse_hist(const cJSON *v, dock_hist_t *out)
+{
+    int n = cJSON_IsArray(v) ? cJSON_GetArraySize(v) : 0;
+    int from = n > DOCK_MAX_HIST ? n - DOCK_MAX_HIST : 0;
+    out->n = 0;
+    for (int i = from; i < n; i++) {
+        int64_t x = num(cJSON_GetArrayItem(v, i));
+        out->v[out->n++] = (uint8_t)(x < 0 ? 0 : x > 100 ? 100 : x);
+    }
+}
+
+// What a meter adds to an item.
+static void parse_meter(const cJSON *it, dock_item_t *d)
+{
+    static const char *const levels[] = {"warn", "crit"};
+    copy_str(d->unit, sizeof(d->unit), cJSON_GetObjectItem(it, "unit"));
+    copy_str(d->sub, sizeof(d->sub), cJSON_GetObjectItem(it, "sub"));
+    copy_str(d->note, sizeof(d->note), cJSON_GetObjectItem(it, "note"));
+    const cJSON *pct = cJSON_GetObjectItem(it, "pct");
+    int64_t p = num(pct);
+    d->pct = cJSON_IsNumber(pct) ? (int8_t)(p < 0 ? 0 : p > 100 ? 100 : p) : -1;
+    d->level = (dock_level_t)(name_index(cJSON_GetObjectItem(it, "level"), levels, 2) + 1);
+    d->big = cJSON_IsTrue(cJSON_GetObjectItem(it, "big"));
+    parse_hist(cJSON_GetObjectItem(it, "hist"), &d->hist);
+    const cJSON *e;
+    cJSON_ArrayForEach(e, cJSON_GetObjectItem(it, "series"))
+    {
+        if (d->series_count >= DOCK_MAX_SERIES) {
+            break;
+        }
+        dock_series_t *s = &d->series[d->series_count];
+        parse_hist(cJSON_GetObjectItem(e, "hist"), &s->hist);
+        if (s->hist.n > 0) {
+            s->color = parse_color(cJSON_GetObjectItem(e, "c"));
+            d->series_count++;
+        }
+    }
+    cJSON_ArrayForEach(e, cJSON_GetObjectItem(it, "rows"))
+    {
+        if (d->row_count >= DOCK_MAX_ROWS) {
+            break;
+        }
+        dock_row_t *r = &d->rows[d->row_count++];
+        copy_str(r->label, sizeof(r->label), cJSON_GetObjectItem(e, "label"));
+        copy_str(r->text, sizeof(r->text), cJSON_GetObjectItem(e, "text"));
+        r->color = parse_color(cJSON_GetObjectItem(e, "c"));
+    }
 }
 
 // pages: the function pages, replacing the ones before. Pages and items
@@ -239,6 +299,7 @@ static void parse_pages(const cJSON *root, dock_pages_t *out)
         copy_str(p->title, sizeof(p->title), cJSON_GetObjectItem(pg, "title"));
         copy_str(p->summary, sizeof(p->summary), cJSON_GetObjectItem(pg, "summary"));
         copy_str(p->error, sizeof(p->error), cJSON_GetObjectItem(pg, "error"));
+        p->movable = cJSON_IsTrue(cJSON_GetObjectItem(pg, "movable"));
         const cJSON *it;
         cJSON_ArrayForEach(it, cJSON_GetObjectItem(pg, "items"))
         {
@@ -261,6 +322,10 @@ static void parse_pages(const cJSON *root, dock_pages_t *out)
             d->disabled = cJSON_IsTrue(cJSON_GetObjectItem(it, "disabled"));
             d->at_min = cJSON_IsTrue(cJSON_GetObjectItem(it, "at_min"));
             d->at_max = cJSON_IsTrue(cJSON_GetObjectItem(it, "at_max"));
+            d->pct = -1;
+            if (d->kind == DOCK_ITEM_METER) {
+                parse_meter(it, d);
+            }
         }
     }
 }
@@ -551,6 +616,14 @@ void link_send_action(const char *page, const char *item, const char *act)
 {
     char buf[112];
     snprintf(buf, sizeof(buf), "{\"t\":\"action\",\"page\":\"%s\",\"item\":\"%s\",\"act\":\"%s\"}", page, item, act);
+    send_line(buf);
+}
+
+void link_send_swap(const char *page, const char *item, const char *to)
+{
+    char buf[128];
+    snprintf(buf, sizeof(buf), "{\"t\":\"action\",\"page\":\"%s\",\"item\":\"%s\",\"act\":\"swap\",\"to\":\"%s\"}", page,
+             item, to);
     send_line(buf);
 }
 

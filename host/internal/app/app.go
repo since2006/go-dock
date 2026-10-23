@@ -27,12 +27,14 @@ import (
 	"github.com/since2006/go-dock/host/internal/plugins"
 	"github.com/since2006/go-dock/host/internal/plugins/aircon"
 	"github.com/since2006/go-dock/host/internal/plugins/lights"
+	"github.com/since2006/go-dock/host/internal/plugins/perf"
 	"github.com/since2006/go-dock/host/internal/plugins/screen"
 	"github.com/since2006/go-dock/host/internal/providers"
 	"github.com/since2006/go-dock/host/internal/providers/claude"
 	"github.com/since2006/go-dock/host/internal/providers/codex"
 	"github.com/since2006/go-dock/host/internal/providers/pricing"
 	"github.com/since2006/go-dock/host/internal/selfexe"
+	"github.com/since2006/go-dock/host/internal/sysmon"
 	"github.com/since2006/go-dock/host/internal/update"
 	"github.com/since2006/go-dock/host/internal/web"
 )
@@ -62,6 +64,7 @@ type App struct {
 	lights  *lights.Plugin
 	aircon  *aircon.Plugin
 	screen  *screen.Plugin
+	perf    *perf.Plugin
 	plugins *plugins.Host
 	listen  string // loopback-reachable address hooks call back to
 
@@ -127,7 +130,11 @@ func Run(ctx context.Context, o Options) error {
 		return store.Update(func(c *config.Config) { f(&c.Device) })
 	}, lg.Logger, a.hub.Touch)
 	a.screen.SetOptions(screenOptions(cfg))
-	a.plugins = plugins.New(a.lights, a.aircon, a.screen)
+	a.perf = perf.New(func() perf.Reader { return sysmon.New() }, func(order []string) error {
+		return store.Update(func(c *config.Config) { c.Plugins.Perf.Order = order })
+	}, a.hub.Touch)
+	a.perf.SetOptions(perfOptions(cfg))
+	a.plugins = plugins.New(a.lights, a.aircon, a.screen, a.perf)
 	a.device.SetPages(a.plugins)
 	a.device.SetIRSink(a.aircon.Received)
 	a.applyProviders(cfg)
@@ -138,6 +145,7 @@ func Run(ctx context.Context, o Options) error {
 
 	go a.hub.Run(ctx)
 	go a.device.Run(ctx)
+	go a.perf.Run(ctx)
 	go a.mqtt.Run(ctx)
 	go a.updater.Run(ctx, func() bool { return a.store.Get().Update.AutoCheck })
 	if o.OpenBrowser && !o.Restarted && cfg.Web.OpenBrowser {
@@ -238,6 +246,10 @@ func screenOptions(c config.Config) screen.Options {
 	}
 }
 
+func perfOptions(c config.Config) perf.Options {
+	return perf.Options{Enabled: c.Plugins.Perf.Enabled, Order: c.Plugins.Perf.Order}
+}
+
 func codexOptions(c config.Config) codex.Options {
 	return codex.Options{AppServerPoll: c.Codex.AppServerPoll, AppServerInterval: c.Codex.AppServerInterval.D()}
 }
@@ -289,6 +301,7 @@ func (a *App) onConfigChange(old, cur config.Config) {
 	a.lights.SetOptions(lightsOptions(cur))
 	a.aircon.SetOptions(airconOptions(cur))
 	a.screen.SetOptions(screenOptions(cur))
+	a.perf.SetOptions(perfOptions(cur))
 	a.applyProviders(cur)
 	if old.Update.Prerelease != cur.Update.Prerelease {
 		a.updater.SetBeta(cur.Update.Prerelease)

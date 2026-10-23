@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -483,11 +484,8 @@ func (p *Plugin) item(l *lamp, connected bool) model.PageItem {
 	return it
 }
 
-func sameItem(a, b model.PageItem) bool {
-	ao, bo := a.On, b.On
-	a.On, b.On = nil, nil
-	return a == b && (ao == nil) == (bo == nil) && (ao == nil || *ao == *bo)
-}
+// sameItem compares two items, On by its value.
+func sameItem(a, b model.PageItem) bool { return reflect.DeepEqual(a, b) }
 
 // Page shows every lamp; it is hidden while the plugin is off or has no
 // lamps. Lamps whose broker is down are disabled, and the page says which

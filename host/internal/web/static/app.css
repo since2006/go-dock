@@ -318,6 +318,66 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .scr-card .value { min-width: 100px; text-align: center; font-size: 36px; font-weight: 700; }
 .scr-card.big .step { width: 72px; height: 72px; font-size: 38px; }
 .scr-card.big .value { min-width: 140px; font-size: 52px; }
+/* A meter (the 性能 page): icon, label and a note on top, the reading,
+   then the last minute as a line, or a bar. Coloured by its icon; amber or
+   red when its level says so. */
+.scr-card.meter { cursor: default; align-items: stretch; justify-content: flex-start; gap: 0; padding: 14px 16px 12px; --c: #BDBDB8; --v: var(--scr-text); }
+.scr-card.meter.icon-cpu { --c: #5AA9FF; }
+.scr-card.meter.icon-gpu { --c: #C084FC; }
+.scr-card.meter.icon-memory { --c: #3DD68C; }
+.scr-card.meter.icon-rotor { --c: #4FD1C5; }
+.scr-card.meter.icon-net { --c: #FF9F43; }
+.scr-card.meter.warn { --c: #FFB020; --v: #FFB020; }
+.scr-card.meter.crit { --c: #FF6B5E; --v: #FF6B5E; }
+.scr-card.meter .head { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--c); }
+.scr-card.meter .head svg { flex: none; }
+.scr-card.meter .label { flex: 1; font-size: 20px; color: var(--scr-text); }
+.scr-card.meter .sub { flex: none; font-size: 16px; color: var(--scr-2); white-space: nowrap; }
+.scr-card.meter .reading { display: flex; align-items: baseline; gap: 4px; margin-top: 8px; color: var(--v); white-space: nowrap; }
+.scr-card.meter .value { min-width: 0; text-align: left; font-size: 36px; font-weight: 700; line-height: 1; }
+.scr-card.meter .unit { font-size: 18px; font-weight: 600; color: var(--scr-3); }
+.scr-card.meter .spark { flex: 1; min-height: 0; width: 100%; margin-top: 8px; }
+.scr-card.meter .spark .line { fill: none; stroke: var(--c); stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+.scr-card.meter .spark .area { fill: var(--c); opacity: .16; }
+.scr-card.meter .mbar { margin-top: auto; height: 10px; border-radius: 5px; background: var(--scr-track); overflow: hidden; }
+.scr-card.meter .mbar i { display: block; height: 100%; border-radius: 5px; background: var(--c); }
+.scr-card.meter.big { padding: 20px 22px 18px; }
+.scr-card.meter.big .label { font-size: 24px; }
+.scr-card.meter.big .sub { font-size: 19px; }
+.scr-card.meter.big .value { font-size: 52px; }
+.scr-card.meter.big .unit { font-size: 24px; }
+.scr-card.meter .spark .band { opacity: .92; }
+/* A dashboard: big meters on top, small ones below. */
+.scr-dash { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
+.scr-dash-row { flex: none; display: grid; grid-template-rows: minmax(0, 1fr); gap: 12px; }
+.scr-card.meter.wide .label { flex: none; font-size: 22px; }
+.scr-card.meter.wide .reading { margin: 0 0 0 auto; }
+.scr-card.meter.wide .value { font-size: 30px; }
+.scr-card.meter.wide .unit { font-size: 16px; }
+.scr-card.meter.wide .note { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 2px; font-size: 16px; color: var(--scr-2); }
+.scr-card.meter.wide .note .n { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.scr-card.meter.wide .note .sub { color: var(--scr-text); font-size: 17px; }
+.scr-card.meter.wide .chart { flex: 1; min-height: 0; margin-top: 8px; border-radius: 10px; background: #19191B; overflow: hidden; display: flex; }
+.scr-card.meter.wide .chart .spark { margin: 0; height: 100%; }
+.scr-card.meter.wide .legend { display: grid; grid-template-columns: 1fr 1fr; column-gap: 16px; row-gap: 4px; margin-top: 8px; }
+.scr-card.meter.wide .legend .row { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 16px; line-height: 20px; }
+.scr-card.meter.wide .legend i { flex: none; width: 12px; height: 12px; border-radius: 3px; }
+.scr-card.meter.wide .legend .l { color: var(--scr-2); white-space: nowrap; overflow: hidden; }
+.scr-card.meter.wide .legend .v { margin-left: auto; }
+.scr-card.meter.mini { padding: 12px; }
+.scr-card.meter.mini .label { font-size: 16px; }
+.scr-card.meter.mini .reading { margin-top: 8px; }
+.scr-card.meter.mini .value { font-size: 30px; }
+.scr-card.meter.mini .unit { font-size: 14px; }
+.scr-card.meter.mini > .sub { margin-top: 4px; font-size: 14px; color: var(--scr-2); }
+.scr-card.meter.mini .spark { margin-top: 6px; }
+.scr-card.meter.mini .mbar { height: 8px; }
+/* Dragging a card on a movable page: the held card lifts and follows the
+   finger, the card it would swap with is outlined. */
+.scr-card.movable { touch-action: none; cursor: grab; box-shadow: inset 0 0 0 2px transparent; }
+.scr-card.holding { box-shadow: inset 0 0 0 2px #75746F; transition: box-shadow .5s linear; }
+.scr-card.lifted { position: relative; z-index: 5; cursor: grabbing; box-shadow: inset 0 0 0 2px #E9E9E5; }
+.scr-card.drop { box-shadow: inset 0 0 0 2px #5AA9FF; background: #101B2A; }
 @keyframes scr-pulse { 50% { opacity: .45; } }
 .screen { touch-action: pan-y; }
 .fn-nav { display: flex; align-items: center; gap: 6px; color: var(--text); font-weight: 600; white-space: pre; }

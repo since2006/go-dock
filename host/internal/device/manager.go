@@ -405,7 +405,7 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 				}
 			case "action":
 				if ready && !incompatible {
-					m.dispatch(ctx, model.Action{Page: msg.Page, Item: msg.Item, Act: msg.Act})
+					m.dispatch(ctx, model.Action{Page: msg.Page, Item: msg.Item, Act: msg.Act, To: msg.To})
 				}
 			case "ir_recv":
 				if ready && !incompatible {

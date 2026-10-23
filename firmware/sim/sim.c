@@ -64,6 +64,13 @@ void link_send_action(const char *page, const char *item, const char *act)
     printf("action %s\n", s_action);
 }
 
+void link_send_swap(const char *page, const char *item, const char *to)
+{
+    s_actions++;
+    snprintf(s_action, sizeof(s_action), "%s/%s swap %s", page, item, to);
+    printf("action %s\n", s_action);
+}
+
 static settings_t s_settings = {.brightness = 80, .dim_brightness = 20, .dim_after = 300};
 
 settings_t settings_get(void) { return s_settings; }
@@ -211,6 +218,28 @@ static void swipe(int x, int y, int dx, int dy)
     step();
 }
 
+// Holds a finger at x, y for hold_us, then drags it to to_x, to_y and
+// keeps it there; release() lets go.
+static void drag(int x, int y, int to_x, int to_y, int64_t hold_us)
+{
+    s_point = (lv_point_t){x, y};
+    s_pressed = true;
+    for (int64_t t = 0; t <= hold_us; t += 50000) {
+        step();
+    }
+    for (int i = 1; i <= 8; i++) {
+        s_point = (lv_point_t){x + (to_x - x) * i / 8, y + (to_y - y) * i / 8};
+        step();
+    }
+}
+
+static void release(void)
+{
+    s_pressed = false;
+    step();
+    step();
+}
+
 static void check(bool ok, const char *what)
 {
     if (!ok) {
@@ -336,6 +365,89 @@ static void aircon(const char *summary, const char *temp, dock_icon_t mode_icon,
     item(DOCK_ITEM_STEPPER, DOCK_ICON_BULB, "temp", "温度", temp);
     item(DOCK_ITEM_SELECT, mode_icon, "mode", "模式", mode);
     item(DOCK_ITEM_SELECT, DOCK_ICON_FAN, "fan", "风速", fan);
+}
+
+// A meter as the 性能 page sends it.
+static dock_item_t *meter(dock_icon_t icon, const char *id, const char *label, const char *text, const char *unit, const char *sub)
+{
+    dock_item_t *it = item(DOCK_ITEM_METER, icon, id, label, text);
+    snprintf(it->unit, sizeof(it->unit), "%s", unit);
+    snprintf(it->sub, sizeof(it->sub), "%s", sub);
+    it->pct = -1;
+    return it;
+}
+
+// A line of n readings from v, rising by step and wrapping into 10-90.
+static void line_of(dock_hist_t *h, int n, int v, int step)
+{
+    h->n = (uint8_t)n;
+    for (int i = 0; i < n; i++) {
+        h->v[i] = (uint8_t)(10 + (v + i * step) % 80);
+    }
+}
+
+static void series(dock_item_t *it, dock_color_t c, int v, int step)
+{
+    dock_series_t *s = &it->series[it->series_count++];
+    s->color = c;
+    line_of(&s->hist, 30, v, step);
+}
+
+static void row(dock_item_t *it, const char *label, const char *text, dock_color_t c)
+{
+    dock_row_t *r = &it->rows[it->row_count++];
+    snprintf(r->label, sizeof(r->label), "%s", label);
+    snprintf(r->text, sizeof(r->text), "%s", text);
+    r->color = c;
+}
+
+// The 性能 page as the perf plugin describes it: CPU and GPU big, memory,
+// fans, network and disk small; mem_big swaps memory and the GPU.
+static void perf(bool mem_big)
+{
+    reset_pages();
+    page("perf", "性能", "已运行 19 小时", "");
+    s_pages.pages[0].movable = true;
+    dock_item_t *cpu = meter(DOCK_ICON_CPU, "cpu", "CPU", "37", "%", "49°C");
+    cpu->big = true;
+    snprintf(cpu->note, sizeof(cpu->note), "Apple M3 Max");
+    series(cpu, DOCK_COLOR_BLUE, 10, 3);
+    series(cpu, DOCK_COLOR_RED, 25, 3);
+    row(cpu, "用户", "27%", DOCK_COLOR_BLUE);
+    row(cpu, "系统", "10%", DOCK_COLOR_RED);
+    row(cpu, "闲置", "63%", DOCK_COLOR_GRAY);
+    dock_item_t *mem;
+    if (mem_big) {
+        mem = meter(DOCK_ICON_MEMORY, "mem", "内存", "92", "%", "压力偏高");
+        mem->big = true;
+        mem->level = DOCK_LEVEL_WARN;
+        snprintf(mem->note, sizeof(mem->note), "共 36G");
+        series(mem, DOCK_COLOR_BLUE, 40, 0);
+        series(mem, DOCK_COLOR_ORANGE, 52, 0);
+        series(mem, DOCK_COLOR_PURPLE, 75, 1);
+        row(mem, "App", "15G", DOCK_COLOR_BLUE);
+        row(mem, "联动", "3.8G", DOCK_COLOR_ORANGE);
+        row(mem, "已压缩", "13G", DOCK_COLOR_PURPLE);
+        row(mem, "交换", "2.1G", DOCK_COLOR_GRAY);
+    }
+    dock_item_t *gpu = meter(DOCK_ICON_GPU, "gpu", "GPU", "5", "%", "30 核");
+    if (!mem_big) {
+        gpu->big = true;
+        snprintf(gpu->note, sizeof(gpu->note), "Apple M3 Max");
+        series(gpu, DOCK_COLOR_TEAL, 5, 1);
+        series(gpu, DOCK_COLOR_RED, 12, 1);
+        series(gpu, DOCK_COLOR_BLUE, 20, 2);
+        row(gpu, "利用率", "5%", DOCK_COLOR_BLUE);
+        row(gpu, "渲染", "4%", DOCK_COLOR_RED);
+        row(gpu, "Tiler", "5%", DOCK_COLOR_TEAL);
+        mem = meter(DOCK_ICON_MEMORY, "mem", "内存", "62", "%", "压缩 4.9G");
+        mem->pct = 62;
+    } else {
+        line_of(&gpu->hist, 30, 5, 2);
+    }
+    meter(DOCK_ICON_ROTOR, "fan", "风扇", "停转", "", "2 个")->pct = 0;
+    line_of(&meter(DOCK_ICON_NET, "net", "网络", "22", "KB/s", "↑ 6.1K")->hist, 24, 0, 7);
+    meter(DOCK_ICON_DISK, "disk", "磁盘", "90", "%", "剩 97G")->pct = 90;
 }
 
 static void tapped(int x, int y, const char *want, const char *what)
@@ -649,6 +761,17 @@ int main(int argc, char **argv)
     send_pages();
     run(1 * SEC);
     save(out, "21-icons-2");
+    reset_pages();
+    page("aircon", "图标", "", "");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_CPU, "a", "cpu", "CPU");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_GPU, "b", "gpu", "GPU");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_MEMORY, "c", "memory", "内存");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_ROTOR, "d", "rotor", "风扇");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_NET, "e", "net", "网络");
+    item(DOCK_ITEM_SELECT, DOCK_ICON_DISK, "f", "disk", "磁盘");
+    send_pages();
+    run(1 * SEC);
+    save(out, "21-icons-3");
 
     // The 屏幕 page: brightness and dimmed brightness, when it dims and the
     // alert sound, 2x2.
@@ -669,6 +792,65 @@ int main(int argc, char **argv)
     tapped(354, 124, NULL, "- at the bottom takes no taps");
     tapped(156, 342, "screen/dim_after next", "the delay card sends next");
     tapped(444, 342, "screen/beep toggle", "the beep card toggles");
+
+    // The 性能 page: a dashboard of CPU and GPU big, four small cards below.
+    reset_pages();
+    send_pages();
+    run(1 * SEC);
+    perf(false);
+    send_pages();
+    run(1 * SEC);
+    swipe(500, 250, -300, 0);
+    run(1 * SEC);
+    save(out, "25-perf");
+
+    // Holding the memory card lifts it; dragged onto the GPU and let go, the
+    // two swap at once and the host is told.
+    int n = s_actions;
+    drag(84, 368, 444, 172, 700000);
+    run(200000);
+    save(out, "26-perf-drag");
+    release();
+    check(s_actions == n + 1 && strcmp(s_action, "perf/mem swap gpu") == 0, "a card dropped on another swaps them");
+    run(200000);
+    save(out, "27-perf-swapped");
+    // The host answers with memory big (and short of memory), the GPU small.
+    perf(true);
+    send_pages();
+    run(1 * SEC);
+    save(out, "28-perf-memory");
+
+    // A quick swipe over a card turns the page instead; so does one that
+    // moves before the card lifts. Let go anywhere else, a card goes back.
+    n = s_actions;
+    drag(84, 368, 384, 368, 200000);
+    release();
+    run(1 * SEC);
+    check(s_actions == n, "a swipe over a card is not a drag");
+    swipe(500, 250, -300, 0);
+    run(1 * SEC);
+    drag(84, 368, 300, 30, 700000);
+    release();
+    check(s_actions == n, "a card let go off the cards goes back");
+    run(1 * SEC);
+    save(out, "29-perf-back");
+
+    // Meters without big ones sit in the grid: six of them, 3x2.
+    reset_pages();
+    page("perf", "性能", "", "");
+    meter(DOCK_ICON_CPU, "cpu", "CPU", "96", "%", "88°C")->level = DOCK_LEVEL_CRIT;
+    line_of(&s_pages.pages[0].items[0].hist, 30, 50, 1);
+    meter(DOCK_ICON_GPU, "gpu", "GPU", "8", "%", "30 核");
+    line_of(&s_pages.pages[0].items[1].hist, 12, 0, 5);
+    meter(DOCK_ICON_MEMORY, "mem", "内存", "88", "%", "压缩 13G")->pct = 88;
+    s_pages.pages[0].items[2].level = DOCK_LEVEL_WARN;
+    meter(DOCK_ICON_ROTOR, "fan", "风扇", "2150", "rpm", "2 个")->pct = 31;
+    meter(DOCK_ICON_NET, "net", "网络", "820", "KB/s", "↑ 1.5M");
+    meter(DOCK_ICON_DISK, "disk", "磁盘", "90", "%", "剩 97G")->pct = 90;
+    send_pages();
+    run(1 * SEC);
+    save(out, "30-perf-grid");
+    tapped(108, 146, NULL, "a meter takes no taps");
 
     // Brightness as go-dock sets it: half, the screen off a minute after the
     // last task, a touch back to half; never dimming keeps it there.

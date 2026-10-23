@@ -92,6 +92,19 @@ static const struct {
 #define CARD_GAP 12
 #define MAX_FN (1 + DOCK_MAX_PAGES) // the Agent page, then the function pages
 
+// A page with big meters is a dashboard (§7.1): they share the top row,
+// DASH_TOP high, the other items (at most DASH_REST) the row below.
+#define DASH_TOP 236
+#define DASH_BIG 2
+#define DASH_REST 4
+#define CHART_BG 0x19191B
+#define CHART_RADIUS 10
+
+// Dragging a card on a movable page: held DRAG_HOLD_US without moving more
+// than DRAG_SLOP px it lifts; moving earlier is a swipe.
+#define DRAG_HOLD_US (500 * 1000LL)
+#define DRAG_SLOP 8
+
 typedef struct {
     lv_obj_t *reset, *window, *pct, *bar;
 } meter_t;
@@ -110,6 +123,21 @@ typedef struct {
     lv_obj_t *btns, *btn[2];             // a switch's 开 and 关
 } card_t;
 
+// A meter card, laid out by render_meter; its chart is drawn by draw_chart.
+typedef struct {
+    lv_obj_t *obj, *icon, *label, *value, *unit, *note, *sub, *chart, *bar;
+    struct {
+        lv_obj_t *swatch, *label, *text;
+    } rows[DOCK_MAX_ROWS];
+} mcard_t;
+
+typedef enum {
+    METER_GRID,     // in the grid of cards
+    METER_GRID_BIG, // in a single row of them
+    METER_WIDE,     // a dashboard's big card
+    METER_MINI,     // a dashboard's small card
+} meter_size_t;
+
 static struct {
     lv_obj_t *root;    // shifted a few px now and then against burn-in
     lv_obj_t *content; // dimmed when the host is away
@@ -118,6 +146,7 @@ static struct {
     lv_obj_t *agent;                      // the Agent page's body
     lv_obj_t *fn, *fn_empty;              // a function page's body
     card_t cards[DOCK_MAX_ITEMS];
+    mcard_t meters[DOCK_MAX_ITEMS];
     struct {
         meter_t m[2];
         lv_obj_t *today;
@@ -149,6 +178,20 @@ static int s_fn;                       // page shown: 0 Agent, i the function pa
 static char s_fn_id[DOCK_ID_LEN];      // its id, to stay on it when the pages change
 static bool s_wake_tap;                // the press under way woke a dim screen: no tap
 static uint8_t s_bright = UINT8_MAX;   // as last asked for, before any new touch
+
+// Where render_fn put each item of the page shown, in ui.fn's coordinates.
+static lv_area_t s_slot[DOCK_MAX_ITEMS];
+static bool s_placed[DOCK_MAX_ITEMS];
+
+// A card held on a movable page.
+static struct {
+    int index;      // the item, -1 when none is held
+    bool lifted;    // held long enough: it follows the finger
+    int64_t t0_us;  // when the press began
+    lv_point_t p0;  // and where
+    int x0, y0;     // the card's position then
+    int target;     // the item it would swap with, -1 none
+} s_drag = {.index = -1, .target = -1};
 
 // ---------- helpers ----------
 
@@ -520,6 +563,7 @@ static void go_page(int delta)
 static void render_rows(void);
 static void render_page(void);
 static void render_fn(void);
+static void set_border_opa(void *obj, int32_t v);
 
 static void on_pager(lv_event_t *e)
 {
@@ -531,6 +575,11 @@ static void on_pager(lv_event_t *e)
 // Shows page i: 0 is the Agent page, then the function pages in order.
 static void show_fn(int i)
 {
+    if (s_drag.index >= 0) { // a card was held on the page left
+        lv_anim_delete(ui.meters[s_drag.index].obj, set_border_opa);
+        s_drag.index = -1;
+        s_drag.lifted = false;
+    }
     s_fn = i;
     snprintf(s_fn_id, sizeof(s_fn_id), "%s", i ? s_pages->pages[i - 1].id : "");
     render_page();
@@ -545,6 +594,9 @@ static void on_gesture(lv_event_t *e)
 {
     (void)e;
     lv_indev_t *indev = lv_indev_active();
+    if (s_drag.lifted) {
+        return; // a card is being dragged, not the page
+    }
     lv_dir_t dir = lv_indev_get_gesture_dir(indev);
     lv_indev_wait_release(indev); // a swipe never also taps what it started on
     // Left/right switches pages, stopping at both ends; up/down pages
@@ -664,6 +716,38 @@ static const stroke_t ICON_BELL[] = {
     ARC(120, 90, 60, 180, 360), LINE(60, 90, 60, 140), LINE(180, 90, 180, 140),
     LINE(60, 140, 40, 165), LINE(180, 140, 200, 165), LINE(40, 165, 200, 165), ARC(120, 195, 20, 0, 180),
 };
+// The 性能 page.
+static const stroke_t ICON_CPU[] = {
+    LINE(70, 70, 170, 70), LINE(170, 70, 170, 170), LINE(170, 170, 70, 170), LINE(70, 170, 70, 70),
+    LINE(100, 100, 140, 100), LINE(140, 100, 140, 140), LINE(140, 140, 100, 140), LINE(100, 140, 100, 100),
+    LINE(100, 30, 100, 70), LINE(140, 30, 140, 70), LINE(100, 170, 100, 210), LINE(140, 170, 140, 210),
+    LINE(30, 100, 70, 100), LINE(30, 140, 70, 140), LINE(170, 100, 210, 100), LINE(170, 140, 210, 140),
+};
+static const stroke_t ICON_GPU[] = {
+    LINE(25, 60, 215, 60), LINE(215, 60, 215, 170), LINE(215, 170, 25, 170), LINE(25, 170, 25, 60),
+    ARC(90, 115, 30, 0, 360), LINE(150, 95, 185, 95), LINE(150, 135, 185, 135), LINE(55, 170, 55, 200), LINE(95, 170, 95, 200),
+};
+static const stroke_t ICON_MEMORY[] = {
+    LINE(30, 70, 210, 70), LINE(210, 70, 210, 160), LINE(210, 160, 30, 160), LINE(30, 160, 30, 70),
+    LINE(65, 100, 95, 100), LINE(95, 100, 95, 130), LINE(95, 130, 65, 130), LINE(65, 130, 65, 100),
+    LINE(145, 100, 175, 100), LINE(175, 100, 175, 130), LINE(175, 130, 145, 130), LINE(145, 130, 145, 100),
+    LINE(60, 160, 60, 190), LINE(100, 160, 100, 190), LINE(140, 160, 140, 190), LINE(180, 160, 180, 190),
+};
+// A ring, the hub and three blades, each two arcs meeting at its base and tip.
+static const stroke_t ICON_ROTOR[] = {
+    ARC(120, 120, 100, 0, 360), ARC(120, 120, 16, 0, 360),
+    ARC(144, 72, 40, 127, 233), ARC(96, 72, 40, 307, 53),
+    ARC(150, 165, 40, 247, 353), ARC(174, 123, 40, 67, 173),
+    ARC(66, 123, 40, 7, 113), ARC(90, 165, 40, 187, 293),
+};
+static const stroke_t ICON_NET[] = {
+    LINE(80, 40, 80, 190), LINE(45, 155, 80, 190), LINE(80, 190, 115, 155),
+    LINE(160, 200, 160, 50), LINE(125, 85, 160, 50), LINE(160, 50, 195, 85),
+};
+static const stroke_t ICON_DISK[] = {
+    LINE(40, 45, 200, 45), LINE(200, 45, 200, 195), LINE(200, 195, 40, 195), LINE(40, 195, 40, 45),
+    LINE(40, 140, 200, 140), ARC(165, 168, 10, 0, 360),
+};
 
 #define STROKES(a) {a, sizeof(a) / sizeof(a[0])}
 static const struct {
@@ -674,40 +758,41 @@ static const struct {
     [DOCK_ICON_COOL] = STROKES(ICON_COOL), [DOCK_ICON_HEAT] = STROKES(ICON_HEAT),
     [DOCK_ICON_DRY] = STROKES(ICON_DRY),   [DOCK_ICON_FAN] = STROKES(ICON_FAN),
     [DOCK_ICON_AUTO] = STROKES(ICON_AUTO), [DOCK_ICON_MOON] = STROKES(ICON_MOON),
-    [DOCK_ICON_BELL] = STROKES(ICON_BELL),
+    [DOCK_ICON_BELL] = STROKES(ICON_BELL), [DOCK_ICON_CPU] = STROKES(ICON_CPU),
+    [DOCK_ICON_GPU] = STROKES(ICON_GPU),   [DOCK_ICON_MEMORY] = STROKES(ICON_MEMORY),
+    [DOCK_ICON_ROTOR] = STROKES(ICON_ROTOR), [DOCK_ICON_NET] = STROKES(ICON_NET),
+    [DOCK_ICON_DISK] = STROKES(ICON_DISK),
 };
 
 // A select card shows its option in the colour of its icon.
 static const uint32_t ICON_COLOR[DOCK_ICON_COUNT] = {
     [DOCK_ICON_BULB] = 0xE9E9E5, [DOCK_ICON_POWER] = 0xE9E9E5, [DOCK_ICON_COOL] = 0x5AA9FF, [DOCK_ICON_HEAT] = 0xFF9F43,
     [DOCK_ICON_DRY] = 0x4FD1C5,  [DOCK_ICON_FAN] = 0xE9E9E5,   [DOCK_ICON_AUTO] = 0x3DD68C,
-    [DOCK_ICON_MOON] = 0xE9E9E5, [DOCK_ICON_BELL] = 0xE9E9E5,
+    [DOCK_ICON_MOON] = 0xE9E9E5, [DOCK_ICON_BELL] = 0xE9E9E5, [DOCK_ICON_CPU] = 0x5AA9FF, [DOCK_ICON_GPU] = 0xC084FC,
+    [DOCK_ICON_MEMORY] = 0x3DD68C, [DOCK_ICON_ROTOR] = 0x4FD1C5, [DOCK_ICON_NET] = 0xFF9F43, [DOCK_ICON_DISK] = 0xBDBDB8,
 };
 
-// Draws the chip's icon (its user data) in the chip's arc and line
-// colours: 46 px in a 96 px chip, 30 px in the 56 px one, 24 px in 40.
-static void draw_icon(lv_event_t *e)
-{
-    lv_obj_t *chip = lv_event_get_current_target_obj(e);
-    lv_layer_t *layer = lv_event_get_layer(e);
-    dock_icon_t icon = (dock_icon_t)(intptr_t)lv_obj_get_user_data(chip);
-    lv_area_t a;
-    lv_obj_get_coords(chip, &a);
-    int size = lv_area_get_width(&a) >= 96 ? 46 : lv_area_get_width(&a) >= 56 ? 30 : 24;
-    int w = (size * 2 + 12) / 24; // stroke 2 of 24
-    int32_t ox = a.x1 + (lv_area_get_width(&a) - size) / 2;
-    int32_t oy = a.y1 + (lv_area_get_height(&a) - size) / 2;
+// The colours a meter's series and rows name.
+static const uint32_t PALETTE[DOCK_COLOR_COUNT] = {
+    [DOCK_COLOR_BLUE] = 0x5AA9FF,   [DOCK_COLOR_RED] = 0xF2617A,    [DOCK_COLOR_TEAL] = 0x4FD1C5,
+    [DOCK_COLOR_GREEN] = 0x3DD68C,  [DOCK_COLOR_ORANGE] = 0xFF9F43, [DOCK_COLOR_PURPLE] = 0xC084FC,
+    [DOCK_COLOR_GRAY] = 0x5C5B57,
+};
 
+// Draws icon in a size px square at ox, oy, in obj's arc and line colours.
+static void draw_strokes(lv_layer_t *layer, lv_obj_t *obj, dock_icon_t icon, int32_t ox, int32_t oy, int size)
+{
+    int w = (size * 2 + 12) / 24; // stroke 2 of 24
     lv_draw_arc_dsc_t arc;
     lv_draw_arc_dsc_init(&arc);
     arc.base.layer = layer;
-    lv_obj_init_draw_arc_dsc(chip, LV_PART_MAIN, &arc);
+    lv_obj_init_draw_arc_dsc(obj, LV_PART_MAIN, &arc);
     arc.width = w;
     arc.rounded = 1;
     lv_draw_line_dsc_t ln;
     lv_draw_line_dsc_init(&ln);
     ln.base.layer = layer;
-    lv_obj_init_draw_line_dsc(chip, LV_PART_MAIN, &ln);
+    lv_obj_init_draw_line_dsc(obj, LV_PART_MAIN, &ln);
     ln.width = w;
     ln.round_start = ln.round_end = 1;
 
@@ -727,6 +812,140 @@ static void draw_icon(lv_event_t *e)
             ln.p2.y = oy + v[3] * size / 240;
             lv_draw_line(layer, &ln);
         }
+    }
+}
+
+// Draws the chip's icon (its user data): 46 px in a 96 px chip, 30 px in
+// the 56 px one, 24 px in 40.
+static void draw_icon(lv_event_t *e)
+{
+    lv_obj_t *chip = lv_event_get_current_target_obj(e);
+    dock_icon_t icon = (dock_icon_t)(intptr_t)lv_obj_get_user_data(chip);
+    lv_area_t a;
+    lv_obj_get_coords(chip, &a);
+    int size = lv_area_get_width(&a) >= 96 ? 46 : lv_area_get_width(&a) >= 56 ? 30 : 24;
+    draw_strokes(lv_event_get_layer(e), chip, icon, a.x1 + (lv_area_get_width(&a) - size) / 2,
+                 a.y1 + (lv_area_get_height(&a) - size) / 2, size);
+}
+
+// A meter's icon (its user data) fills its object.
+static void draw_meter_icon(lv_event_t *e)
+{
+    lv_obj_t *o = lv_event_get_current_target_obj(e);
+    lv_area_t a;
+    lv_obj_get_coords(o, &a);
+    draw_strokes(lv_event_get_layer(e), o, (dock_icon_t)(intptr_t)lv_obj_get_user_data(o), a.x1, a.y1, lv_area_get_width(&a));
+}
+
+// A meter's colour: its icon's, amber or red when its level says so.
+static uint32_t meter_color(const dock_item_t *it)
+{
+    if (it->level == DOCK_LEVEL_CRIT) {
+        return C_RED;
+    }
+    if (it->level == DOCK_LEVEL_WARN) {
+        return C_AMBER;
+    }
+    return ICON_COLOR[it->icon];
+}
+
+// Reading i of a line of n in area a, as the web preview's scrSpark puts
+// it: DOCK_MAX_HIST readings fill the width, the newest at the right edge,
+// 100 near the top.
+static lv_point_t chart_point(const lv_area_t *a, int i, int n, uint8_t v)
+{
+    int32_t w = lv_area_get_width(a) - 1, h = lv_area_get_height(a);
+    int off = DOCK_MAX_HIST - n;
+    return (lv_point_t){a->x1 + (off + i) * w / (DOCK_MAX_HIST - 1), a->y1 + h * (3800 - 36 * v) / 4000};
+}
+
+// Fills under a line down to the bottom of a, step by step: a triangle
+// for the slope over a rectangle (as LVGL's own chart-area example), so
+// the steps join without seams.
+static void fill_under(lv_layer_t *layer, const lv_area_t *a, const dock_hist_t *h, lv_color_t c)
+{
+    lv_draw_triangle_dsc_t tri;
+    lv_draw_triangle_dsc_init(&tri);
+    tri.base.layer = layer;
+    tri.color = c;
+    tri.opa = LV_OPA_COVER;
+    lv_draw_rect_dsc_t rect;
+    lv_draw_rect_dsc_init(&rect);
+    rect.base.layer = layer;
+    rect.bg_color = c;
+    rect.bg_opa = LV_OPA_COVER;
+    for (int i = 0; i + 1 < h->n; i++) {
+        lv_point_t p = chart_point(a, i, h->n, h->v[i]), q = chart_point(a, i + 1, h->n, h->v[i + 1]);
+        int32_t low = p.y > q.y ? p.y : q.y;
+        if (p.y != q.y) {
+            tri.p[0] = (lv_point_precise_t){p.x, p.y};
+            tri.p[1] = (lv_point_precise_t){q.x, q.y};
+            tri.p[2] = p.y < q.y ? (lv_point_precise_t){p.x, low} : (lv_point_precise_t){q.x, low};
+            lv_draw_triangle(layer, &tri);
+        }
+        lv_area_t r = {p.x, low, q.x, a->y2};
+        lv_draw_rect(layer, &rect, &r);
+    }
+}
+
+// Paints bg over the corners of a outside a rounded rectangle of radius r:
+// a border r wide just outside it, which the clip keeps to a's corners.
+static void round_corners(lv_layer_t *layer, const lv_area_t *a, int r, lv_color_t bg)
+{
+    lv_draw_rect_dsc_t d;
+    lv_draw_rect_dsc_init(&d);
+    d.base.layer = layer;
+    d.bg_opa = LV_OPA_TRANSP;
+    d.border_color = bg;
+    d.border_width = r;
+    d.border_opa = LV_OPA_COVER;
+    d.radius = 2 * r;
+    lv_area_t o = {a->x1 - r, a->y1 - r, a->x2 + r, a->y2 + r};
+    lv_draw_rect(layer, &d, &o);
+}
+
+// Draws a meter's chart (user data: the item's index). A big meter's
+// series are solid areas, the last at the back, in a rounded panel; other
+// meters have a line over a faint area. Colours are mixed with what is
+// under them instead of blended, which keeps the steps of an area even.
+static void draw_chart(lv_event_t *e)
+{
+    lv_obj_t *o = lv_event_get_current_target_obj(e);
+    const dock_page_t *pg = fn_page();
+    int i = (int)(intptr_t)lv_obj_get_user_data(o);
+    if (!pg || i < 0 || i >= pg->item_count) {
+        return;
+    }
+    const dock_item_t *it = &pg->items[i];
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_color_t card = lv_obj_get_style_bg_color(lv_obj_get_parent(o), 0);
+    lv_area_t a;
+    lv_obj_get_coords(o, &a);
+    if (lv_obj_get_style_bg_opa(o, 0) > LV_OPA_TRANSP) { // a big meter's panel
+        for (int k = it->series_count - 1; k >= 0; k--) {
+            dock_color_t c = it->series[k].color;
+            uint32_t rgb = c ? PALETTE[c] : meter_color(it);
+            fill_under(layer, &a, &it->series[k].hist, lv_color_mix(lv_color_hex(rgb), lv_color_hex(CHART_BG), 235)); // 92%
+        }
+        round_corners(layer, &a, CHART_RADIUS, card);
+        return;
+    }
+    if (it->hist.n < 2) {
+        return;
+    }
+    lv_color_t c = lv_color_hex(meter_color(it));
+    fill_under(layer, &a, &it->hist, lv_color_mix(c, card, 41)); // 16%
+    lv_draw_line_dsc_t ln;
+    lv_draw_line_dsc_init(&ln);
+    ln.base.layer = layer;
+    ln.color = c;
+    ln.width = 2;
+    ln.round_start = ln.round_end = 1;
+    for (int k = 0; k + 1 < it->hist.n; k++) {
+        lv_point_t p = chart_point(&a, k, it->hist.n, it->hist.v[k]), q = chart_point(&a, k + 1, it->hist.n, it->hist.v[k + 1]);
+        ln.p1 = (lv_point_precise_t){p.x, p.y};
+        ln.p2 = (lv_point_precise_t){q.x, q.y};
+        lv_draw_line(layer, &ln);
     }
 }
 
@@ -893,11 +1112,187 @@ static void build_card(lv_obj_t *p, card_t *c, int index)
     }
 }
 
+static void set_border_opa(void *obj, int32_t v)
+{
+    lv_obj_set_style_border_opa(obj, (lv_opa_t)v, 0);
+}
+
+// The card the dragged one would swap with now, under point p; -1 none.
+static int drop_target(lv_point_t p)
+{
+    lv_area_t fn;
+    lv_obj_get_coords(ui.fn, &fn);
+    lv_point_t q = {p.x - fn.x1, p.y - fn.y1};
+    for (int i = 0; i < DOCK_MAX_ITEMS; i++) {
+        const lv_area_t *a = &s_slot[i];
+        if (i != s_drag.index && s_placed[i] && q.x >= a->x1 && q.x <= a->x2 && q.y >= a->y1 && q.y <= a->y2) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// A meter card outlined: 0 none, else in colour c.
+static void outline(int i, uint32_t c)
+{
+    lv_obj_t *o = ui.meters[i].obj;
+    lv_anim_delete(o, set_border_opa);
+    lv_obj_set_style_border_color(o, lv_color_hex(c), 0);
+    lv_obj_set_style_border_opa(o, c ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+}
+
+// Lets the held card go: dropped on another, the two swap at once and the
+// host is told; the host's next pages bring each its content for its new
+// size. Anywhere else it goes back.
+static void end_drag(bool drop)
+{
+    static dock_item_t tmp; // too big for the LVGL task's stack
+    int i = s_drag.index, t = s_drag.target;
+    bool lifted = s_drag.lifted;
+    s_drag.index = s_drag.target = -1;
+    s_drag.lifted = false;
+    lv_anim_delete(ui.meters[i].obj, set_border_opa);
+    dock_page_t *pg = fn_page();
+    if (drop && lifted && t >= 0 && pg && i < pg->item_count && t < pg->item_count) {
+        link_send_swap(pg->id, pg->items[i].id, pg->items[t].id);
+        bool bi = pg->items[i].big, bt = pg->items[t].big; // a slot keeps its size
+        tmp = pg->items[i];
+        pg->items[i] = pg->items[t];
+        pg->items[t] = tmp;
+        pg->items[i].big = bi;
+        pg->items[t].big = bt;
+    }
+    render_fn();
+}
+
+// Presses on a meter card (user data: its index) on a movable page: held
+// still for DRAG_HOLD_US the card lifts (its outline fades in meanwhile),
+// then follows the finger; the card under the finger is outlined in blue,
+// and letting go there swaps the two. Moving before it lifts is a swipe.
+static void on_meter_press(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    lv_obj_t *o = ui.meters[i].obj;
+    lv_point_t p;
+    lv_indev_get_point(lv_indev_active(), &p);
+    int64_t now = esp_timer_get_time();
+    if (code == LV_EVENT_PRESSED) {
+        on_card_pressed(e);
+        const dock_page_t *pg = fn_page();
+        if (!pg || !pg->movable || s_wake_tap || s_drag.index >= 0 || !lv_obj_has_flag(ui.overlay, LV_OBJ_FLAG_HIDDEN)) {
+            return;
+        }
+        s_drag.index = i;
+        s_drag.target = -1;
+        s_drag.lifted = false;
+        s_drag.t0_us = now;
+        s_drag.p0 = p;
+        s_drag.x0 = lv_obj_get_x(o);
+        s_drag.y0 = lv_obj_get_y(o);
+        lv_obj_set_style_border_color(o, lv_color_hex(C_TEXT4), 0);
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, o);
+        lv_anim_set_exec_cb(&a, set_border_opa);
+        lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
+        lv_anim_set_duration(&a, DRAG_HOLD_US / 1000);
+        lv_anim_start(&a);
+        return;
+    }
+    if (s_drag.index != i) {
+        return;
+    }
+    int dx = p.x - s_drag.p0.x, dy = p.y - s_drag.p0.y;
+    if (code != LV_EVENT_PRESSING) {
+        end_drag(code == LV_EVENT_RELEASED);
+        return;
+    }
+    if (!s_drag.lifted) {
+        if (dx * dx + dy * dy > DRAG_SLOP * DRAG_SLOP) {
+            s_drag.index = -1; // a swipe: the gesture handler takes it
+            outline(i, 0);
+        } else if (now - s_drag.t0_us >= DRAG_HOLD_US) {
+            s_drag.lifted = true;
+            outline(i, 0xE9E9E5);
+            lv_obj_move_foreground(o);
+        }
+        return;
+    }
+    lv_obj_set_pos(o, s_drag.x0 + dx, s_drag.y0 + dy);
+    int t = drop_target(p);
+    if (t != s_drag.target) {
+        if (s_drag.target >= 0) {
+            outline(s_drag.target, 0);
+            lv_obj_set_style_bg_color(ui.meters[s_drag.target].obj, lv_color_hex(C_CARD), 0);
+        }
+        if (t >= 0) {
+            outline(t, C_BLUE);
+            lv_obj_set_style_bg_color(ui.meters[t].obj, lv_color_hex(0x101B2A), 0);
+        }
+        s_drag.target = t;
+    }
+}
+
+static lv_obj_t *meter_part(lv_obj_t *card)
+{
+    lv_obj_t *o = box(card, 0, 0, 10, 10, 0, -1);
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE); // presses go to the card
+    return o;
+}
+
+// A meter card; render_meter sizes and places its parts.
+static void build_mcard(lv_obj_t *p, mcard_t *m, int index)
+{
+    m->obj = box(p, 0, 0, 180, 184, C_CARD, 18);
+    lv_obj_set_style_border_width(m->obj, 2, 0);
+    lv_obj_set_style_border_opa(m->obj, LV_OPA_TRANSP, 0);
+    lv_obj_add_flag(m->obj, LV_OBJ_FLAG_PRESS_LOCK); // a dragged card keeps the press
+    lv_obj_add_event_cb(m->obj, on_meter_press, LV_EVENT_PRESSED, (void *)(intptr_t)index);
+    lv_obj_add_event_cb(m->obj, on_meter_press, LV_EVENT_PRESSING, (void *)(intptr_t)index);
+    lv_obj_add_event_cb(m->obj, on_meter_press, LV_EVENT_RELEASED, (void *)(intptr_t)index);
+    lv_obj_add_event_cb(m->obj, on_meter_press, LV_EVENT_PRESS_LOST, (void *)(intptr_t)index);
+
+    m->icon = meter_part(m->obj);
+    lv_obj_set_style_arc_width(m->icon, 1, 0); // icons are drawn in these styles
+    lv_obj_set_style_line_width(m->icon, 1, 0);
+    lv_obj_add_event_cb(m->icon, draw_meter_icon, LV_EVENT_DRAW_MAIN_END, NULL);
+    m->label = text(m->obj, font_get(FONT_BOLD, 22), C_TEXT);
+    m->value = text(m->obj, font_get(FONT_MONO_BOLD, 30), C_TEXT);
+    m->unit = text(m->obj, font_get(FONT_BOLD, 16), C_TEXT3);
+    m->note = line(m->obj, font_get(FONT_REGULAR, 16), C_TEXT2, 100);
+    m->sub = text(m->obj, font_get(FONT_MONO, 17), C_TEXT);
+
+    m->chart = meter_part(m->obj);
+    lv_obj_set_style_bg_color(m->chart, lv_color_hex(CHART_BG), 0);
+    lv_obj_set_style_radius(m->chart, CHART_RADIUS, 0);
+    lv_obj_set_user_data(m->chart, (void *)(intptr_t)index);
+    lv_obj_add_event_cb(m->chart, draw_chart, LV_EVENT_DRAW_MAIN_END, NULL);
+
+    m->bar = lv_bar_create(m->obj);
+    lv_obj_remove_style_all(m->bar);
+    lv_obj_remove_flag(m->bar, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(m->bar, lv_color_hex(C_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(m->bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(m->bar, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_bar_set_range(m->bar, 0, 100);
+
+    for (int k = 0; k < DOCK_MAX_ROWS; k++) {
+        m->rows[k].swatch = meter_part(m->obj);
+        lv_obj_set_size(m->rows[k].swatch, 12, 12);
+        lv_obj_set_style_bg_opa(m->rows[k].swatch, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(m->rows[k].swatch, 3, 0);
+        m->rows[k].label = line(m->obj, font_get(FONT_REGULAR, 16), C_TEXT2, 60);
+        m->rows[k].text = text(m->obj, font_get(FONT_MONO, 16), C_TEXT);
+    }
+}
+
 static void build_fn(lv_obj_t *p)
 {
     ui.fn = box(p, PAD_X, FN_Y, FN_W, FN_H, 0, -1);
     for (int i = 0; i < DOCK_MAX_ITEMS; i++) {
         build_card(ui.fn, &ui.cards[i], i);
+        build_mcard(ui.fn, &ui.meters[i], i);
     }
     ui.fn_empty = box(ui.fn, 0, 0, FN_W, FN_H, 0x0B0B0C, 18);
     lv_obj_t *t = text(ui.fn_empty, font_get(FONT_REGULAR, 16), C_TEXT3);
@@ -1127,21 +1522,197 @@ static void render_card(card_t *c, const dock_item_t *it, int x, int y, int w, i
     set_text(c->label, it->label);
 }
 
+static void set_font(lv_obj_t *l, font_face_t face, int size)
+{
+    lv_obj_set_style_text_font(l, font_get(face, size), 0);
+}
+
+// Lays out meter card m for item it (the index-th) at x, y, w x h
+// (docs/protocol-v1.md §7.1). A wide card: icon, label and reading on top,
+// note and sub below, the chart of its series and the legend of its rows.
+// A mini card: label, reading, sub, then its line or bar. In the grid:
+// icon, label and sub on top, the reading, the line or bar.
+static void render_meter(mcard_t *m, const dock_item_t *it, int index, int x, int y, int w, int h, meter_size_t size)
+{
+    bool wide = size == METER_WIDE, mini = size == METER_MINI, gbig = size == METER_GRID_BIG;
+    const dock_page_t *pg = fn_page();
+    uint32_t color = meter_color(it);
+    int pl = mini ? 12 : gbig ? 22 : 16, pr = pl, pt = mini ? 12 : gbig ? 20 : 14, pb = mini ? 12 : gbig ? 18 : 12;
+    int icon = mini ? 18 : wide ? 24 : gbig ? 28 : 22;
+
+    lv_obj_remove_flag(m->obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_pos(m->obj, x, y);
+    lv_obj_set_size(m->obj, w, h);
+    lv_obj_set_style_bg_color(m->obj, lv_color_hex(C_CARD), 0);
+    lv_obj_set_style_border_opa(m->obj, LV_OPA_TRANSP, 0);
+    set_tappable(m->obj, pg && pg->movable);
+
+    lv_obj_set_size(m->icon, icon, icon);
+    lv_obj_set_user_data(m->icon, (void *)(intptr_t)it->icon);
+    lv_obj_set_style_arc_color(m->icon, lv_color_hex(color), 0);
+    lv_obj_set_style_line_color(m->icon, lv_color_hex(color), 0);
+    lv_obj_invalidate(m->icon);
+
+    set_font(m->label, FONT_BOLD, mini ? 16 : wide ? 22 : gbig ? 24 : 20);
+    set_font(m->value, FONT_MONO_BOLD, mini || wide ? 30 : gbig ? 52 : 36);
+    set_font(m->unit, FONT_BOLD, mini ? 14 : wide ? 16 : gbig ? 24 : 18);
+    set_font(m->sub, FONT_MONO, mini ? 14 : wide ? 17 : gbig ? 19 : 16);
+    set_color(m->value, it->level ? color : C_TEXT);
+    set_color(m->sub, wide ? C_TEXT : C_TEXT2);
+    set_text(m->label, it->label);
+    set_text(m->value, it->text);
+    set_text(m->unit, it->unit);
+    set_text(m->sub, it->sub);
+    show(m->unit, it->unit[0]);
+    show(m->sub, it->sub[0]);
+    show(m->note, wide);
+    lv_obj_update_layout(m->obj);
+    int vw = lv_obj_get_width(m->value), uw = it->unit[0] ? lv_obj_get_width(m->unit) + 4 : 0;
+    int sw = it->sub[0] ? lv_obj_get_width(m->sub) : 0;
+
+    int rows = wide ? it->row_count : 0;
+    int lines = (rows + 1) / 2, legend = lines ? lines * 20 + (lines - 1) * 4 : 0;
+    int cy0, cy1; // the chart's top and bottom, or the bar's for a mini card
+    if (wide) {
+        int b1 = pt + 26, b2 = b1 + 26;
+        lv_obj_set_pos(m->icon, pl, b1 - 8 - icon / 2);
+        on_baseline(m->label, pl + icon + 8, b1);
+        on_baseline(m->value, w - pr - uw - vw, b1);
+        on_baseline(m->unit, w - pr - uw + 4, b1);
+        on_baseline(m->sub, w - pr - sw, b2);
+        const lv_font_t *fn = font_get(FONT_REGULAR, 16);
+        int nw = w - pr - (sw ? sw + 8 : 0) - pl;
+        lv_obj_set_size(m->note, nw > 1 ? nw : 1, lv_font_get_line_height(fn));
+        set_text(m->note, it->note);
+        on_baseline(m->note, pl, b2);
+        cy0 = b2 + 10;
+        cy1 = h - pb - (lines ? legend + 8 : 0);
+    } else if (mini) {
+        lv_obj_set_pos(m->icon, pl, pt + 1);
+        on_baseline(m->label, pl + icon + 8, pt + 15);
+        on_baseline(m->value, pl, pt + 52);
+        on_baseline(m->unit, pl + vw + 4, pt + 52);
+        on_baseline(m->sub, pl, pt + 72);
+        cy0 = pt + 80;
+        cy1 = h - pb;
+    } else {
+        int b1 = pt + (gbig ? 24 : 20), b2 = b1 + 10 + (gbig ? 44 : 30);
+        lv_obj_set_pos(m->icon, pl, b1 - 7 - icon / 2);
+        on_baseline(m->label, pl + icon + 8, b1);
+        on_baseline(m->sub, w - pr - sw, b1);
+        on_baseline(m->value, pl, b2);
+        on_baseline(m->unit, pl + vw + 4, b2);
+        cy0 = b2 + 10;
+        cy1 = h - pb;
+    }
+
+    // The chart: a big meter's series in a panel; otherwise its line, or
+    // without one the bar at the bottom.
+    bool panel = wide, line = !wide && it->hist.n >= 2, bar = !wide && !line && it->pct >= 0;
+    show(m->chart, panel || line);
+    if (panel || line) {
+        lv_obj_set_pos(m->chart, pl, cy0);
+        lv_obj_set_size(m->chart, w - pl - pr, cy1 > cy0 + 4 ? cy1 - cy0 : 4);
+        lv_obj_set_style_bg_opa(m->chart, panel ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_user_data(m->chart, (void *)(intptr_t)index);
+        lv_obj_invalidate(m->chart);
+    }
+    show(m->bar, bar);
+    if (bar) {
+        int bh = mini ? 8 : 10;
+        lv_obj_set_pos(m->bar, pl, h - pb - bh);
+        lv_obj_set_size(m->bar, w - pl - pr, bh);
+        lv_obj_set_style_radius(m->bar, bh / 2, LV_PART_MAIN);
+        lv_obj_set_style_radius(m->bar, bh / 2, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(m->bar, lv_color_hex(color), LV_PART_INDICATOR);
+        lv_bar_set_value(m->bar, it->pct, LV_ANIM_OFF);
+    }
+
+    // The legend: two columns, each row a swatch, its name and its value.
+    int cw = (w - pl - pr - 16) / 2;
+    for (int k = 0; k < DOCK_MAX_ROWS; k++) {
+        bool on = k < rows;
+        show(m->rows[k].swatch, on);
+        show(m->rows[k].label, on);
+        show(m->rows[k].text, on);
+        if (!on) {
+            continue;
+        }
+        const dock_row_t *r = &it->rows[k];
+        int rx = pl + k % 2 * (cw + 16), ry = h - pb - legend + k / 2 * 24;
+        lv_obj_set_pos(m->rows[k].swatch, rx, ry + 4);
+        lv_obj_set_style_bg_color(m->rows[k].swatch, lv_color_hex(r->color ? PALETTE[r->color] : color), 0);
+        set_text(m->rows[k].text, r->text);
+        lv_obj_update_layout(m->rows[k].text);
+        int tx = rx + cw - lv_obj_get_width(m->rows[k].text);
+        on_baseline(m->rows[k].text, tx, ry + 15);
+        lv_obj_set_width(m->rows[k].label, tx - 6 - (rx + 18) > 1 ? tx - 6 - (rx + 18) : 1);
+        set_text(m->rows[k].label, r->label);
+        on_baseline(m->rows[k].label, rx + 18, ry + 15);
+    }
+}
+
+// Puts item i of page pg at x, y, w x h, as a meter card or a card.
+static void place(const dock_page_t *pg, int i, int x, int y, int w, int h, meter_size_t size)
+{
+    const dock_item_t *it = &pg->items[i];
+    if (it->kind == DOCK_ITEM_METER) {
+        render_meter(&ui.meters[i], it, i, x, y, w, h, size);
+        lv_obj_add_flag(ui.cards[i].obj, LV_OBJ_FLAG_HIDDEN);
+        pulse(ui.cards[i].chip, false);
+    } else {
+        render_card(&ui.cards[i], it, x, y, w, h, size == METER_GRID_BIG);
+        lv_obj_add_flag(ui.meters[i].obj, LV_OBJ_FLAG_HIDDEN);
+    }
+    s_slot[i] = (lv_area_t){x, y, x + w - 1, y + h - 1};
+    s_placed[i] = true;
+}
+
+// The page's items as cards: a grid, one row up to three, then 2x2 and
+// 3x2; or, with big meters, a dashboard (DASH_TOP).
 static void render_fn(void)
 {
     const dock_page_t *pg = fn_page();
     int n = pg ? pg->item_count : 0;
-    int cols = n <= 3 ? (n > 1 ? n : 1) : n == 4 ? 2 : 3;
-    int rows = n <= 3 ? 1 : 2;
-    int w = (FN_W - (cols - 1) * CARD_GAP) / cols;
-    int h = (FN_H - (rows - 1) * CARD_GAP) / rows;
     for (int i = 0; i < DOCK_MAX_ITEMS; i++) {
-        card_t *c = &ui.cards[i];
-        if (i < n) {
-            render_card(c, &pg->items[i], i % cols * (w + CARD_GAP), i / cols * (h + CARD_GAP), w, h, rows == 1);
+        s_placed[i] = false;
+    }
+    int big[DASH_BIG], nbig = 0, rest[DOCK_MAX_ITEMS], nrest = 0;
+    for (int i = 0; i < n; i++) {
+        const dock_item_t *it = &pg->items[i];
+        if (it->kind == DOCK_ITEM_METER && it->big && nbig < DASH_BIG) {
+            big[nbig++] = i;
         } else {
-            lv_obj_add_flag(c->obj, LV_OBJ_FLAG_HIDDEN);
-            pulse(c->chip, false);
+            rest[nrest++] = i;
+        }
+    }
+    if (nbig) {
+        nrest = nrest < DASH_REST ? nrest : DASH_REST;
+        int top = nrest ? DASH_TOP : FN_H;
+        int w = (FN_W - (nbig - 1) * CARD_GAP) / nbig;
+        for (int k = 0; k < nbig; k++) {
+            place(pg, big[k], k * (w + CARD_GAP), 0, w, top, METER_WIDE);
+        }
+        if (nrest) {
+            int w2 = (FN_W - (nrest - 1) * CARD_GAP) / nrest, y2 = top + CARD_GAP;
+            for (int k = 0; k < nrest; k++) {
+                place(pg, rest[k], k * (w2 + CARD_GAP), y2, w2, FN_H - y2, METER_MINI);
+            }
+        }
+    } else {
+        int cols = n <= 3 ? (n > 1 ? n : 1) : n == 4 ? 2 : 3;
+        int rows = n <= 3 ? 1 : 2;
+        int w = (FN_W - (cols - 1) * CARD_GAP) / cols;
+        int h = (FN_H - (rows - 1) * CARD_GAP) / rows;
+        for (int i = 0; i < n; i++) {
+            place(pg, i, i % cols * (w + CARD_GAP), i / cols * (h + CARD_GAP), w, h, rows == 1 ? METER_GRID_BIG : METER_GRID);
+        }
+    }
+    for (int i = 0; i < DOCK_MAX_ITEMS; i++) {
+        if (!s_placed[i]) {
+            lv_obj_add_flag(ui.cards[i].obj, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(ui.meters[i].obj, LV_OBJ_FLAG_HIDDEN);
+            pulse(ui.cards[i].chip, false);
         }
     }
     if (n == 0) {
@@ -1513,7 +2084,8 @@ void ui_poll(void)
         render_strip();
         render_rows();
     }
-    if (link_take_pages(s_pages, &s_pages_version)) {
+    // Pages wait while a card is held: they would move it under the finger.
+    if (s_drag.index < 0 && link_take_pages(s_pages, &s_pages_version)) {
         // Stay on the page shown while it is there, else go back to Agent.
         int keep = 0;
         for (int i = 0; s_fn_id[0] && i < s_pages->count; i++) {

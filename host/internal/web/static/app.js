@@ -23,6 +23,7 @@ let state = null;
 let previewPage = 0; // task page on the Agent page
 let previewFn = "agent"; // the page shown: "agent" or a function page id
 let scrTaskPages = 1;
+let scrDrag = null; // a card held on a movable page: {el, page, item, x, y, timer, lifted, target, stale}
 
 // ---------- formatting ----------
 
@@ -250,6 +251,13 @@ const SCR_ICONS = {
   fan: '<path d="M3 8h9a2.5 2.5 0 1 0-2.5-2.5"/><path d="M3 12h15a2.5 2.5 0 1 1-2.5 2.5"/><path d="M3 16h7a2 2 0 1 1-2 2"/>',
   auto: '<path d="M20 12a8 8 0 0 1-14 5.3"/><path d="M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v3.7h-3.7M6 21v-3.7h3.7"/>',
   bell: '<path d="M6 14V9a6 6 0 0 1 12 0v5l2 2.5H4z"/><path d="M10 19.5a2 2 0 0 0 4 0"/>',
+  // The 性能 page.
+  cpu: '<path d="M7 7h10v10H7z"/><path d="M10 10h4v4h-4z"/><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/>',
+  gpu: '<path d="M2.5 6h19v11h-19z"/><circle cx="9" cy="11.5" r="3"/><path d="M15 9.5h3.5M15 13.5h3.5"/><path d="M5.5 17v3M9.5 17v3"/>',
+  memory: '<path d="M3 7h18v9H3z"/><path d="M6.5 10h3v3h-3zM14.5 10h3v3h-3z"/><path d="M6 16v3M10 16v3M14 16v3M18 16v3"/>',
+  rotor: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1.6"/><path d="M12 10.4A4 4 0 0 1 12 4A4 4 0 0 1 12 10.4"/><path d="M13.39 12.8A4 4 0 0 1 18.93 16A4 4 0 0 1 13.39 12.8"/><path d="M10.61 12.8A4 4 0 0 1 5.07 16A4 4 0 0 1 10.61 12.8"/>',
+  net: '<path d="M8 4v15M4.5 15.5 8 19l3.5-3.5"/><path d="M16 20V5M12.5 8.5 16 5l3.5 3.5"/>',
+  disk: '<path d="M4 4.5h16v15H4z"/><path d="M4 14h16"/><circle cx="16.5" cy="16.75" r="1"/>',
   unplug: '<path d="M9 7V3M15 7V3"/><path d="M6 7h12v4a6 6 0 0 1-6 6 6 6 0 0 1-6-6z"/><path d="M12 17v4"/><path d="M3 3l18 18"/>',
 };
 
@@ -431,8 +439,22 @@ function scrGrid(n) {
   return n === 4 ? [2, 2] : [3, 2];
 }
 
+// A page with big meters is a dashboard: they share the top row, the other
+// items (at most four) the row below; without others the big ones fill the
+// page.
+const SCR_DASH_TOP = 236;
+
 function scrFnBody(page, now, dots) {
   const items = page.items || [];
+  const big = items.filter((it) => it.big).slice(0, 2);
+  if (big.length) {
+    const rest = items.filter((it) => !it.big).slice(0, 4);
+    const top = rest.length ? SCR_DASH_TOP : SCR_PAGE_H;
+    const row = (list, h, card) => el("div", { class: "scr-dash-row", style: `height:${h}px;grid-template-columns:repeat(${list.length},minmax(0,1fr))` }, ...list.map(card));
+    return [scrStrip(page.title, page.summary || "", now, dots, page.error), el("div", { class: "scr-dash" },
+      row(big, top, (it) => scrMeterCard(page, it, "wide")),
+      rest.length ? row(rest, SCR_PAGE_H - top - SCR_CARD_GAP, (it) => (it.kind === "meter" ? scrMeterCard(page, it, "mini") : scrCard(page, it, false))) : null)];
+  }
   const [cols, rows] = scrGrid(items.length);
   const w = (SCR_PAGE_W - (cols - 1) * SCR_CARD_GAP) / cols;
   const h = (SCR_PAGE_H - (rows - 1) * SCR_CARD_GAP) / rows;
@@ -451,6 +473,7 @@ function scrFnBody(page, now, dots) {
 // taps.
 function scrCard(page, it, big) {
   if (it.kind === "stepper") return scrStepper(page, it, big);
+  if (it.kind === "meter") return scrMeterCard(page, it, big ? "big" : "");
   const sw = it.kind === "switch";
   const btns = sw && it.buttons;
   const st = it.busy ? "busy" : !sw ? "plain" : it.on === true ? "on" : it.on === false ? "off" : "unknown";
@@ -490,6 +513,65 @@ function scrStepper(page, it, big) {
     el("span", { class: "label" }, it.label));
 }
 
+// A meter card takes no taps. size "wide" is a dashboard's big card: icon,
+// label and reading on top, the note and sub below, a chart of its series
+// and the legend of its rows. "mini" is a dashboard's small card: label,
+// reading, sub, then a line or a bar. Otherwise ("" or "big" for a single
+// row of cards): icon, label and sub on top, the reading, a line or a bar.
+// On a movable page the card can be dragged (scrDrag).
+function scrMeterCard(page, it, size) {
+  const icon = SCR_ICONS[it.icon] ? it.icon : "bulb";
+  const cls = `scr-card meter ${size} icon-${icon} ${it.level || ""} ${page.movable ? "movable" : ""}`;
+  const reading = el("span", { class: "reading" }, el("span", { class: "value mono" }, it.text), it.unit ? el("span", { class: "unit" }, it.unit) : null);
+  const sub = it.sub ? el("span", { class: "sub mono" }, it.sub) : null;
+  if (size === "wide") {
+    const series = (it.series || []).filter((s) => (s.hist || []).length > 1);
+    return el("div", { class: cls, "data-page": page.id, "data-item": it.id },
+      el("span", { class: "head" }, scrIcon(icon, 24, 2), el("span", { class: "label" }, it.label), reading),
+      el("span", { class: "note" }, el("span", { class: "n" }, it.note || ""), sub),
+      el("span", { class: "chart" }, series.length ? scrSpark(series) : null),
+      el("span", { class: "legend" }, ...(it.rows || []).map((r) => el("span", { class: "row" },
+        el("i", { style: `background:${SCR_COLORS[r.c] || "var(--c)"}` }), el("span", { class: "l" }, r.label), el("span", { class: "v mono" }, r.text)))));
+  }
+  const hist = (it.hist || []).map(Number);
+  let viz = null;
+  if (hist.length > 1) viz = scrSpark([{ hist }]);
+  else if (it.pct != null) viz = el("span", { class: "mbar" }, el("i", { style: `width:${Math.max(0, Math.min(100, Number(it.pct)))}%` }));
+  if (size === "mini") {
+    return el("div", { class: cls, "data-page": page.id, "data-item": it.id },
+      el("span", { class: "head" }, scrIcon(icon, 18, 2), el("span", { class: "label" }, it.label)), reading, sub, viz);
+  }
+  return el("div", { class: cls, "data-page": page.id, "data-item": it.id },
+    el("span", { class: "head" }, scrIcon(icon, size === "big" ? 28 : 22, 2), el("span", { class: "label" }, it.label), sub),
+    reading, viz);
+}
+
+// The colours a meter's series and rows name.
+const SCR_COLORS = { blue: "#5AA9FF", red: "#F2617A", teal: "#4FD1C5", green: "#3DD68C", orange: "#FF9F43", purple: "#C084FC", gray: "#5C5B57" };
+
+// A meter's chart: SCR_HIST readings fill the width, the newest at the
+// right edge. A single series without a colour is a line in the card's
+// colour over a faint area; named ones are solid areas, the first in
+// front, so a stack of running totals reads as bands.
+const SCR_HIST = 30;
+function scrSpark(series) {
+  let paths = "";
+  for (const s of [...series].reverse()) {
+    const hist = s.hist.map(Number);
+    const off = SCR_HIST - hist.length;
+    const pts = hist.map((v, i) => [((off + i) / (SCR_HIST - 1)) * 100, 38 - Math.max(0, Math.min(100, v)) * 0.36]
+      .map((n) => n.toFixed(2)).join(","));
+    const x0 = pts[0].split(",")[0], x1 = pts.at(-1).split(",")[0];
+    const area = `M${x0},40L${pts.join("L")}L${x1},40Z`;
+    paths += SCR_COLORS[s.c]
+      ? `<path class="band" fill="${SCR_COLORS[s.c]}" d="${area}"/>`
+      : `<path class="area" d="${area}"/><path class="line" d="M${pts.join("L")}" vector-effect="non-scaling-stroke"/>`;
+  }
+  const t = document.createElement("template");
+  t.innerHTML = `<svg class="spark" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true">${paths}</svg>`;
+  return t.content.firstChild;
+}
+
 function fnPages() { return (state && state.pages && state.pages.pages) || []; }
 
 // The pages left to right: Agent first, then the function pages in order.
@@ -525,6 +607,7 @@ async function previewTap(pageId, it, act) {
 
 function renderScreen(frame) {
   const screen = $("#screen");
+  if (scrDrag) { scrDrag.stale = true; return; } // a card is held: redraw when it is let go
   if (!frame) { screen.replaceChildren(); return; }
   const ids = previewIds();
   if (!ids.includes(previewFn)) previewFn = "agent";
@@ -565,6 +648,7 @@ document.addEventListener("keydown", (e) => {
   screen.addEventListener("pointercancel", () => { start = null; });
   screen.addEventListener("pointerup", (e) => {
     if (!start) return;
+    if (scrDrag && scrDrag.lifted) { start = null; return; } // a card was dragged, not the page
     const s = Number(screen.style.getPropertyValue("--s")) || 1;
     const dx = (e.clientX - start.x) / s, dy = (e.clientY - start.y) / s;
     start = null;
@@ -575,6 +659,85 @@ document.addEventListener("keydown", (e) => {
     else goTaskPage(dy < 0 ? 1 : -1);
   });
   screen.addEventListener("click", (e) => { if (swallow) { e.preventDefault(); e.stopPropagation(); } }, true);
+}
+
+// Dragging cards on a movable page: drag one onto another and let go, and
+// the two trade places (act "swap"); letting go anywhere else puts it back.
+// A mouse picks a card up as soon as it moves. A finger, as on the screen,
+// holds it for SCR_HOLD ms first, since
+// moving earlier is a swipe between pages. As on the screen, an outline
+// fades in while it is held and turns white when it lifts. The screen does
+// not redraw while a card is held.
+const SCR_HOLD = 500;
+{
+  const screen = $("#screen");
+  const scale = () => Number(screen.style.getPropertyValue("--s")) || 1;
+  const end = (swap) => {
+    const d = scrDrag;
+    scrDrag = null;
+    clearTimeout(d.timer);
+    d.el.classList.remove("holding");
+    if (d.target) d.target.classList.remove("drop");
+    if (swap && d.target) {
+      previewSwap(d.page, d.item, d.target.dataset.item);
+    } else if (d.lifted || d.stale) {
+      renderScreen(state.frame);
+    }
+  };
+  const lift = (d) => {
+    d.lifted = true;
+    d.el.classList.remove("holding");
+    d.el.classList.add("lifted");
+  };
+  screen.addEventListener("pointerdown", (e) => {
+    const card = e.target.closest(".scr-card.movable");
+    if (!card || !hostConnected || scrDrag || e.button > 0) return;
+    const d = scrDrag = { el: card, page: card.dataset.page, item: card.dataset.item, x: e.clientX, y: e.clientY,
+      mouse: e.pointerType === "mouse", lifted: false, target: null, stale: false };
+    screen.setPointerCapture(e.pointerId); // keep the drag when the pointer leaves the screen
+    if (!d.mouse) {
+      card.classList.add("holding");
+      d.timer = setTimeout(() => lift(d), SCR_HOLD);
+    }
+  });
+  screen.addEventListener("pointermove", (e) => {
+    const d = scrDrag;
+    if (!d) return;
+    const dx = (e.clientX - d.x) / scale(), dy = (e.clientY - d.y) / scale();
+    if (!d.lifted) {
+      if (Math.hypot(dx, dy) <= 6) return;
+      if (!d.mouse) {
+        d.el.classList.remove("holding");
+        end(false); // a finger moving early swipes
+        return;
+      }
+      lift(d);
+    }
+    d.el.style.transform = `translate(${dx}px, ${dy}px)`;
+    d.el.style.pointerEvents = "none"; // to see the card under the finger
+    const under = document.elementFromPoint(e.clientX, e.clientY);
+    d.el.style.pointerEvents = "";
+    const t = under && under.closest(".scr-card.movable");
+    const target = t && t !== d.el ? t : null;
+    if (target !== d.target) {
+      if (d.target) d.target.classList.remove("drop");
+      if (target) target.classList.add("drop");
+      d.target = target;
+    }
+  });
+  screen.addEventListener("pointerup", () => { if (scrDrag) end(scrDrag.lifted); });
+  screen.addEventListener("pointercancel", () => { if (scrDrag) end(false); });
+  screen.addEventListener("contextmenu", (e) => { if (scrDrag) e.preventDefault(); }); // a long press on touch screens
+}
+
+async function previewSwap(pageId, item, to) {
+  try {
+    state.pages = await api(`/api/plugins/${pageId}/${item}`, { method: "POST", body: { act: "swap", to } });
+    showMsg("#preview-msg", "");
+  } catch (e) {
+    showMsg("#preview-msg", e.message, true);
+  }
+  render();
 }
 
 function renderDeviceDetail(dev) {
@@ -1005,6 +1168,7 @@ $("#scan-ports").addEventListener("click", async () => {
 const mqttForm = $("#mqtt-form");
 const lightsForm = $("#lights-form");
 const airconForm = $("#aircon-form");
+const perfForm = $("#perf-form");
 
 // Editable list rows: each field is [config key, label, placeholder, type].
 // Inputs use data-k, not name, so the dotted-name form helpers skip them;
@@ -1078,11 +1242,13 @@ async function loadPlugins() {
     loadedConfig = await api("/api/config");
     fillForm(lightsForm, loadedConfig);
     fillForm(airconForm, loadedConfig);
+    fillForm(perfForm, loadedConfig);
     renderBrokerRows(savedBrokers());
     renderLightRows(loadedConfig.plugins.lights.lights || []);
     showMsg("#mqtt-msg", "");
     showMsg("#lights-msg", "");
     showMsg("#aircon-msg", "");
+    showMsg("#perf-msg", "");
   } catch (e) {
     showMsg("#lights-msg", e.message, true);
   }
@@ -1193,6 +1359,27 @@ mqttForm.addEventListener("submit", async (ev) => {
   }
 });
 
+$("#perf-reset").addEventListener("click", async () => {
+  try {
+    loadedConfig = await api("/api/config", { method: "POST", body: { plugins: { perf: { order: [] } } } });
+    showMsg("#perf-msg", "已恢复默认排列");
+  } catch (e) {
+    showMsg("#perf-msg", `恢复失败：${e.message}`, true);
+  }
+  render();
+});
+
+perfForm.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  try {
+    loadedConfig = await api("/api/config", { method: "POST", body: readForm(perfForm) });
+    showMsg("#perf-msg", "已保存");
+  } catch (e) {
+    showMsg("#perf-msg", `保存失败：${e.message}`, true);
+  }
+  render();
+});
+
 airconForm.addEventListener("submit", async (ev) => {
   ev.preventDefault();
   try {
@@ -1269,6 +1456,9 @@ function renderPluginsLive() {
 
   // The air conditioner: what the page says, and its buttons greyed as its
   // items are (no infrared, temperature held in auto, fan held in dry).
+  const perf = fnPages().find((p) => p.id === "perf");
+  $("#perf-summary").textContent = perf ? perf.summary || "" : "未启用";
+
   const ac = fnPages().find((p) => p.id === "aircon");
   $("#aircon-summary").textContent = ac ? ac.summary || "" : "";
   const acLive = $("#aircon-state");

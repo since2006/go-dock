@@ -382,6 +382,7 @@ func (s *Server) getPages(w http.ResponseWriter, r *http.Request) {
 func (s *Server) postPluginAction(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Act string `json:"act"`
+		To  string `json:"to"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -389,7 +390,7 @@ func (s *Server) postPluginAction(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	err := s.backend.PluginAction(ctx, model.Action{Page: r.PathValue("page"), Item: r.PathValue("item"), Act: body.Act})
+	err := s.backend.PluginAction(ctx, model.Action{Page: r.PathValue("page"), Item: r.PathValue("item"), Act: body.Act, To: body.To})
 	switch {
 	case errors.Is(err, plugins.ErrNotFound):
 		writeErr(w, http.StatusNotFound, err)

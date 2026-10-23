@@ -93,6 +93,7 @@ func (f *fakeBackend) DeviceBeep(notes [][2]int, volume int) error {
 func (f *fakeBackend) PluginAction(ctx context.Context, a model.Action) error {
 	switch {
 	case a.Page == "aircon" && a.Item == "temp" && (a.Act == model.ActInc || a.Act == model.ActDec):
+	case a.Page == "perf" && a.Act == model.ActSwap:
 	case a.Page != "lights" || a.Item != "main":
 		return plugins.ErrNotFound
 	case a.Act != model.ActOn && a.Act != model.ActOff && a.Act != model.ActToggle:
@@ -236,6 +237,13 @@ func TestPluginAction(t *testing.T) {
 	}
 	if len(b.actions) != 1 || b.actions[0] != (model.Action{Page: "lights", Item: "main", Act: "toggle"}) {
 		t.Fatalf("actions %+v", b.actions)
+	}
+	// A card dropped on another names it in to.
+	if w := do(h, "POST", host, "/api/plugins/perf/mem", "application/json", `{"act":"swap","to":"gpu"}`); w.Code != http.StatusOK {
+		t.Fatalf("swap: %d %s", w.Code, w.Body.String())
+	}
+	if b.actions[1] != (model.Action{Page: "perf", Item: "mem", Act: "swap", To: "gpu"}) {
+		t.Fatalf("swap action %+v", b.actions[1])
 	}
 	for _, tc := range []struct {
 		path, body string
