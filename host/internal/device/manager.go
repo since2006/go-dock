@@ -8,17 +8,28 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/since2006/go-dock/host/internal/logx"
 	"github.com/since2006/go-dock/host/internal/model"
 )
 
-// Options configures the device link.
+// Options configures the links to the screen.
 type Options struct {
-	Enabled     bool
-	Port        string // "auto" or an explicit port path
+	Enabled bool
+	// Addr ("host" or "host:port") and Code (the pairing code the screen
+	// shows) reach the screen over WiFi, which carries everything it shows.
+	Addr string
+	Code string
+	// Port is the USB cable used to set up the screen's WiFi and update
+	// its firmware: "auto" or a serial port path.
+	Port string
+	// Name and HostID tell the screen which computer this is.
+	Name        string
+	HostID      string
 	MaxSessions int
 	ShowIdle    bool
 	// BeepNotes is what the device plays when a task starts waiting for the
@@ -41,40 +52,28 @@ type SnapshotSource interface {
 	Subscribe() (<-chan struct{}, func())
 }
 
-// PageSource provides the function pages and handles taps on them;
+// LineSource provides the readings of the line on the Agent page;
 // *plugins.Host implements it.
-type PageSource interface {
-	Pages() []model.Page
-	Do(ctx context.Context, a model.Action) error
+type LineSource interface {
+	Line() []model.Reading
 }
 
-// Link states reported in Status.State.
+// Link states reported in Status.State and USBStatus.State.
 const (
 	StateDisabled  = "disabled"
+	StateUnset     = "unset" // WiFi: no screen address or pairing code yet
 	StateSearching = "searching"
-	StateConnected = "connected" // port open, no device hello yet
+	StateConnected = "connected" // linked, no device hello yet
 	StateReady     = "ready"     // device answered hello
 )
 
-// Status is the link state shown on the web UI.
+// Status is the link over WiFi, shown on the web UI, plus the USB cable.
 type Status struct {
 	State    string `json:"state"`
-	Port     string `json:"port,omitempty"`
+	Addr     string `json:"addr,omitempty"` // the screen's address
 	Firmware string `json:"firmware,omitempty"`
-	// OTA: the firmware can be updated over the link.
-	OTA bool `json:"ota,omitempty"`
-	// Pages: the firmware shows function pages.
-	Pages bool `json:"pages,omitempty"`
-	// Beep: the firmware plays sounds on a buzzer (if one is wired up).
-	Beep bool `json:"beep,omitempty"`
-	// Volume: it plays them at the volume sent.
-	Volume bool `json:"volume,omitempty"`
-	// IR: the firmware sends infrared (if a transmitter is wired up).
-	IR bool `json:"ir,omitempty"`
-	// Settings: the firmware takes brightness settings.
-	Settings bool `json:"settings,omitempty"`
 	// Incompatible: the device speaks another protocol version; it gets no
-	// snapshots but can still be updated.
+	// snapshots, only firmware updates.
 	Incompatible bool        `json:"incompatible,omitempty"`
 	Width        int         `json:"width,omitempty"`
 	Height       int         `json:"height,omitempty"`
@@ -82,45 +81,68 @@ type Status struct {
 	LastHeard    time.Time   `json:"last_heard,omitzero"`
 	Error        string      `json:"error,omitempty"`
 	Sent         uint64      `json:"sent"`
+	USB          USBStatus   `json:"usb"`
 	Flash        FlashStatus `json:"flash,omitzero"` // kept across reconnects
 }
 
-// Manager finds the device, keeps the serial link up and pushes snapshots.
+// USBStatus is the cable that sets up the screen's WiFi and updates its
+// firmware; nothing it shows goes over it.
+type USBStatus struct {
+	State    string `json:"state"`
+	Port     string `json:"port,omitempty"`
+	Firmware string `json:"firmware,omitempty"`
+	// Net is what the screen last said about its WiFi.
+	Net          *NetStatus `json:"net,omitempty"`
+	Incompatible bool       `json:"incompatible,omitempty"`
+	Error        string     `json:"error,omitempty"`
+}
+
+// Manager keeps the links to the screen up: over WiFi it pushes snapshots
+// and the line, over USB it sets up the WiFi and updates the firmware.
 type Manager struct {
-	src         SnapshotSource
-	hostVersion string
-	log         *slog.Logger
-	onChange    func()
+	src      SnapshotSource
+	log      *slog.Logger
+	onChange func()
 
 	// Replaceable in tests.
-	list         func() ([]PortInfo, error)
-	open         func(name string) (io.ReadWriteCloser, error)
-	heartbeat    time.Duration
-	helloEvery   time.Duration
-	rescan       time.Duration
-	debounce     time.Duration
-	writeTimeout time.Duration
-	// Firmware update: waits for the device to erase (otaReady), write a
-	// chunk (otaAck) and check the image (otaDone); for the serve loop to
+	list       func() ([]PortInfo, error)
+	open       func(name string) (io.ReadWriteCloser, error)
+	dial       func(addr string) (io.ReadWriteCloser, error)
+	heartbeat  time.Duration
+	helloEvery time.Duration
+	rescan     time.Duration // USB: looking for the cable again
+	// WiFi: how long to wait before dialing again, after the screen turned
+	// go-dock away, and without a word from the screen.
+	netRetry, deniedWait, netSilence time.Duration
+	debounce                         time.Duration
+	writeTimeout                     time.Duration
+	// Firmware update: waits for the user to answer on the screen
+	// (otaConfirm, WiFi only), for the device to erase (otaReady), write a
+	// chunk (otaAck) and check the image (otaDone); for the link's loop to
 	// take the image (otaPickup); and for the new firmware to say hello
 	// (otaReboot), ignoring the old one for otaSettle after it accepted.
-	otaReady, otaAck, otaDone, otaPickup, otaReboot, otaSettle time.Duration
+	otaConfirm, otaReady, otaAck, otaDone, otaPickup, otaReboot, otaSettle time.Duration
 
-	kick     chan struct{}
-	flashReq chan flashJob
-	actions  chan struct{} // bounds taps being handled at once
+	kick     chan struct{} // reconnect over WiFi
+	usbKick  chan struct{} // reopen the USB cable
+	usbFlash chan flashJob // an update for the USB loop
+	netFlash chan flashJob // and for the WiFi loop
 	beepReq  chan []byte   // the beep line of a sound to try out
-	irReq    chan irLine   // ir_send lines to write
-	settings chan struct{} // the brightness settings changed
+	wifiReq  chan []byte   // a wifi line, taken only by a USB link that can send it now
+	scanReq  chan []byte   // a wifi_scan line, likewise
+	scanRes  chan scanResult
+	scanMu   sync.Mutex // one scan at a time
+	// scanTimeout bounds a scan: handing the request over, then the answer.
+	scanTimeout time.Duration
+	settings    chan struct{} // the brightness settings changed
 	// waiting and active hold waitingTasks and activeTasks as of the last
-	// snapshot sent to a device that beeps; only the serve loop uses them.
-	// They outlive connections, so replugging the device does not beep
-	// again for the same tasks.
+	// snapshot sent to a device that beeps; only the WiFi loop uses them.
+	// They outlive connections, so reconnecting does not beep again for
+	// the same tasks.
 	waiting, active map[string]bool
 
 	mu          sync.Mutex
-	pages       PageSource
-	irSink      func(raw []int)
+	line        LineSource
 	opts        Options
 	status      Status
 	seq         uint64
@@ -128,20 +150,24 @@ type Manager struct {
 }
 
 // NewManager creates the link manager. onChange, if set, is called when a
-// firmware update makes progress.
-func NewManager(src SnapshotSource, opts Options, hostVersion string, log *slog.Logger, onChange func()) *Manager {
+// firmware update makes progress or the USB cable reports news.
+func NewManager(src SnapshotSource, opts Options, log *slog.Logger, onChange func()) *Manager {
 	return &Manager{
 		src:          src,
-		hostVersion:  hostVersion,
 		log:          log.With("component", "device"),
 		onChange:     onChange,
 		list:         ListPorts,
 		open:         openSerial,
+		dial:         dialNet,
 		heartbeat:    5 * time.Second,
 		helloEvery:   5 * time.Second,
 		rescan:       2 * time.Second,
+		netRetry:     5 * time.Second,
+		deniedWait:   10 * time.Second,
+		netSilence:   20 * time.Second,
 		debounce:     200 * time.Millisecond,
 		writeTimeout: 10 * time.Second,
+		otaConfirm:   75 * time.Second, // the screen gives up after 60
 		otaReady:     60 * time.Second,
 		otaAck:       10 * time.Second,
 		otaDone:      30 * time.Second,
@@ -149,53 +175,62 @@ func NewManager(src SnapshotSource, opts Options, hostVersion string, log *slog.
 		otaReboot:    60 * time.Second,
 		otaSettle:    5 * time.Second,
 		kick:         make(chan struct{}, 1),
-		flashReq:     make(chan flashJob),
-		actions:      make(chan struct{}, 4),
+		usbKick:      make(chan struct{}, 1),
+		usbFlash:     make(chan flashJob),
+		netFlash:     make(chan flashJob),
 		beepReq:      make(chan []byte, 1),
-		irReq:        make(chan irLine, 4),
+		wifiReq:      make(chan []byte),
+		scanReq:      make(chan []byte),
+		scanRes:      make(chan scanResult, 1),
+		scanTimeout:  15 * time.Second,
 		settings:     make(chan struct{}, 1),
 		opts:         opts,
-		status:       Status{State: StateSearching},
+		status:       Status{State: StateSearching, USB: USBStatus{State: StateSearching}},
 	}
 }
 
-// SetOptions applies new options, reconnecting when the port selection or
-// enablement changed.
+// SetOptions applies new options, reconnecting the links whose settings
+// changed.
 func (m *Manager) SetOptions(o Options) {
 	m.mu.Lock()
 	old := m.opts
 	m.opts = o
 	m.mu.Unlock()
+	if old.Enabled != o.Enabled || old.Addr != o.Addr || old.Code != o.Code || old.Name != o.Name || old.HostID != o.HostID {
+		poke(m.kick)
+	}
 	if old.Enabled != o.Enabled || old.Port != o.Port {
-		m.Reconnect()
+		poke(m.usbKick)
 	}
 	if !sameSettings(old, o) {
-		select {
-		case m.settings <- struct{}{}:
-		default:
-		}
+		poke(m.settings)
 	}
 }
 
-// SetPages sets where function pages come from; call it before Run.
-func (m *Manager) SetPages(p PageSource) {
+func poke(c chan struct{}) {
+	select {
+	case c <- struct{}{}:
+	default:
+	}
+}
+
+// SetLine sets where the line's readings come from; call it before Run.
+func (m *Manager) SetLine(l LineSource) {
 	m.mu.Lock()
-	m.pages = p
+	m.line = l
 	m.mu.Unlock()
 }
 
-func (m *Manager) pageSource() PageSource {
+func (m *Manager) lineSource() LineSource {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.pages
+	return m.line
 }
 
-// Reconnect drops the current link and searches again immediately.
+// Reconnect drops both links and connects again immediately.
 func (m *Manager) Reconnect() {
-	select {
-	case m.kick <- struct{}{}:
-	default:
-	}
+	poke(m.kick)
+	poke(m.usbKick)
 }
 
 func (m *Manager) Status() Status {
@@ -216,8 +251,20 @@ func (m *Manager) update(f func(s *Status)) {
 	m.mu.Unlock()
 }
 
+// updateUSB changes the cable's status, telling the web UI when it moved.
+func (m *Manager) updateUSB(f func(u *USBStatus)) {
+	m.mu.Lock()
+	old := m.status.USB
+	f(&m.status.USB)
+	moved := m.status.USB != old
+	m.mu.Unlock()
+	if moved {
+		m.changed()
+	}
+}
+
 // setError records err, logging it only when it changes to avoid a line
-// every rescan.
+// every retry.
 func (m *Manager) setError(err error) {
 	msg := err.Error()
 	m.mu.Lock()
@@ -225,48 +272,73 @@ func (m *Manager) setError(err error) {
 	m.status.Error = msg
 	m.mu.Unlock()
 	if changed {
-		m.log.Warn("设备连接问题", "err", msg)
+		m.log.Warn("屏幕连接问题", "err", msg)
 	}
 }
 
-// Run keeps the link alive until ctx ends.
+// Run keeps both links up until ctx ends.
 func (m *Manager) Run(ctx context.Context) {
+	var wg sync.WaitGroup
+	wg.Go(func() { m.runNet(ctx) })
+	wg.Go(func() { m.runUSB(ctx) })
+	wg.Wait()
+}
+
+// runNet keeps the WiFi link to the screen up.
+func (m *Manager) runNet(ctx context.Context) {
 	for ctx.Err() == nil {
 		opts := m.options()
-		if !opts.Enabled {
-			m.update(func(s *Status) { *s = Status{State: StateDisabled, Sent: s.Sent, Flash: s.Flash} })
-			m.wait(ctx, 0)
+		switch {
+		case !opts.Enabled:
+			m.update(func(s *Status) { netUnlinked(s); s.State, s.Error = StateDisabled, "" })
+			m.wait(ctx, m.kick, 0)
+			continue
+		case opts.Addr == "" || opts.Code == "":
+			m.update(func(s *Status) { netUnlinked(s); s.State, s.Error = StateUnset, "" })
+			m.wait(ctx, m.kick, 0)
 			continue
 		}
-		m.update(unlinked)
-		name, err := m.pick(opts.Port)
+		m.update(netUnlinked)
+		addr, err := NetAddr(opts.Addr)
 		if err != nil {
 			m.setError(err)
-			m.wait(ctx, m.rescan)
+			m.wait(ctx, m.kick, 0) // only a new address helps
 			continue
 		}
-		conn, err := m.open(name)
+		conn, err := m.dial(addr)
 		if err != nil {
-			m.setError(fmt.Errorf("打开 %s: %w", name, err))
-			m.wait(ctx, m.rescan)
+			m.setError(dialError(addr, err))
+			m.wait(ctx, m.kick, m.netRetry)
 			continue
 		}
-		kicked := m.serve(ctx, name, conn)
+		retry := m.serveNet(ctx, addr, conn)
 		conn.Close()
-		m.update(unlinked)
-		if !kicked {
-			m.wait(ctx, m.rescan)
+		m.update(netUnlinked)
+		if retry > 0 {
+			m.wait(ctx, m.kick, retry)
 		}
 	}
 }
 
-// unlinked forgets the device while searching for one.
-func unlinked(s *Status) {
-	s.State, s.Port, s.Firmware, s.OTA, s.Pages, s.Beep, s.Volume, s.IR, s.Settings, s.Incompatible, s.Width, s.Height = StateSearching, "", "", false, false, false, false, false, false, false, 0, 0
+// dialError says in plain words why the screen could not be reached.
+func dialError(addr string, err error) error {
+	var ne net.Error
+	switch {
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return fmt.Errorf("屏幕 %s 拒绝连接：端口不对，或屏幕固件还不支持 WiFi", addr)
+	case errors.As(err, &ne) && ne.Timeout():
+		return fmt.Errorf("连不上屏幕 %s：屏幕没开、没连上 WiFi，或 IP 不对", addr)
+	}
+	return fmt.Errorf("连不上屏幕 %s: %w", addr, err)
 }
 
-// wait sleeps for d (forever when d is 0) or until a reconnect request.
-func (m *Manager) wait(ctx context.Context, d time.Duration) {
+// netUnlinked forgets the screen while connecting to it.
+func netUnlinked(s *Status) {
+	*s = Status{State: StateSearching, Error: s.Error, LastSent: s.LastSent, LastHeard: s.LastHeard, Sent: s.Sent, USB: s.USB, Flash: s.Flash}
+}
+
+// wait sleeps for d (forever when d is 0) or until kick.
+func (m *Manager) wait(ctx context.Context, kick <-chan struct{}, d time.Duration) {
 	var timer <-chan time.Time
 	if d > 0 {
 		t := time.NewTimer(d)
@@ -275,35 +347,30 @@ func (m *Manager) wait(ctx context.Context, d time.Duration) {
 	}
 	select {
 	case <-ctx.Done():
-	case <-m.kick:
+	case <-kick:
 	case <-timer:
 	}
 }
 
-func (m *Manager) pick(port string) (string, error) {
-	if port != "" && port != "auto" {
-		return port, nil
-	}
-	ports, err := m.list()
-	if err != nil {
-		return "", fmt.Errorf("列出串口: %w", err)
-	}
-	name := pickPort(ports)
-	if name == "" {
-		return "", errors.New("未找到设备（VID 303A）")
-	}
-	return name, nil
-}
-
-// serve runs one connection until it fails, ctx ends or a reconnect is
-// requested (then it returns true).
-func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteCloser) (kicked bool) {
+// serveNet runs one WiFi connection until it fails, ctx ends or a
+// reconnect is requested. It returns how long to wait before dialing
+// again: 0 after a reconnect request.
+func (m *Manager) serveNet(ctx context.Context, addr string, conn io.ReadWriteCloser) time.Duration {
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	m.update(func(s *Status) { s.State, s.Port, s.Error = StateConnected, name, "" })
-	m.log.Info("设备串口已打开", "port", name)
-	defer m.log.Info("设备串口已关闭", "port", name)
+	// A screen that turns go-dock away keeps its reason up until a
+	// handshake succeeds.
+	m.update(func(s *Status) { s.State, s.Addr = StateConnected, addr })
+	// Dialed again every few seconds while the screen turns go-dock away:
+	// the handshake is what gets logged.
+	m.log.Debug("已连接屏幕", "addr", addr)
+	defer m.log.Debug("与屏幕的连接已断开", "addr", addr)
+
+	// A screen that lost power or WiFi goes quiet rather than closing: it
+	// answers every snapshot, so silence ends the link.
+	silence := time.NewTimer(m.netSilence)
+	defer silence.Stop()
 
 	msgs := make(chan DeviceMsg, 16)
 	readErr := make(chan error, 1)
@@ -318,46 +385,51 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 	defer hello.Stop()
 	var debounce <-chan time.Time
 
-	ready, incompatible, beepOK, irOK, settingsOK := false, false, false, false, false
-	fail := func(err error) bool {
-		m.setError(fmt.Errorf("%s: %w", name, err))
-		return false
+	// heard: the screen said hello on this link, so it takes updates, even
+	// in another protocol (that is what fixes it); ready: in this one.
+	ready, incompatible, heard := false, false, false
+	fail := func(err error) time.Duration {
+		m.setError(fmt.Errorf("%s: %w", addr, err))
+		return m.netRetry
 	}
-	// Function pages follow each snapshot, to devices that show them;
-	// a debounced change resends them only when they differ.
-	pagesOK := false
-	var lastPages []byte
-	sendPages := func(force bool) error {
-		src := m.pageSource()
-		if !pagesOK || incompatible || src == nil {
+	// The line of readings follows each snapshot; a debounced change
+	// resends it only when it differs.
+	var lastLine []byte
+	sendLine := func(force bool) error {
+		src := m.lineSource()
+		if !ready || src == nil {
 			return nil
 		}
-		line, err := EncodePages(BuildPages(src.Pages()))
-		if err != nil || (!force && bytes.Equal(line, lastPages)) {
+		line, err := EncodeLine(BuildLine(src.Line()))
+		if err != nil || (!force && bytes.Equal(line, lastLine)) {
 			return err
 		}
 		if err := m.write(conn, line); err != nil {
 			return err
 		}
-		lastPages = line
+		lastLine = line
 		return nil
 	}
-	// push sends a snapshot, the pages and, to a device that beeps, a beep
-	// when a task started waiting for the user.
-	push := func(forcePages bool) error {
+	// push sends a snapshot, the line and a beep when a task started
+	// waiting for the user.
+	push := func(forceLine bool) error {
 		snap, err := m.sendSnapshot(conn)
 		if err != nil {
 			return err
 		}
-		if err := sendPages(forcePages); err != nil {
+		if err := sendLine(forceLine); err != nil {
 			return err
 		}
-		if ready && beepOK && !incompatible {
+		if ready {
 			return m.alert(conn, snap)
 		}
 		return nil
 	}
-	if err := m.write(conn, EncodeHello(m.hostVersion)); err != nil {
+	sayHello := func() error {
+		o := m.options()
+		return m.write(conn, EncodeHello(o.Name, o.HostID, o.Code))
+	}
+	if err := sayHello(); err != nil {
 		return fail(err)
 	}
 	if err := push(true); err != nil {
@@ -366,56 +438,56 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 	for {
 		select {
 		case <-ctx.Done():
-			return false
+			return 0
 		case <-m.kick:
-			return true
+			return 0
 		case err := <-readErr:
 			return fail(err)
+		case <-silence.C:
+			return fail(fmt.Errorf("%d 秒没有收到屏幕的消息", int(m.netSilence/time.Second)))
 		case msg := <-msgs:
+			silence.Reset(m.netSilence)
 			m.update(func(s *Status) { s.LastHeard = time.Now() })
 			switch msg.T {
 			case "hello":
 				if m.flashed(msg.FW) {
 					continue // the old firmware, about to restart
 				}
-				// Firmware and update support count even when the protocol
-				// does not match: that is what an update fixes.
-				m.update(func(s *Status) { s.Firmware, s.OTA = msg.FW, msg.OTA > 0 })
+				heard = true
+				m.update(func(s *Status) { s.Firmware = msg.FW })
 				if msg.Proto != ProtoVersion {
-					incompatible = true
+					incompatible, ready = true, false
 					m.update(func(s *Status) { s.Incompatible = true })
-					m.setError(fmt.Errorf("设备协议版本 %d 与主机 %d 不兼容，已停止发送", msg.Proto, ProtoVersion))
+					m.setError(fmt.Errorf("屏幕协议版本 %d 与主机 %d 不兼容，已停止发送；在网页上升级屏幕固件即可", msg.Proto, ProtoVersion))
 					continue
 				}
 				incompatible = false
 				if !ready {
-					m.log.Info("设备握手完成", "fw", msg.FW, "w", msg.W, "h", msg.H)
+					m.log.Info("屏幕握手完成", "addr", addr, "fw", msg.FW)
 				}
-				ready, pagesOK, beepOK, irOK, settingsOK = true, msg.Pages > 0, msg.Beep > 0, msg.IR > 0, msg.Settings > 0
+				ready = true
 				m.update(func(s *Status) {
-					s.State, s.Incompatible, s.Pages, s.Beep, s.Volume, s.IR, s.Settings, s.Width, s.Height, s.Error = StateReady, false, pagesOK, beepOK, msg.Beep >= 2, irOK, settingsOK, msg.W, msg.H, ""
+					s.State, s.Incompatible, s.Width, s.Height, s.Error = StateReady, false, msg.W, msg.H, ""
 				})
-				if settingsOK {
-					if err := m.write(conn, EncodeSettings(m.options())); err != nil {
-						return fail(err)
-					}
+				if err := m.write(conn, EncodeSettings(m.options())); err != nil {
+					return fail(err)
 				}
 				if err := push(true); err != nil {
 					return fail(err)
 				}
-			case "action":
-				if ready && !incompatible {
-					m.dispatch(ctx, model.Action{Page: msg.Page, Item: msg.Item, Act: msg.Act, To: msg.To})
+			case "denied":
+				// The screen hangs up after saying why.
+				reason := msg.Msg
+				if reason == "" {
+					reason = "屏幕拒绝了连接"
 				}
-			case "ir_recv":
-				if ready && !incompatible {
-					m.irReceived(msg.Raw)
-				}
+				m.setError(errors.New(reason))
+				return m.deniedWait
 			case "ack":
 			case "log":
 				m.log.Log(sctx, logx.ParseLevel(msg.Level), msg.Msg, "src", "device")
 			default:
-				m.log.Debug("忽略设备消息", "t", msg.T)
+				m.log.Debug("忽略屏幕消息", "t", msg.T)
 			}
 		case <-changes:
 			if debounce == nil {
@@ -429,52 +501,55 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 				}
 			}
 		case <-heartbeat.C:
-			if !incompatible {
-				if err := push(true); err != nil {
-					return fail(err)
-				}
+			// A screen in another protocol gets no data, only hellos: its
+			// answers keep the link up for an update.
+			var err error
+			if incompatible {
+				err = sayHello()
+			} else {
+				err = push(true)
 			}
-		case ir := <-m.irReq:
-			if ready && irOK && !incompatible && time.Since(ir.at) < irStale {
-				if err := m.write(conn, ir.line); err != nil {
-					return fail(err)
-				}
+			if err != nil {
+				return fail(err)
 			}
 		case <-m.settings:
-			if ready && settingsOK && !incompatible {
+			if ready {
 				if err := m.write(conn, EncodeSettings(m.options())); err != nil {
 					return fail(err)
 				}
 			}
 		case line := <-m.beepReq:
-			if ready && beepOK && !incompatible {
+			if ready {
 				if err := m.write(conn, line); err != nil {
 					return fail(err)
 				}
 			}
 		case <-hello.C:
 			if !ready && !incompatible {
-				if err := m.write(conn, EncodeHello(m.hostVersion)); err != nil {
+				if err := sayHello(); err != nil {
 					return fail(err)
 				}
 			}
-		case job := <-m.flashReq:
-			if !(ready || incompatible) || !m.Status().OTA {
-				m.flashFailed(errors.New("设备未就绪"))
+		case job := <-m.netFlash:
+			if !heard {
+				m.flashFailed(errors.New("屏幕未就绪"))
 				continue
 			}
-			restarting, err := m.flash(sctx, conn, msgs, readErr, job)
+			restarting, err := m.flash(sctx, conn, msgs, readErr, m.kick, job)
 			switch {
-			case errors.Is(err, errKicked):
-				return true
-			case ctx.Err() != nil:
-				return false
+			case errors.Is(err, errKicked), ctx.Err() != nil:
+				return 0
 			case err != nil:
 				return fail(err)
 			case restarting:
-				// Say hello until the new firmware answers.
-				ready = false
-			case !incompatible:
+				// The screen restarts and drops the link; its new firmware
+				// says hello on the next one.
+				return m.netRetry
+			}
+			// Nothing came or went during the update: the screen gets the
+			// state again, and has its time to answer.
+			silence.Reset(m.netSilence)
+			if !incompatible {
 				if err := push(true); err != nil {
 					return fail(err)
 				}
@@ -483,28 +558,234 @@ func (m *Manager) serve(ctx context.Context, name string, conn io.ReadWriteClose
 	}
 }
 
-// dispatch hands a tap to the page source without holding up the serial
-// loop: a plugin may wait on the network.
-func (m *Manager) dispatch(ctx context.Context, a model.Action) {
-	src := m.pageSource()
-	if src == nil {
-		return
+// runUSB keeps the USB cable open while the screen is plugged in. Not
+// finding it is the usual case, so that is no error.
+func (m *Manager) runUSB(ctx context.Context) {
+	for ctx.Err() == nil {
+		opts := m.options()
+		if !opts.Enabled {
+			m.updateUSB(func(u *USBStatus) { *u = USBStatus{State: StateDisabled} })
+			m.wait(ctx, m.usbKick, 0)
+			continue
+		}
+		name, err := m.pick(opts.Port)
+		if err != nil {
+			m.updateUSB(func(u *USBStatus) { *u = USBStatus{State: StateSearching} })
+			m.wait(ctx, m.usbKick, m.rescan)
+			continue
+		}
+		conn, err := m.open(name)
+		if err != nil {
+			msg := fmt.Sprintf("打开 %s: %v", name, err)
+			m.updateUSB(func(u *USBStatus) { *u = USBStatus{State: StateSearching, Error: msg} })
+			m.wait(ctx, m.usbKick, m.rescan)
+			continue
+		}
+		retry := m.serveUSB(ctx, name, conn)
+		conn.Close()
+		m.updateUSB(func(u *USBStatus) { *u = USBStatus{State: StateSearching, Error: u.Error} })
+		if retry > 0 {
+			m.wait(ctx, m.usbKick, retry)
+		}
+	}
+}
+
+// pick finds the screen's USB serial port.
+func (m *Manager) pick(port string) (string, error) {
+	if port != "" && port != "auto" {
+		return port, nil
+	}
+	ports, err := m.list()
+	if err != nil {
+		return "", fmt.Errorf("列出串口: %w", err)
+	}
+	name := pickPort(ports)
+	if name == "" {
+		return "", errors.New("未找到屏幕（VID 303A）")
+	}
+	return name, nil
+}
+
+// serveUSB runs the USB cable until it fails, ctx ends or a reconnect is
+// requested: hello, the WiFi set-up messages and firmware updates, nothing
+// else. It returns how long to wait before opening it again.
+func (m *Manager) serveUSB(ctx context.Context, name string, conn io.ReadWriteCloser) time.Duration {
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	m.updateUSB(func(u *USBStatus) { *u = USBStatus{State: StateConnected, Port: name} })
+	m.log.Info("屏幕 USB 已连接", "port", name)
+	defer m.log.Info("屏幕 USB 已断开", "port", name)
+
+	msgs := make(chan DeviceMsg, 16)
+	readErr := make(chan error, 1)
+	go m.readLoop(sctx, conn, msgs, readErr)
+
+	hello := time.NewTicker(m.helloEvery)
+	defer hello.Stop()
+	// asked: a hello of ours awaits the screen's answer. A hello the screen
+	// sends unasked (it restarted) gets ours in return: hearing go-dock is
+	// what keeps a freshly updated firmware, which rolls back otherwise.
+	ready, asked := false, false
+	// Set-up requests are taken only once the screen said hello: one the
+	// cable cannot carry now times out with its caller instead of vanishing.
+	whenReady := func(c chan []byte) chan []byte {
+		if ready {
+			return c
+		}
+		return nil
+	}
+	fail := func(err error) time.Duration {
+		msg := fmt.Sprintf("%s: %v", name, err)
+		m.updateUSB(func(u *USBStatus) { u.Error = msg })
+		return m.rescan
+	}
+	// No pairing code: the cable is not the network.
+	sayHello := func() error {
+		o := m.options()
+		asked = true
+		return m.write(conn, EncodeHello(o.Name, o.HostID, ""))
+	}
+	if err := sayHello(); err != nil {
+		return fail(err)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return 0
+		case <-m.usbKick:
+			return 0
+		case err := <-readErr:
+			return fail(err)
+		case msg := <-msgs:
+			switch msg.T {
+			case "hello":
+				if m.flashed(msg.FW) {
+					continue // the old firmware, about to restart
+				}
+				if asked {
+					asked = false // the answer to ours
+				} else if err := sayHello(); err != nil {
+					return fail(err)
+				}
+				// Updates work whatever the protocol: that is what fixes it.
+				if !ready {
+					m.log.Info("屏幕 USB 握手完成", "fw", msg.FW)
+				}
+				ready = true
+				m.updateUSB(func(u *USBStatus) {
+					u.State, u.Firmware, u.Incompatible, u.Error = StateReady, msg.FW, msg.Proto != ProtoVersion, ""
+				})
+			case "net":
+				st := NetStatus{State: msg.State, SSID: msg.SSID, IP: msg.IP, Port: msg.Port, Code: msg.Code, Fixed: msg.Fixed, Err: msg.Err}
+				m.updateUSB(func(u *USBStatus) { u.Net = &st })
+			case "wifi_list":
+				select {
+				case m.scanRes <- scanResult{aps: msg.APs, err: msg.Err}:
+				default: // nobody asked, or an answer is waiting already
+				}
+			case "log":
+				m.log.Log(sctx, logx.ParseLevel(msg.Level), msg.Msg, "src", "device")
+			case "ack":
+			default:
+				m.log.Debug("忽略屏幕 USB 消息", "t", msg.T)
+			}
+		case line := <-whenReady(m.scanReq):
+			if err := m.write(conn, line); err != nil {
+				return fail(err)
+			}
+		case line := <-whenReady(m.wifiReq):
+			if err := m.write(conn, line); err != nil {
+				return fail(err)
+			}
+		case <-hello.C:
+			if !ready {
+				if err := sayHello(); err != nil {
+					return fail(err)
+				}
+			}
+		case job := <-m.usbFlash:
+			if !ready {
+				m.flashFailed(errors.New("屏幕未就绪"))
+				continue
+			}
+			restarting, err := m.flash(sctx, conn, msgs, readErr, m.usbKick, job)
+			switch {
+			case errors.Is(err, errKicked), ctx.Err() != nil:
+				return 0
+			case err != nil:
+				return fail(err)
+			case restarting:
+				// Say hello until the new firmware answers.
+				ready = false
+			}
+		}
+	}
+}
+
+// ConfigureWiFi tells the screen, on the USB cable, which WiFi to join.
+func (m *Manager) ConfigureWiFi(w WiFiConfig) error {
+	if err := w.Check(); err != nil {
+		return err
+	}
+	if err := m.wifiLinked(); err != nil {
+		return err
+	}
+	t := time.NewTimer(2 * time.Second)
+	defer t.Stop()
+	select {
+	case m.wifiReq <- EncodeWiFi(w):
+		return nil
+	case <-t.C:
+		return errors.New("屏幕没有响应，请稍后再试")
+	}
+}
+
+// ScanWiFi asks the screen, on the USB cable, which networks it sees.
+func (m *Manager) ScanWiFi(ctx context.Context) ([]AP, error) {
+	m.scanMu.Lock()
+	defer m.scanMu.Unlock()
+	if err := m.wifiLinked(); err != nil {
+		return nil, err
 	}
 	select {
-	case m.actions <- struct{}{}:
+	case <-m.scanRes: // the late answer to an earlier scan
 	default:
-		m.log.Warn("屏幕操作太多，已丢弃", "page", a.Page, "item", a.Item)
-		return
 	}
-	m.log.Debug("屏幕操作", "page", a.Page, "item", a.Item, "act", a.Act)
-	go func() {
-		defer func() { <-m.actions }()
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		if err := src.Do(ctx, a); err != nil {
-			m.log.Warn("屏幕操作失败", "page", a.Page, "item", a.Item, "act", a.Act, "err", err)
+	t := time.NewTimer(m.scanTimeout)
+	defer t.Stop()
+	select {
+	case m.scanReq <- EncodeWiFiScan():
+	case <-t.C:
+		return nil, errors.New("屏幕没有响应，请稍后再试")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case r := <-m.scanRes:
+		if r.err != "" {
+			return nil, errors.New(r.err)
 		}
-	}()
+		if r.aps == nil {
+			r.aps = []AP{}
+		}
+		return r.aps, nil
+	case <-t.C:
+		return nil, errors.New("屏幕没有回复扫描结果，请稍后再试")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// wifiLinked says why the screen's WiFi cannot be set up now, if it cannot.
+func (m *Manager) wifiLinked() error {
+	switch st := m.Status(); {
+	case st.USB.State != StateReady:
+		return errors.New("请用 USB 线连接屏幕：WiFi 只能通过 USB 设置")
+	case st.Flash.Busy():
+		return errors.New("固件正在升级")
+	}
+	return nil
 }
 
 // sendSnapshot sends the current state and returns the hub snapshot it
@@ -532,7 +813,7 @@ func (m *Manager) sendSnapshot(conn io.WriteCloser) (model.Snapshot, error) {
 }
 
 // alert beeps when a task started waiting for the user since the last
-// snapshot a beeping device got, else when one finished.
+// snapshot the screen got, else when one finished.
 func (m *Manager) alert(conn io.WriteCloser, s model.Snapshot) error {
 	now := waitingTasks(s)
 	fresh := false
@@ -559,8 +840,6 @@ func (m *Manager) Beep(notes []Note, vol int) error {
 	switch st := m.Status(); {
 	case st.State != StateReady:
 		return errors.New("设备未连接")
-	case !st.Beep:
-		return errors.New("设备固件不支持蜂鸣器，请先升级固件")
 	}
 	select {
 	case m.beepReq <- EncodeBeep(notes, vol):

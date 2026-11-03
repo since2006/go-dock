@@ -15,7 +15,8 @@ import (
 
 // Firmware update over the link (docs/protocol-v1.md §3.4): the host sends
 // the app image in OTAChunk pieces, one at a time, and the device writes
-// them to its spare app partition, then restarts into it.
+// them to its spare app partition, then restarts into it. Over the USB
+// cable it starts at once; over WiFi the screen first asks the user.
 
 // Image header fields of an ESP-IDF app image: esp_image_header_t, then
 // the first segment header, then esp_app_desc_t.
@@ -59,16 +60,24 @@ func cString(b []byte) string {
 // Firmware update states reported in FlashStatus.State.
 const (
 	FlashDownloading = "downloading"
-	FlashPreparing   = "preparing" // device erasing its spare partition
+	FlashConfirming  = "confirming" // the screen asks the user (WiFi)
+	FlashPreparing   = "preparing"  // device erasing its spare partition
 	FlashSending     = "sending"
 	FlashRestarting  = "restarting" // image accepted, waiting for the new firmware
 	FlashDone        = "done"
 	FlashError       = "error"
 )
 
+// Links an update goes over, in FlashStatus.Via.
+const (
+	FlashUSB  = "usb"
+	FlashWiFi = "wifi"
+)
+
 // FlashStatus is the progress of the last firmware update.
 type FlashStatus struct {
 	State   string `json:"state"`
+	Via     string `json:"via,omitempty"`
 	Version string `json:"version,omitempty"`
 	Sent    int    `json:"sent,omitempty"`
 	Total   int    `json:"total,omitempty"`
@@ -78,7 +87,7 @@ type FlashStatus struct {
 // Busy reports whether an update is under way.
 func (f FlashStatus) Busy() bool {
 	switch f.State {
-	case FlashDownloading, FlashPreparing, FlashSending, FlashRestarting:
+	case FlashDownloading, FlashConfirming, FlashPreparing, FlashSending, FlashRestarting:
 		return true
 	}
 	return false
@@ -91,21 +100,26 @@ type flashJob struct {
 
 // StartFlash updates the device firmware in the background. fetch returns
 // the app image (downloaded and verified); it is checked, then streamed to
-// the device. Progress shows up in Status().Flash.
+// the device: over the USB cable when it is plugged in, else over WiFi,
+// where the user confirms it on the screen. Progress shows up in
+// Status().Flash.
 func (m *Manager) StartFlash(ctx context.Context, fetch func(context.Context) ([]byte, error)) error {
 	m.mu.Lock()
 	s := m.status
 	var err error
+	via := ""
 	switch {
 	case s.Flash.Busy():
 		err = errors.New("固件正在升级")
-	case s.State != StateReady && !s.Incompatible:
-		err = errors.New("设备未连接")
-	case !s.OTA:
-		err = errors.New("设备当前的固件不支持在线升级，请先用 USB 刷一次")
+	case s.USB.State == StateReady:
+		via = FlashUSB
+	case s.State == StateReady || s.Incompatible: // a screen in another protocol is fixed by an update
+		via = FlashWiFi
+	default:
+		err = errors.New("屏幕没有连接")
 	}
 	if err == nil {
-		m.status.Flash = FlashStatus{State: FlashDownloading}
+		m.status.Flash = FlashStatus{State: FlashDownloading, Via: via}
 	}
 	m.mu.Unlock()
 	if err != nil {
@@ -124,10 +138,14 @@ func (m *Manager) StartFlash(ctx context.Context, fetch func(context.Context) ([
 			return
 		}
 		m.setFlash(func(f *FlashStatus) { f.Version, f.Total = version, len(img) })
+		req := m.usbFlash
+		if via == FlashWiFi {
+			req = m.netFlash
+		}
 		t := time.NewTimer(m.otaPickup)
 		defer t.Stop()
 		select {
-		case m.flashReq <- flashJob{image: img, version: version}:
+		case req <- flashJob{image: img, version: version}:
 		case <-t.C:
 			m.flashFailed(errors.New("设备已断开"))
 		case <-ctx.Done():
@@ -167,11 +185,12 @@ type otaError string
 func (e otaError) Error() string { return string(e) }
 
 // flash streams job to the device, which then restarts into the new
-// firmware. It runs on the serve goroutine, so nothing else is sent
-// meanwhile. A failed update leaves the link up and is reported in
-// Status().Flash; the returned error is for the link: it failed, ctx ended
-// or a reconnect was requested (errKicked).
-func (m *Manager) flash(ctx context.Context, conn io.WriteCloser, msgs <-chan DeviceMsg, readErr <-chan error, job flashJob) (restarting bool, err error) {
+// firmware. It runs on the goroutine of the link it goes over, so nothing
+// else is sent meanwhile; kick is that link's reconnect request. A failed
+// update leaves the link up and is reported in Status().Flash; the returned
+// error is for the link: it failed, ctx ended or a reconnect was requested
+// (errKicked).
+func (m *Manager) flash(ctx context.Context, conn io.WriteCloser, msgs <-chan DeviceMsg, readErr <-chan error, kick <-chan struct{}, job flashJob) (restarting bool, err error) {
 	total := len(job.image)
 	m.log.Info("开始升级设备固件", "ver", job.version, "bytes", total)
 	m.setFlash(func(f *FlashStatus) { f.State, f.Sent = FlashPreparing, 0 })
@@ -184,14 +203,13 @@ func (m *Manager) flash(ctx context.Context, conn io.WriteCloser, msgs <-chan De
 			select {
 			case <-ctx.Done():
 				return DeviceMsg{}, ctx.Err()
-			case <-m.kick:
+			case <-kick:
 				return DeviceMsg{}, errKicked
 			case err := <-readErr:
 				return DeviceMsg{}, err
 			case <-t.C:
 				return DeviceMsg{}, errOTATimeout
 			case msg := <-msgs:
-				m.update(func(s *Status) { s.LastHeard = time.Now() })
 				switch msg.T {
 				case "ota":
 					if msg.State == "error" {
@@ -206,20 +224,34 @@ func (m *Manager) flash(ctx context.Context, conn io.WriteCloser, msgs <-chan De
 			}
 		}
 	}
-	// step sends line and waits for the answer in state want.
+	// step sends line and waits for the answer in state want ("": any).
 	step := func(line []byte, d time.Duration, want string) (DeviceMsg, error) {
 		if err := m.write(conn, line); err != nil {
 			return DeviceMsg{}, err
 		}
 		msg, err := next(d)
-		if err == nil && msg.State != want {
+		if err == nil && want != "" && msg.State != want {
 			err = otaError(fmt.Sprintf("设备回复 %q，应为 %q", msg.State, want))
 		}
 		return msg, err
 	}
 
 	err = func() error {
-		if _, err := step(EncodeOTABegin(total, job.version), m.otaReady, "ready"); err != nil {
+		// Over WiFi the screen asks first (confirm), then erases once the
+		// user said yes (confirmed); no means an error.
+		msg, err := step(EncodeOTABegin(total, job.version), m.otaReady, "")
+		if err == nil && msg.State == "confirm" {
+			m.log.Info("等待在屏幕上确认升级")
+			m.setFlash(func(f *FlashStatus) { f.State = FlashConfirming })
+			if msg, err = next(m.otaConfirm); err == nil && msg.State == "confirmed" {
+				m.setFlash(func(f *FlashStatus) { f.State = FlashPreparing })
+				msg, err = next(m.otaReady)
+			}
+		}
+		if err == nil && msg.State != "ready" {
+			err = otaError(fmt.Sprintf("设备回复 %q，应为 %q", msg.State, "ready"))
+		}
+		if err != nil {
 			return err
 		}
 		m.setFlash(func(f *FlashStatus) { f.State = FlashSending })
@@ -241,7 +273,7 @@ func (m *Manager) flash(ctx context.Context, conn io.WriteCloser, msgs <-chan De
 				m.changed()
 			}
 		}
-		_, err := step(EncodeOTA("ota_end"), m.otaDone, "done")
+		_, err = step(EncodeOTA("ota_end"), m.otaDone, "done")
 		return err
 	}()
 
@@ -260,7 +292,11 @@ func (m *Manager) flash(ctx context.Context, conn io.WriteCloser, msgs <-chan De
 			late := m.status.Flash.State == FlashRestarting && m.flashDoneAt.Equal(doneAt)
 			m.mu.Unlock()
 			if late {
-				m.flashFailed(fmt.Errorf("设备重启后没有报告新版本 %s，请拔插 USB 后查看", job.version))
+				check := "请拔插 USB 后查看"
+				if m.Status().Flash.Via == FlashWiFi {
+					check = "请看屏幕是否已连上 WiFi"
+				}
+				m.flashFailed(fmt.Errorf("设备重启后没有报告新版本 %s，%s", job.version, check))
 			}
 		})
 		return true, nil

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"slices"
 	"time"
 	"unicode/utf8"
 
@@ -22,7 +21,6 @@ const (
 	MaxLine = 4096
 
 	projectLen = 24
-	textLen    = 48
 	titleLen   = 32
 	// msg and detail fill a whole line under the project line: lineWidth
 	// columns, wide (CJK) characters counting two, and at most lineBytes
@@ -34,27 +32,21 @@ const (
 	agentTypeLen = 16
 	agentTextLen = 32
 
-	// Function pages (§3.5): what one screen page holds.
-	maxPages     = 4
-	maxItems     = 6
-	pageTitleLen = 8
-	pageNoteLen  = 24 // summary and error
-	itemLabelLen = 12
-	itemTextLen  = 8 // also a meter's sub and a row's text
-	itemUnitLen  = 4
-	itemNoteLen  = 16
-	maxHist      = 30
-	maxSeries    = 3
-	maxRows      = 4
-	rowLabelLen  = 6
+	// The line of readings on the Agent page (§3.5).
+	maxReadings     = 8
+	readingLabelLen = 4
+	readingTextLen  = 8 // also the sub
+	readingUnitLen  = 4
 )
 
-// Hello is the host's handshake message.
+// Hello is the host's handshake message. Name and ID tell the screen which
+// computer this is; Code is the pairing code a network link must carry.
 type Hello struct {
 	T     string `json:"t"`
 	Proto int    `json:"proto"`
-	Host  string `json:"host"`
-	Ver   string `json:"ver"`
+	Name  string `json:"name,omitempty"`
+	ID    string `json:"id,omitempty"`
+	Code  string `json:"code,omitempty"`
 }
 
 // Snapshot is the full state pushed to the device.
@@ -100,11 +92,9 @@ type SessionFrame struct {
 	P       string `json:"p"`
 	Project string `json:"project"`
 	State   string `json:"state"`
-	Label   string `json:"label"`
-	// Text is one line for simple screens: the current action, else the
-	// title; when a subagent decides the row's state, "Type · action".
-	Text  string `json:"text"`
-	Since int64  `json:"since"`
+	// Since is when the row entered its state: the subagent's time when one
+	// decides it.
+	Since int64 `json:"since"`
 	// Title names the session; Msg is the first line of the assistant's
 	// latest text this turn and Detail what the session itself is doing
 	// now, so a screen can show all three.
@@ -182,28 +172,15 @@ func BuildFrame(s model.Snapshot, o Options, seq uint64) Snapshot {
 }
 
 func sessionFrame(ss model.Session, st model.State, from *model.Agent) SessionFrame {
-	text, since := ss.Detail, ss.Since
-	if text == "" {
-		text = ss.Title
-	}
+	since := ss.Since
 	if from != nil {
-		// The row's state comes from a subagent: say which one and why.
-		what := from.Desc
-		if from.State != model.StateRunning || what == "" {
-			what = from.Detail
-		}
-		text, since = from.Type, from.Since
-		if what != "" {
-			text += " · " + what
-		}
+		since = from.Since // the subagent's row says which one and why
 	}
 	sf := SessionFrame{
 		ID:      ss.ID,
 		P:       string(ss.Provider),
 		Project: model.Truncate(ss.Project, projectLen),
 		State:   string(st),
-		Label:   st.Label(),
-		Text:    model.Truncate(text, textLen),
 		Since:   unix(since),
 		Title:   model.Truncate(ss.Title, titleLen),
 		Msg:     fitLine(ss.Message),
@@ -367,117 +344,53 @@ func dropMsg(ss []SessionFrame) bool {
 	return false
 }
 
-// Pages carries the function pages shown next to the Agent page
-// (docs/protocol-v1.md §3.5).
-type Pages struct {
-	T     string      `json:"t"`
-	Pages []PageFrame `json:"pages"`
+// Line carries the readings shown in a line on the Agent page, above the
+// usage (docs/protocol-v1.md §3.5).
+type Line struct {
+	T     string         `json:"t"`
+	Items []ReadingFrame `json:"items"`
 }
 
-type PageFrame struct {
-	ID      string      `json:"id"`
-	Title   string      `json:"title"`
-	Summary string      `json:"summary,omitempty"`
-	Error   string      `json:"error,omitempty"`
-	Movable bool        `json:"movable,omitempty"`
-	Items   []ItemFrame `json:"items"`
-}
-
-// ItemFrame is one widget; On is omitted while a switch's state is
-// unknown.
-type ItemFrame struct {
-	ID       string        `json:"id"`
-	Kind     string        `json:"kind"`
-	Label    string        `json:"label"`
-	Text     string        `json:"text"`
-	Icon     string        `json:"icon,omitempty"`
-	On       *bool         `json:"on,omitempty"`
-	Buttons  bool          `json:"buttons,omitempty"`
-	Busy     bool          `json:"busy,omitempty"`
-	Disabled bool          `json:"disabled,omitempty"`
-	AtMin    bool          `json:"at_min,omitempty"`
-	AtMax    bool          `json:"at_max,omitempty"`
-	Unit     string        `json:"unit,omitempty"`
-	Sub      string        `json:"sub,omitempty"`
-	Pct      *int          `json:"pct,omitempty"`
-	Hist     []int         `json:"hist,omitempty"`
-	Level    string        `json:"level,omitempty"`
-	Big      bool          `json:"big,omitempty"`
-	Note     string        `json:"note,omitempty"`
-	Series   []SeriesFrame `json:"series,omitempty"`
-	Rows     []RowFrame    `json:"rows,omitempty"`
-}
-
-type SeriesFrame struct {
-	C    string `json:"c"`
-	Hist []int  `json:"hist"`
-}
-
-type RowFrame struct {
+// ReadingFrame is one reading, its texts cut to fit the screen.
+type ReadingFrame struct {
+	ID    string `json:"id"`
+	Icon  string `json:"icon,omitempty"`
 	Label string `json:"label"`
 	Text  string `json:"text"`
-	C     string `json:"c"`
+	Unit  string `json:"unit,omitempty"`
+	Sub   string `json:"sub,omitempty"`
+	Pct   *int   `json:"pct,omitempty"`
+	Level string `json:"level,omitempty"`
 }
 
-// protoID is what page, item and kind ids may look like, so the firmware
-// can echo them back in an action without escaping.
+// protoID is what reading and icon ids may look like.
 var protoID = regexp.MustCompile(`^[a-z0-9_-]{1,16}$`)
 
-// BuildPages converts plugin pages into the pages message: at most
-// maxPages pages of maxItems items, texts cut to fit the screen, and
-// anything with an unusable id dropped.
-func BuildPages(ps []model.Page) Pages {
-	f := Pages{T: "pages", Pages: []PageFrame{}}
-	for _, p := range ps {
-		if len(f.Pages) == maxPages {
+// BuildLine converts the plugins' readings into the line message: at most
+// maxReadings, texts cut to fit, readings with an unusable id dropped.
+func BuildLine(rs []model.Reading) Line {
+	f := Line{T: "line", Items: []ReadingFrame{}}
+	for _, r := range rs {
+		if len(f.Items) == maxReadings {
 			break
 		}
-		if !protoID.MatchString(p.ID) {
+		if !protoID.MatchString(r.ID) {
 			continue
 		}
-		pf := PageFrame{
-			ID:      p.ID,
-			Title:   model.Truncate(p.Title, pageTitleLen),
-			Summary: model.Truncate(p.Summary, pageNoteLen),
-			Error:   model.Truncate(p.Error, pageNoteLen),
-			Movable: p.Movable,
-			Items:   []ItemFrame{},
+		icon := r.Icon
+		if !protoID.MatchString(icon) {
+			icon = "" // none
 		}
-		for _, it := range p.Items {
-			if len(pf.Items) == maxItems {
-				break
-			}
-			if !protoID.MatchString(it.ID) || !protoID.MatchString(it.Kind) {
-				continue
-			}
-			icon := it.Icon
-			if !protoID.MatchString(icon) {
-				icon = "" // the default picture
-			}
-			pf.Items = append(pf.Items, ItemFrame{
-				ID:       it.ID,
-				Kind:     it.Kind,
-				Label:    model.Truncate(it.Label, itemLabelLen),
-				Text:     model.Truncate(it.Text, itemTextLen),
-				Icon:     icon,
-				On:       it.On,
-				Buttons:  it.Buttons,
-				Busy:     it.Busy,
-				Disabled: it.Disabled,
-				AtMin:    it.AtMin,
-				AtMax:    it.AtMax,
-				Unit:     model.Truncate(it.Unit, itemUnitLen),
-				Sub:      model.Truncate(it.Sub, itemTextLen),
-				Pct:      clampPct(it.Pct),
-				Hist:     meterHist(it.Hist),
-				Level:    meterLevel(it.Level),
-				Big:      it.Big,
-				Note:     model.Truncate(it.Note, itemNoteLen),
-				Series:   meterSeries(it.Series),
-				Rows:     meterRows(it.Rows),
-			})
-		}
-		f.Pages = append(f.Pages, pf)
+		f.Items = append(f.Items, ReadingFrame{
+			ID:    r.ID,
+			Icon:  icon,
+			Label: model.Truncate(r.Label, readingLabelLen),
+			Text:  model.Truncate(r.Text, readingTextLen),
+			Unit:  model.Truncate(r.Unit, readingUnitLen),
+			Sub:   model.Truncate(r.Sub, readingTextLen),
+			Pct:   clampPct(r.Pct),
+			Level: readingLevel(r.Level),
+		})
 	}
 	return f
 }
@@ -490,81 +403,24 @@ func clampPct(p *int) *int {
 	return &v
 }
 
-// meterHist keeps the last maxHist readings, each 0–100.
-func meterHist(h []int) []int {
-	if len(h) == 0 {
-		return nil
-	}
-	h = h[max(len(h)-maxHist, 0):]
-	out := make([]int, len(h))
-	for i, v := range h {
-		out[i] = min(max(v, 0), 100)
-	}
-	return out
-}
-
-var colors = map[string]bool{
-	model.ColorBlue: true, model.ColorRed: true, model.ColorTeal: true, model.ColorGreen: true,
-	model.ColorOrange: true, model.ColorPurple: true, model.ColorGray: true,
-}
-
-// meterColor keeps the colours the screen knows; "" draws in the card's.
-func meterColor(c string) string {
-	if colors[c] {
-		return c
-	}
-	return ""
-}
-
-func meterSeries(ss []model.Series) []SeriesFrame {
-	var out []SeriesFrame
-	for _, s := range ss[:min(len(ss), maxSeries)] {
-		if h := meterHist(s.Hist); len(h) > 0 {
-			out = append(out, SeriesFrame{C: meterColor(s.Color), Hist: h})
-		}
-	}
-	return out
-}
-
-func meterRows(rs []model.Row) []RowFrame {
-	var out []RowFrame
-	for _, r := range rs[:min(len(rs), maxRows)] {
-		out = append(out, RowFrame{Label: model.Truncate(r.Label, rowLabelLen), Text: model.Truncate(r.Text, itemTextLen), C: meterColor(r.Color)})
-	}
-	return out
-}
-
-func meterLevel(l string) string {
+func readingLevel(l string) string {
 	if l == model.LevelWarn || l == model.LevelCrit {
 		return l
 	}
 	return ""
 }
 
-// EncodePages encodes f as one line of at most MaxLine bytes, dropping
-// items and then pages from the tail when it is too long.
-func EncodePages(f Pages) ([]byte, error) {
-	f.Pages = slices.Clone(f.Pages) // trimmed below
-	for {
-		line, err := encodeLine(f)
-		if err != nil {
-			return nil, err
-		}
-		if len(line) <= MaxLine {
-			return line, nil
-		}
-		last := &f.Pages[len(f.Pages)-1] // an empty list always fits
-		if n := len(last.Items); n > 0 {
-			last.Items = last.Items[: n-1 : n-1]
-		} else {
-			f.Pages = f.Pages[:len(f.Pages)-1]
-		}
-	}
-}
+// EncodeLine encodes f; maxReadings of them at their longest fit MaxLine.
+func EncodeLine(f Line) ([]byte, error) { return encodeLine(f) }
 
-// EncodeHello encodes the host handshake.
-func EncodeHello(hostVersion string) []byte {
-	line, _ := encodeLine(Hello{T: "hello", Proto: ProtoVersion, Host: "go-dock", Ver: hostVersion})
+// EncodeHello encodes the host handshake: this computer's name and id,
+// and over WiFi the pairing code.
+func EncodeHello(name, id, code string) []byte {
+	h := Hello{T: "hello", Proto: ProtoVersion, Name: CutName(name), Code: code}
+	if ValidHostID(id) {
+		h.ID = id
+	}
+	line, _ := encodeLine(h)
 	return line
 }
 
@@ -611,17 +467,10 @@ func EncodeOTA(t string) []byte {
 type DeviceMsg struct {
 	T string `json:"t"`
 	// hello
-	Proto   int    `json:"proto"`
-	FW      string `json:"fw"`
-	W       int    `json:"w"`
-	H       int    `json:"h"`
-	MaxLine int    `json:"max_line"`
-	OTA     int    `json:"ota"`   // 1: can be updated over the link
-	Pages   int    `json:"pages"` // 1: shows function pages (§3.5)
-	Beep    int    `json:"beep"`  // 1: plays beep messages (§3.6); 2: at their vol
-	IR      int    `json:"ir"`    // 1: sends infrared (§3.7)
-	// 1: takes brightness settings (§3.3)
-	Settings int `json:"settings"`
+	Proto int    `json:"proto"`
+	FW    string `json:"fw"`
+	W     int    `json:"w"`
+	H     int    `json:"h"`
 	// ack
 	Seq uint64 `json:"seq"`
 	// log; also the error text of ota
@@ -630,13 +479,16 @@ type DeviceMsg struct {
 	// ota: the device's answer during an update
 	State string `json:"state"` // ready, ack, done, error
 	Off   int    `json:"off"`   // ack: bytes written so far
-	// action: a tap on a function page item
-	Page string `json:"page"`
-	Item string `json:"item"`
-	Act  string `json:"act"`
-	To   string `json:"to"` // swap: the item dropped on
-	// ir_recv: what the infrared receiver picked up, µs
-	Raw []int `json:"raw"`
+	// net: the screen's WiFi (State is off, connecting, connected or
+	// failed); denied carries its reason in Msg
+	SSID  string `json:"ssid"`
+	IP    string `json:"ip"`
+	Port  int    `json:"port"`
+	Code  string `json:"code"`
+	Fixed bool   `json:"fixed"`
+	Err   string `json:"err"`
+	// wifi_list: the networks a scan found, strongest first (and Err)
+	APs []AP `json:"aps"`
 }
 
 var errNotMessage = errors.New("不是协议消息")

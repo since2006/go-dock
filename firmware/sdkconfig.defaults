@@ -21,6 +21,9 @@ CONFIG_SPIRAM_USE_MALLOC=y
 # memory then fails, such as the SHA context that checks a firmware update.
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+# WiFi and lwIP buffers go to PSRAM where they can: internal RAM is short
+# (display DMA buffers, the SHA context of an update).
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP32S3_DATA_CACHE_64KB=y

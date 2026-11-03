@@ -15,7 +15,7 @@ type darwin struct {
 
 func newPlatform() platform { return &darwin{} }
 
-func (d *darwin) fans(context.Context) []Fan {
+func (d *darwin) fans(context.Context) []float64 {
 	if d.smc == nil {
 		if time.Since(d.failed) < time.Minute {
 			return nil
@@ -44,9 +44,8 @@ func (d *darwin) memory(ctx context.Context, m *Memory) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if out, err := exec.CommandContext(ctx, "/usr/bin/vm_stat").Output(); err == nil {
-		if app, wired, compressed, ok := vmStat(out); ok {
-			m.App, m.Wired, m.Compressed = app, wired, compressed
-			m.Used = min(app+wired+compressed, m.Total)
+		if used, ok := vmStat(out); ok {
+			m.Used = min(used, m.Total)
 		}
 	}
 	if level, err := unix.SysctlUint32("kern.memorystatus_vm_pressure_level"); err == nil {
@@ -54,15 +53,14 @@ func (d *darwin) memory(ctx context.Context, m *Memory) {
 	}
 }
 
-// gpu reads the GPU from the IORegistry, where every GPU driver (Apple
-// silicon, AMD, Intel) publishes its load; the temperature comes from the
-// sensors, if at all.
-func (d *darwin) gpu(ctx context.Context) GPU {
+// gpu reads the GPU's load from the IORegistry, where every GPU driver
+// (Apple silicon, AMD, Intel) publishes it.
+func (d *darwin) gpu(ctx context.Context) float64 {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "/usr/sbin/ioreg", "-r", "-d", "1", "-c", "IOAccelerator").Output()
 	if err != nil {
-		return NoGPU
+		return -1
 	}
 	return ioregGPU(out)
 }

@@ -45,24 +45,6 @@ func (s State) Priority() int {
 	}
 }
 
-// Label is the Chinese label shown in the UI and on the device.
-func (s State) Label() string {
-	switch s {
-	case StateApproval:
-		return "需授权"
-	case StateInput:
-		return "等待输入"
-	case StateError:
-		return "出错"
-	case StateRunning:
-		return "进行中"
-	case StateDone:
-		return "已完成"
-	default:
-		return "空闲"
-	}
-}
-
 // Session is one Claude Code or Codex conversation as tracked by the hub.
 type Session struct {
 	ID        string   `json:"id"` // provider:session_id

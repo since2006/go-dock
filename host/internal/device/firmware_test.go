@@ -80,9 +80,8 @@ type flashTest struct {
 
 func newFlashTest(t *testing.T, hello string, tune func(m *Manager)) *flashTest {
 	t.Helper()
-	src := &fakeSource{snap: sampleSnapshot(), ch: make(chan struct{}, 1)}
 	ft := &flashTest{logs: &syncBuffer{}}
-	ft.m, ft.devices = newTestManager(t, src, ft.logs)
+	ft.m, ft.devices = newUSBTestManager(t, ft.logs)
 	ft.m.onChange = func() { ft.changes.Add(1) }
 	ft.m.otaPickup = time.Second
 	if tune != nil {
@@ -93,17 +92,16 @@ func newFlashTest(t *testing.T, hello string, tune func(m *Manager)) *flashTest 
 	t.Cleanup(cancel)
 	go ft.m.Run(ctx)
 	ft.dev = <-ft.devices
-	ft.dev.next(t, "snapshot")
+	ft.dev.next(t, "hello")
 	ft.dev.send(t, hello)
-	// The firmware version shows before the handshake completes.
 	waitFor(t, "device hello", func() bool {
-		st := ft.m.Status()
-		return st.Firmware != "" && (st.State == StateReady || st.Incompatible)
+		u := ft.m.Status().USB
+		return u.Firmware != "" && u.State == StateReady
 	})
 	return ft
 }
 
-const helloOTA = `{"t":"hello","proto":1,"fw":"0.1.0","ota":1,"w":600,"h":450}`
+const helloOTA = `{"t":"hello","proto":1,"fw":"0.1.0","w":600,"h":450}`
 
 func (ft *flashTest) start(t *testing.T, img []byte) {
 	t.Helper()
@@ -118,11 +116,19 @@ func (ft *flashTest) start(t *testing.T, img []byte) {
 func (ft *flashTest) receive(t *testing.T) []byte {
 	t.Helper()
 	begin := ft.dev.next(t, "ota_begin")
-	size := int(begin["size"].(float64))
 	ft.dev.send(t, `{"t":"ota","state":"ready"}`)
+	got := takeImage(t, ft.dev, int(begin["size"].(float64)))
+	waitFor(t, "restarting", func() bool { return ft.m.Status().Flash.State == FlashRestarting })
+	return got
+}
+
+// takeImage plays the device's side of an update once it said ready: it
+// acks each chunk, then accepts the image.
+func takeImage(t *testing.T, dev *fakeDevice, size int) []byte {
+	t.Helper()
 	var got []byte
 	for len(got) < size {
-		d := ft.dev.next(t, "ota_data")
+		d := dev.next(t, "ota_data")
 		if off := int(d["off"].(float64)); off != len(got) {
 			t.Fatalf("chunk at %d, have %d bytes", off, len(got))
 		}
@@ -131,11 +137,10 @@ func (ft *flashTest) receive(t *testing.T) []byte {
 			t.Fatalf("chunk: %d bytes, %v", len(b), err)
 		}
 		got = append(got, b...)
-		ft.dev.send(t, fmt.Sprintf(`{"t":"ota","state":"ack","off":%d}`, len(got)))
+		dev.send(t, fmt.Sprintf(`{"t":"ota","state":"ack","off":%d}`, len(got)))
 	}
-	ft.dev.next(t, "ota_end")
-	ft.dev.send(t, `{"t":"ota","state":"done"}`)
-	waitFor(t, "restarting", func() bool { return ft.m.Status().Flash.State == FlashRestarting })
+	dev.next(t, "ota_end")
+	dev.send(t, `{"t":"ota","state":"done"}`)
 	return got
 }
 
@@ -149,11 +154,11 @@ func (ft *flashTest) failed(t *testing.T, want string) {
 
 func TestFlash(t *testing.T) {
 	ft := newFlashTest(t, helloOTA, nil)
-	if st := ft.m.Status(); !st.OTA || st.State != StateReady {
-		t.Fatalf("status = %+v", st)
-	}
 	img := testImage("0.2.0", 2*OTAChunk+904)
 	ft.start(t, img)
+	if f := ft.m.Status().Flash; f.Via != FlashUSB {
+		t.Fatalf("flash = %+v", f)
+	}
 	if err := ft.m.StartFlash(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "正在升级") {
 		t.Fatalf("second update: %v", err)
 	}
@@ -165,13 +170,11 @@ func TestFlash(t *testing.T) {
 		t.Fatalf("flash = %+v", f)
 	}
 
-	// The new firmware says hello.
-	ft.dev.send(t, `{"t":"hello","proto":1,"fw":"0.2.0","ota":1,"w":600,"h":450}`)
+	// The new firmware says hello, and hears go-dock's: that keeps it.
+	ft.dev.send(t, `{"t":"hello","proto":1,"fw":"0.2.0","w":600,"h":450}`)
 	waitFor(t, "done", func() bool { return ft.m.Status().Flash.State == FlashDone })
-	ft.dev.next(t, "snapshot")
-	if st := ft.m.Status(); st.Firmware != "0.2.0" || st.State != StateReady {
-		t.Fatalf("status = %+v", st)
-	}
+	ft.dev.next(t, "hello")
+	waitFor(t, "new version", func() bool { u := ft.m.Status().USB; return u.Firmware == "0.2.0" && u.State == StateReady })
 	if ft.changes.Load() < 4 {
 		t.Errorf("onChange called %d times", ft.changes.Load())
 	}
@@ -208,7 +211,10 @@ func TestFlashDeviceError(t *testing.T) {
 	ft.dev.send(t, `{"t":"ota","state":"error","msg":"没有可用的升级分区"}`)
 	ft.dev.next(t, "ota_abort")
 	ft.failed(t, "没有可用的升级分区")
-	ft.dev.next(t, "snapshot") // back to normal
+	// The cable stays up for another try.
+	if u := ft.m.Status().USB; u.State != StateReady {
+		t.Fatalf("usb = %+v", u)
+	}
 }
 
 func TestFlashAckTimeout(t *testing.T) {
@@ -233,19 +239,14 @@ func TestFlashUnplugged(t *testing.T) {
 }
 
 func TestFlashIncompatibleDevice(t *testing.T) {
-	ft := newFlashTest(t, `{"t":"hello","proto":2,"fw":"9.0.0","ota":1}`, nil)
-	waitFor(t, "incompatible", func() bool { return ft.m.Status().Incompatible })
+	ft := newFlashTest(t, `{"t":"hello","proto":2,"fw":"9.0.0"}`, nil)
+	waitFor(t, "incompatible", func() bool { return ft.m.Status().USB.Incompatible })
 	ft.start(t, testImage("0.2.0", 300))
 	ft.receive(t)
 }
 
 func TestFlashRefused(t *testing.T) {
-	ft := newFlashTest(t, `{"t":"hello","proto":1,"fw":"0.1.0","w":600,"h":450}`, nil)
-	if err := ft.m.StartFlash(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "不支持在线升级") {
-		t.Fatalf("old firmware: %v", err)
-	}
-
-	ft = newFlashTest(t, helloOTA, nil)
+	ft := newFlashTest(t, helloOTA, nil)
 	merged := testImage("0.2.0", 300)
 	binary.LittleEndian.PutUint32(merged[0x20:], 0)
 	ft.start(t, merged)
@@ -253,6 +254,106 @@ func TestFlashRefused(t *testing.T) {
 
 	ft.m.StartFlash(context.Background(), func(context.Context) ([]byte, error) { return nil, errors.New("下载失败: 404") })
 	ft.failed(t, "下载失败")
+}
+
+// wifiFlash is a manager linked over WiFi to a fake screen running
+// firmware 0.1.0.
+func wifiFlash(t *testing.T, tune func(m *Manager)) (*Manager, *fakeDevice, chan *fakeDevice) {
+	t.Helper()
+	m, devices, _ := newNetManager(t, io.Discard)
+	m.otaPickup = time.Second
+	if tune != nil {
+		tune(m)
+	}
+	runManager(t, m)
+	dev := <-devices
+	dev.next(t, "hello")
+	dev.send(t, `{"t":"hello","proto":1,"fw":"0.1.0","w":600,"h":450}`)
+	waitFor(t, "ready", func() bool { return m.Status().State == StateReady })
+	return m, dev, devices
+}
+
+func startFlash(t *testing.T, m *Manager, img []byte) {
+	t.Helper()
+	if err := m.StartFlash(context.Background(), func(context.Context) ([]byte, error) { return img, nil }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func flashFailed(t *testing.T, m *Manager, want string) {
+	t.Helper()
+	waitFor(t, "update error", func() bool { return m.Status().Flash.State == FlashError })
+	if f := m.Status().Flash; !strings.Contains(f.Error, want) {
+		t.Fatalf("error = %q, want %q", f.Error, want)
+	}
+}
+
+// Over WiFi the screen asks the user first. Once they said yes it erases
+// and takes the image like over USB, restarts, and its new firmware says
+// hello on the next link.
+func TestFlashWiFi(t *testing.T) {
+	m, dev, devices := wifiFlash(t, nil)
+	img := testImage("0.2.0", 2*OTAChunk+100)
+	startFlash(t, m, img)
+	begin := dev.next(t, "ota_begin")
+	dev.send(t, `{"t":"ota","state":"confirm"}`)
+	waitFor(t, "confirming", func() bool { f := m.Status().Flash; return f.State == FlashConfirming && f.Via == FlashWiFi })
+	dev.send(t, `{"t":"ota","state":"confirmed"}`)
+	waitFor(t, "preparing", func() bool { return m.Status().Flash.State == FlashPreparing })
+	dev.send(t, `{"t":"ota","state":"ready"}`)
+	if got := takeImage(t, dev, int(begin["size"].(float64))); !bytes.Equal(got, img) {
+		t.Fatal("screen got a different image")
+	}
+	waitFor(t, "restarting", func() bool { return m.Status().Flash.State == FlashRestarting })
+
+	dev.conn.Close() // the screen restarts
+	dev = <-devices
+	dev.next(t, "hello")
+	dev.send(t, `{"t":"hello","proto":1,"fw":"0.2.0","w":600,"h":450}`)
+	waitFor(t, "done", func() bool { return m.Status().Flash.State == FlashDone })
+	if s := m.Status(); s.Firmware != "0.2.0" || s.State != StateReady {
+		t.Fatalf("status %+v", s)
+	}
+}
+
+// Cancelled on the screen, the update fails and the link carries on.
+func TestFlashWiFiCancelled(t *testing.T) {
+	m, dev, _ := wifiFlash(t, nil)
+	startFlash(t, m, testImage("0.2.0", 300))
+	dev.next(t, "ota_begin")
+	dev.send(t, `{"t":"ota","state":"confirm"}`)
+	dev.send(t, `{"t":"ota","state":"error","msg":"已在屏幕上取消"}`)
+	dev.next(t, "ota_abort")
+	flashFailed(t, m, "已在屏幕上取消")
+	dev.next(t, "snapshot") // the screen gets the state again
+	if s := m.Status(); s.State != StateReady {
+		t.Fatalf("status %+v", s)
+	}
+}
+
+// A screen that never answers the question is given up on.
+func TestFlashWiFiUnanswered(t *testing.T) {
+	m, dev, _ := wifiFlash(t, func(m *Manager) { m.otaConfirm = 50 * time.Millisecond })
+	startFlash(t, m, testImage("0.2.0", 300))
+	dev.next(t, "ota_begin")
+	dev.send(t, `{"t":"ota","state":"confirm"}`)
+	dev.next(t, "ota_abort")
+	flashFailed(t, m, "没有响应")
+}
+
+// A screen speaking another protocol gets no data over WiFi, but can be
+// updated there: that is what fixes it.
+func TestFlashWiFiIncompatible(t *testing.T) {
+	m, devices, _ := newNetManager(t, io.Discard)
+	m.otaPickup = time.Second
+	runManager(t, m)
+	dev := <-devices
+	dev.send(t, `{"t":"hello","proto":2,"fw":"9.0.0"}`)
+	waitFor(t, "incompatible", func() bool { return m.Status().Incompatible })
+	startFlash(t, m, testImage("0.2.0", 300))
+	dev.next(t, "ota_begin")
+	dev.send(t, `{"t":"ota","state":"confirm"}`)
+	waitFor(t, "confirming", func() bool { return m.Status().Flash.State == FlashConfirming })
 }
 
 func TestWriteTimeout(t *testing.T) {

@@ -8,6 +8,6 @@ type other struct{}
 
 func newPlatform() platform { return other{} }
 
-func (other) fans(context.Context) []Fan      { return nil }
-func (other) gpu(context.Context) GPU         { return NoGPU }
+func (other) fans(context.Context) []float64  { return nil }
+func (other) gpu(context.Context) float64     { return -1 }
 func (other) memory(context.Context, *Memory) {}

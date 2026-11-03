@@ -128,10 +128,7 @@ func notesOf(t *testing.T, m map[string]any) []Note {
 }
 
 func TestManagerBeep(t *testing.T) {
-	const (
-		helloPlain = `{"t":"hello","proto":1,"fw":"0.1.0","w":600,"h":450,"max_line":4096}`
-		helloBeep  = `{"t":"hello","proto":1,"fw":"0.2.0","w":600,"h":450,"max_line":4096,"beep":1}`
-	)
+	const helloBeep = `{"t":"hello","proto":1,"fw":"0.2.0","w":600,"h":450}`
 	src := &fakeSource{snap: sampleSnapshot(), ch: make(chan struct{}, 1)} // claude:a needs approval
 	m, devices := newTestManager(t, src, io.Discard)
 	m.opts.BeepNotes, m.opts.Volume = SoundByID("chime").Notes, 60
@@ -142,25 +139,15 @@ func TestManagerBeep(t *testing.T) {
 	defer cancel()
 	go m.Run(ctx)
 
-	// Firmware without a buzzer gets no beeps.
+	// Nothing beeps before the handshake; then the task already waiting
+	// beeps once.
 	dev := <-devices
-	dev.send(t, helloPlain)
-	waitFor(t, "ready", func() bool { return m.Status().State == StateReady })
+	dev.next(t, "snapshot")
 	dev.none(t, "beep", 100*time.Millisecond)
-	if err := m.Beep(SoundByID("rise").Notes, 30); err == nil || !strings.Contains(err.Error(), "不支持") {
-		t.Fatalf("beep on old firmware: %v", err)
-	}
-
-	// With one, the task already waiting beeps once after the handshake.
-	m.Reconnect()
-	dev = <-devices
 	dev.send(t, helloBeep)
 	msg := dev.next(t, "beep")
 	if got := notesOf(t, msg); !slices.Equal(got, SoundByID("chime").Notes) || msg["vol"] != 60.0 {
 		t.Fatalf("beep %v", msg)
-	}
-	if st := m.Status(); !st.Beep || st.Volume {
-		t.Fatalf("status %+v: beep without volume", st)
 	}
 	src.ch <- struct{}{}
 	dev.next(t, "snapshot")
@@ -183,7 +170,7 @@ func TestManagerBeep(t *testing.T) {
 	dev.next(t, "beep")
 
 	// Turned off, a new question stays quiet ...
-	m.SetOptions(Options{Enabled: true, Port: "auto", MaxSessions: 12})
+	m.SetOptions(testOptions())
 	s.Sessions[2].State = model.StateInput
 	src.set(s)
 	dev.next(t, "snapshot")
@@ -223,7 +210,7 @@ func TestActiveTasks(t *testing.T) {
 }
 
 func TestManagerDoneBeep(t *testing.T) {
-	const helloBeep = `{"t":"hello","proto":1,"fw":"0.3.0","w":600,"h":450,"max_line":4096,"beep":2}`
+	const helloBeep = `{"t":"hello","proto":1,"fw":"0.3.0","w":600,"h":450}`
 	chime, rise := SoundByID("chime").Notes, SoundByID("rise").Notes
 	src := &fakeSource{snap: sampleSnapshot(), ch: make(chan struct{}, 1)} // a: approval, b: running, c: done
 	m, devices := newTestManager(t, src, io.Discard)
@@ -237,9 +224,6 @@ func TestManagerDoneBeep(t *testing.T) {
 	dev.send(t, helloBeep)
 	if got := notesOf(t, dev.next(t, "beep")); !slices.Equal(got, chime) {
 		t.Fatalf("first %v", got)
-	}
-	if !m.Status().Volume {
-		t.Fatal("beep:2 plays the volume sent")
 	}
 	dev.none(t, "beep", 100*time.Millisecond)
 
@@ -266,7 +250,9 @@ func TestManagerDoneBeep(t *testing.T) {
 	dev.none(t, "beep", 100*time.Millisecond)
 
 	// With the done sound off, finishing is quiet.
-	m.SetOptions(Options{Enabled: true, Port: "auto", MaxSessions: 12, BeepNotes: chime})
+	o := testOptions()
+	o.BeepNotes = chime
+	m.SetOptions(o)
 	s.Sessions = slices.Clone(s.Sessions)
 	s.Sessions[2].State = model.StateDone
 	src.set(s)

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -52,11 +53,11 @@ func TestBuildFrame(t *testing.T) {
 		t.Fatalf("idle not filtered: %d sessions, total %d", len(f.Sessions), f.Total)
 	}
 	s := f.Sessions[0]
-	if s.P != "claude" || s.State != "approval" || s.Label != "需授权" || s.Text != "Bash: npm install" || s.Since != t0.Unix()-42 {
+	if s.P != "claude" || s.State != "approval" || s.Detail != "Bash: npm install" || s.Since != t0.Unix()-42 {
 		t.Fatalf("session 0 = %+v", s)
 	}
-	if f.Sessions[1].Text != "重构登录模块" { // falls back to title
-		t.Fatalf("session 1 text = %q", f.Sessions[1].Text)
+	if f.Sessions[1].Title != "重构登录模块" {
+		t.Fatalf("session 1 title = %q", f.Sessions[1].Title)
 	}
 	c := f.Usage.Claude
 	if c.FiveHour.Pct != 62 || c.FiveHour.ResetsAt != t0.Unix()+7200 || c.SevenDay != nil || c.TodayTokens != 180 || c.TodayCost == nil || *c.TodayCost != 1.5 {
@@ -132,8 +133,8 @@ func TestEncodeCap(t *testing.T) {
 }
 
 func TestDecodeDeviceLine(t *testing.T) {
-	m, err := DecodeDeviceLine([]byte(`{"t":"hello","proto":1,"fw":"0.1.0","w":600,"h":450,"max_line":4096}` + "\r\n"))
-	if err != nil || m.T != "hello" || m.FW != "0.1.0" || m.W != 600 || m.MaxLine != 4096 {
+	m, err := DecodeDeviceLine([]byte(`{"t":"hello","proto":1,"fw":"0.1.0","w":600,"h":450}` + "\r\n"))
+	if err != nil || m.T != "hello" || m.FW != "0.1.0" || m.W != 600 || m.H != 450 {
 		t.Fatalf("hello = %+v, %v", m, err)
 	}
 	if m, err := DecodeDeviceLine([]byte(`{"t":"ack","seq":42,"extra":true}`)); err != nil || m.Seq != 42 {
@@ -247,11 +248,39 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// testOptions reach the fake screen of newTestManager over WiFi.
+func testOptions() Options {
+	return Options{Enabled: true, Addr: "192.168.1.50", Code: "123456", Port: "auto", Name: "mini", HostID: "abc123", MaxSessions: 12}
+}
+
+// newTestManager is a manager whose WiFi link reaches a fake screen; each
+// dial hands the screen's end over devices. No USB cable is plugged in.
 func newTestManager(t *testing.T, src SnapshotSource, logs io.Writer) (*Manager, chan *fakeDevice) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	m := NewManager(src, Options{Enabled: true, Port: "auto", MaxSessions: 12}, "0.1.0", log, nil)
+	m := NewManager(src, testOptions(), log, nil)
 	devices := make(chan *fakeDevice, 4)
+	m.list = func() ([]PortInfo, error) { return nil, nil }
+	m.open = func(string) (io.ReadWriteCloser, error) { return nil, errors.New("no cable in this test") }
+	m.dial = func(addr string) (io.ReadWriteCloser, error) {
+		host, dev := net.Pipe()
+		devices <- newFakeDevice(dev)
+		return host, nil
+	}
+	m.heartbeat, m.helloEvery, m.rescan, m.debounce = time.Hour, time.Hour, 20*time.Millisecond, 10*time.Millisecond
+	m.netRetry, m.deniedWait, m.netSilence = 20*time.Millisecond, 20*time.Millisecond, time.Hour
+	return m, devices
+}
+
+// newUSBTestManager is a manager with the fake screen on the USB cable and
+// no WiFi address set.
+func newUSBTestManager(t *testing.T, logs io.Writer) (*Manager, chan *fakeDevice) {
+	t.Helper()
+	src := &fakeSource{snap: sampleSnapshot(), ch: make(chan struct{}, 1)}
+	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	m := NewManager(src, Options{Enabled: true, Port: "auto", MaxSessions: 12}, log, nil)
+	devices := make(chan *fakeDevice, 4)
+	m.dial = func(string) (io.ReadWriteCloser, error) { return nil, errors.New("no WiFi in this test") }
 	m.list = func() ([]PortInfo, error) {
 		return []PortInfo{
 			{Name: "/dev/cu.Bluetooth"},
@@ -280,16 +309,16 @@ func TestManagerLink(t *testing.T) {
 	go func() { m.Run(ctx); close(done) }()
 
 	dev := <-devices
-	if h := dev.next(t, "hello"); h["proto"] != 1.0 || h["host"] != "go-dock" || h["ver"] != "0.1.0" {
+	if h := dev.next(t, "hello"); h["proto"] != 1.0 || h["name"] != "mini" || h["code"] != "123456" {
 		t.Fatalf("hello = %v", h)
 	}
 	first := dev.next(t, "snapshot")
-	if st := m.Status(); st.State != StateConnected || st.Port != "/dev/cu.usbmodem1" {
+	if st := m.Status(); st.State != StateConnected || st.Addr != "192.168.1.50:47322" {
 		t.Fatalf("status = %+v", st)
 	}
 
 	dev.send(t, "ESP-ROM:esp32s3-20210327 boot noise")
-	dev.send(t, `{"t":"hello","proto":1,"fw":"0.0.1","w":600,"h":450,"max_line":4096}`)
+	dev.send(t, `{"t":"hello","proto":1,"fw":"0.0.1","w":600,"h":450}`)
 	waitFor(t, "ready", func() bool { return m.Status().State == StateReady })
 	if st := m.Status(); st.Firmware != "0.0.1" || st.Width != 600 || st.LastHeard.IsZero() {
 		t.Fatalf("ready status = %+v", st)
@@ -314,15 +343,18 @@ func TestManagerLink(t *testing.T) {
 		t.Fatalf("device log not forwarded properly:\n%s", logs.String())
 	}
 
-	// Unplug: the manager reconnects and handshakes again.
+	// The screen hangs up: the manager reconnects and handshakes again.
 	dev.conn.Close()
 	dev2 := <-devices
 	dev2.next(t, "hello")
 	waitFor(t, "connected again", func() bool { return m.Status().State == StateConnected })
 
-	// Disabling closes the link.
+	// Disabling closes both links.
 	m.SetOptions(Options{Enabled: false, Port: "auto"})
-	waitFor(t, "disabled", func() bool { return m.Status().State == StateDisabled })
+	waitFor(t, "disabled", func() bool {
+		st := m.Status()
+		return st.State == StateDisabled && st.USB.State == StateDisabled
+	})
 
 	cancel()
 	select {
@@ -352,17 +384,43 @@ func TestManagerIncompatibleDevice(t *testing.T) {
 	}
 }
 
-func TestManagerNoDevice(t *testing.T) {
+// A screen in another protocol gets hellos instead of the heartbeat's
+// snapshots: its answers keep the link up for an update.
+func TestManagerIncompatibleKeepsLink(t *testing.T) {
 	src := &fakeSource{snap: sampleSnapshot(), ch: make(chan struct{}, 1)}
-	m, _ := newTestManager(t, src, io.Discard)
-	m.list = func() ([]PortInfo, error) { return []PortInfo{{Name: "/dev/cu.Bluetooth"}}, nil }
+	m, devices := newTestManager(t, src, io.Discard)
+	m.heartbeat = 30 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go m.Run(ctx)
-	waitFor(t, "not found", func() bool {
+
+	dev := <-devices
+	dev.next(t, "snapshot")
+	dev.send(t, `{"t":"hello","proto":2,"fw":"9.0.0"}`)
+	waitFor(t, "incompatible", func() bool { return m.Status().Incompatible })
+	for range 3 {
+		if msg := dev.next(t, "hello"); msg["proto"] != float64(ProtoVersion) {
+			t.Fatalf("hello %v", msg)
+		}
+	}
+	if !strings.Contains(m.Status().Error, "网页上升级") {
+		t.Fatalf("error %q", m.Status().Error)
+	}
+}
+
+func TestManagerUnset(t *testing.T) {
+	src := &fakeSource{snap: sampleSnapshot(), ch: make(chan struct{}, 1)}
+	m, _ := newTestManager(t, src, io.Discard)
+	m.SetOptions(Options{Enabled: true, Port: "auto"})
+	runManager(t, m)
+	// No screen address yet, no cable: both wait without an error.
+	waitFor(t, "unset", func() bool {
 		st := m.Status()
-		return st.State == StateSearching && strings.Contains(st.Error, "未找到设备")
+		return st.State == StateUnset && st.USB.State == StateSearching
 	})
+	if st := m.Status(); st.Error != "" || st.USB.Error != "" {
+		t.Fatalf("status = %+v", st)
+	}
 }
 
 func TestPickPort(t *testing.T) {
@@ -414,7 +472,8 @@ func TestFrameAgents(t *testing.T) {
 		t.Fatalf("sessions = %+v", f.Sessions)
 	}
 	a := f.Sessions[0]
-	if a.State != "approval" || a.Label != "需授权" || a.Text != "Explore · Bash: rm -rf dist" || a.Since != t0.Add(time.Minute).Unix() {
+	// The row's state and its time come from the subagent asking.
+	if a.State != "approval" || a.Since != t0.Add(time.Minute).Unix() {
 		t.Fatalf("row a = %+v", a)
 	}
 	// A subagent waiting for approval shows the command, not its task.
@@ -422,7 +481,7 @@ func TestFrameAgents(t *testing.T) {
 		t.Fatalf("agents a = %+v", a)
 	}
 	b := f.Sessions[1]
-	if b.State != "running" || b.Text != "Explore · Explore host tree" || b.AgentsActive != 1 {
+	if b.State != "running" || b.AgentsActive != 1 || b.Agents[0].Text != "Explore host tree" {
 		t.Fatalf("row b = %+v", b)
 	}
 
@@ -488,13 +547,13 @@ func TestFrameTitleAndDetail(t *testing.T) {
 		mk("same", "same"),
 		mk("只有标题", ""),
 	}}, Options{MaxSessions: 12}, 1)
-	if s := f.Sessions[0]; s.Title != "实现设备预览新设计" || s.Detail != "Bash: go test ./..." || s.Text != "Bash: go test ./..." {
+	if s := f.Sessions[0]; s.Title != "实现设备预览新设计" || s.Detail != "Bash: go test ./..." {
 		t.Fatalf("both = %+v", s)
 	}
 	if s := f.Sessions[1]; s.Title != "" || s.Detail != "same" {
 		t.Fatalf("duplicate title kept: %+v", s)
 	}
-	if s := f.Sessions[2]; s.Title != "只有标题" || s.Detail != "" || s.Text != "只有标题" {
+	if s := f.Sessions[2]; s.Title != "只有标题" || s.Detail != "" {
 		t.Fatalf("title only = %+v", s)
 	}
 }
@@ -535,7 +594,7 @@ func TestEncodeTrimsMessagesBeforeSessions(t *testing.T) {
 	var ss []model.Session
 	for i := 0; i < 12; i++ {
 		ss = append(ss, model.Session{ID: fmt.Sprint("claude:", i), Provider: model.ProviderClaude, Project: "p", State: model.StateRunning,
-			Title: "fix tests", Message: strings.Repeat("→", 60), Detail: "Bash: go test ./...", Since: t0})
+			Title: strings.Repeat("修", 40), Message: strings.Repeat("→", 60), Detail: "Bash: go test ./...", Since: t0})
 	}
 	line, err := EncodeSnapshot(BuildFrame(model.Snapshot{Now: t0, Sessions: ss}, Options{MaxSessions: 12}, 1))
 	if err != nil || len(line) > MaxLine {
@@ -561,7 +620,7 @@ func TestFrameWaitsForBackgroundAgents(t *testing.T) {
 	ss.Title = "规划 host 端"
 	f := BuildFrame(model.Snapshot{Now: t0, Sessions: []model.Session{ss}}, Options{MaxSessions: 12}, 1)
 	s := f.Sessions[0]
-	if s.State != "running" || s.Label != "进行中" || s.Detail != "等待 2 个子任务完成" || s.Title != "规划 host 端" {
+	if s.State != "running" || s.Detail != "等待 2 个子任务完成" || s.Title != "规划 host 端" {
 		t.Fatalf("row = %+v", s)
 	}
 

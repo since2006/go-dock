@@ -4,14 +4,18 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,15 +24,10 @@ import (
 	"github.com/since2006/go-dock/host/internal/config"
 	"github.com/since2006/go-dock/host/internal/device"
 	"github.com/since2006/go-dock/host/internal/hub"
-	"github.com/since2006/go-dock/host/internal/ir"
 	"github.com/since2006/go-dock/host/internal/logx"
 	"github.com/since2006/go-dock/host/internal/model"
-	"github.com/since2006/go-dock/host/internal/mqtt"
 	"github.com/since2006/go-dock/host/internal/plugins"
-	"github.com/since2006/go-dock/host/internal/plugins/aircon"
-	"github.com/since2006/go-dock/host/internal/plugins/lights"
 	"github.com/since2006/go-dock/host/internal/plugins/perf"
-	"github.com/since2006/go-dock/host/internal/plugins/screen"
 	"github.com/since2006/go-dock/host/internal/providers"
 	"github.com/since2006/go-dock/host/internal/providers/claude"
 	"github.com/since2006/go-dock/host/internal/providers/codex"
@@ -60,10 +59,6 @@ type App struct {
 	hub     *hub.Hub
 	device  *device.Manager
 	updater *update.Updater
-	mqtt    *mqtt.Pool
-	lights  *lights.Plugin
-	aircon  *aircon.Plugin
-	screen  *screen.Plugin
 	perf    *perf.Plugin
 	plugins *plugins.Host
 	listen  string // loopback-reachable address hooks call back to
@@ -117,26 +112,13 @@ func Run(ctx context.Context, o Options) error {
 		ctx:     ctx,
 	}
 	a.restart = func() { a.restarting.Store(true); stop() }
-	a.device = device.NewManager(a.hub, deviceOptions(cfg), o.Version, lg.Logger, a.hub.Touch)
+	a.device = device.NewManager(a.hub, deviceOptions(cfg), lg.Logger, a.hub.Touch)
 	a.updater = update.New(o.Version, lg.Logger, a.hub.Touch)
 	a.updater.SetBeta(cfg.Update.Prerelease)
-	a.mqtt = mqtt.NewPool(lg.Logger, a.hub.Touch)
-	a.mqtt.SetOptions(mqttOptions(cfg))
-	a.lights = lights.New(func(id string) lights.Bus { return a.mqtt.Client(id) }, lg.Logger, a.hub.Touch)
-	a.lights.SetOptions(lightsOptions(cfg))
-	a.aircon = aircon.New(a.device, filepath.Join(dir, "aircon.json"), lg.Logger, a.hub.Touch)
-	a.aircon.SetOptions(airconOptions(cfg))
-	a.screen = screen.New(a.device, func(f func(*config.DeviceConfig)) error {
-		return store.Update(func(c *config.Config) { f(&c.Device) })
-	}, lg.Logger, a.hub.Touch)
-	a.screen.SetOptions(screenOptions(cfg))
-	a.perf = perf.New(func() perf.Reader { return sysmon.New() }, func(order []string) error {
-		return store.Update(func(c *config.Config) { c.Plugins.Perf.Order = order })
-	}, a.hub.Touch)
+	a.perf = perf.New(func() perf.Reader { return sysmon.New() }, a.hub.Touch)
 	a.perf.SetOptions(perfOptions(cfg))
-	a.plugins = plugins.New(a.lights, a.aircon, a.screen, a.perf)
-	a.device.SetPages(a.plugins)
-	a.device.SetIRSink(a.aircon.Received)
+	a.plugins = plugins.New(a.perf)
+	a.device.SetLine(a.plugins)
 	a.applyProviders(cfg)
 	store.OnChange(a.onConfigChange)
 
@@ -146,7 +128,6 @@ func Run(ctx context.Context, o Options) error {
 	go a.hub.Run(ctx)
 	go a.device.Run(ctx)
 	go a.perf.Run(ctx)
-	go a.mqtt.Run(ctx)
 	go a.updater.Run(ctx, func() bool { return a.store.Get().Update.AutoCheck })
 	if o.OpenBrowser && !o.Restarted && cfg.Web.OpenBrowser {
 		openBrowser(url)
@@ -184,8 +165,13 @@ func hubOptions(c config.Config) hub.Options {
 }
 
 func deviceOptions(c config.Config) device.Options {
+	name, id := hostIdentity()
+	if n := strings.TrimSpace(c.Device.Name); n != "" {
+		name = n
+	}
 	o := device.Options{
-		Enabled: c.Device.Enabled, Port: c.Device.Port, MaxSessions: c.Display.MaxSessions, ShowIdle: c.Display.ShowIdle,
+		Enabled: c.Device.Enabled, Addr: strings.TrimSpace(c.Device.Addr), Code: c.Device.Code, Port: c.Device.Port,
+		Name: name, HostID: id, MaxSessions: c.Display.MaxSessions, ShowIdle: c.Display.ShowIdle,
 		Brightness: c.Device.Brightness, DimBrightness: c.Device.DimBrightness, DimAfter: c.Device.DimAfter.D(),
 		Volume: c.Device.Volume,
 	}
@@ -197,6 +183,20 @@ func deviceOptions(c config.Config) device.Options {
 	}
 	return o
 }
+
+// hostIdentity is how this go-dock introduces itself to the screen: the
+// computer's name, and an id hashed from it and the config dir, so it stays
+// the same across restarts and two go-docks on one computer differ.
+var hostIdentity = sync.OnceValues(func() (name, id string) {
+	host, _ := os.Hostname()
+	dir, _ := config.Dir()
+	sum := sha256.Sum256([]byte(host + "\x00" + dir))
+	name, _, _ = strings.Cut(host, ".") // Mac-mini.local
+	if name == "" {
+		name = "go-dock"
+	}
+	return name, hex.EncodeToString(sum[:8])
+})
 
 // beepNotes resolves the alert sound setting; custom notes that do not
 // parse (only a hand-edited config has them) play the default sound.
@@ -210,44 +210,8 @@ func beepNotes(sound, custom string) []device.Note {
 	return device.SoundByID(sound).Notes
 }
 
-func mqttOptions(c config.Config) []mqtt.BrokerOptions {
-	var bs []mqtt.BrokerOptions
-	for _, b := range c.MQTT.Brokers {
-		url, _ := config.BrokerURL(b.URL) // validated; empty stays off
-		bs = append(bs, mqtt.BrokerOptions{ID: b.ID, Name: b.Label(), Options: mqtt.Options{
-			Enabled: b.Enabled, Broker: url, Username: b.Username, Password: b.Password, ClientID: b.ClientID,
-		}})
-	}
-	return bs
-}
-
-func lightsOptions(c config.Config) lights.Options {
-	o := lights.Options{Enabled: c.Plugins.Lights.Enabled, Brokers: map[string]string{}}
-	for _, b := range c.MQTT.Brokers {
-		o.Brokers[b.ID] = b.Label()
-	}
-	for _, l := range c.Plugins.Lights.Lights {
-		l.Broker = c.MQTT.BrokerFor(l.Broker)
-		o.Lights = append(o.Lights, l)
-	}
-	return o
-}
-
-func airconOptions(c config.Config) aircon.Options {
-	a := c.Plugins.Aircon
-	return aircon.Options{Enabled: a.Enabled, Name: a.Name, Model: ir.GreeModel(a.Model)}
-}
-
-func screenOptions(c config.Config) screen.Options {
-	d := c.Device
-	return screen.Options{
-		Enabled: d.SettingsPage, Brightness: d.Brightness, DimBrightness: d.DimBrightness, DimAfter: d.DimAfter.D(),
-		Alerts: d.Beep || d.BeepDone, Mute: d.Mute,
-	}
-}
-
 func perfOptions(c config.Config) perf.Options {
-	return perf.Options{Enabled: c.Plugins.Perf.Enabled, Order: c.Plugins.Perf.Order}
+	return perf.Options{Enabled: c.Plugins.Perf.Enabled}
 }
 
 func codexOptions(c config.Config) codex.Options {
@@ -297,10 +261,6 @@ func (a *App) onConfigChange(old, cur config.Config) {
 	a.log.Level.Set(logx.ParseLevel(cur.Log.Level))
 	a.hub.SetOptions(hubOptions(cur))
 	a.device.SetOptions(deviceOptions(cur))
-	a.mqtt.SetOptions(mqttOptions(cur))
-	a.lights.SetOptions(lightsOptions(cur))
-	a.aircon.SetOptions(airconOptions(cur))
-	a.screen.SetOptions(screenOptions(cur))
 	a.perf.SetOptions(perfOptions(cur))
 	a.applyProviders(cur)
 	if old.Update.Prerelease != cur.Update.Prerelease {
@@ -318,6 +278,11 @@ func (a *App) Snapshot() model.Snapshot             { return a.hub.Snapshot() }
 func (a *App) Subscribe() (<-chan struct{}, func()) { return a.hub.Subscribe() }
 func (a *App) Config() config.Config                { return a.store.Get() }
 func (a *App) SetConfig(c config.Config) error {
+	if strings.TrimSpace(c.Device.Addr) != "" {
+		if _, err := device.NetAddr(c.Device.Addr); err != nil {
+			return err
+		}
+	}
 	if c.Device.BeepSound == device.CustomSound {
 		if _, err := device.ParseNotes(c.Device.BeepCustom); err != nil {
 			return fmt.Errorf("自定义提示音：%w", err)
@@ -331,8 +296,14 @@ func (a *App) SetConfig(c config.Config) error {
 	return a.store.Set(c)
 }
 
-func (a *App) DeviceStatus() any         { return a.deviceStatus() }
-func (a *App) ReconnectDevice()          { a.device.Reconnect() }
+func (a *App) DeviceStatus() any { return a.deviceStatus() }
+func (a *App) ReconnectDevice()  { a.device.Reconnect() }
+
+func (a *App) DeviceWiFiScan(ctx context.Context) (any, error) { return a.device.ScanWiFi(ctx) }
+
+func (a *App) DeviceWiFi(w web.WiFi) error {
+	return a.device.ConfigureWiFi(device.WiFiConfig{SSID: w.SSID, Pass: w.Pass, IP: w.IP, Mask: w.Mask, GW: w.GW})
+}
 func (a *App) DevicePorts() (any, error) { return device.ListPorts() }
 
 func (a *App) UpdateStatus() any { return a.updater.Status() }
@@ -405,7 +376,7 @@ func (a *App) DeviceFrame() any {
 	return device.BuildFrame(a.hub.Snapshot(), deviceOptions(a.store.Get()), 0)
 }
 
-func (a *App) DevicePages() any { return device.BuildPages(a.plugins.Pages()) }
+func (a *App) DeviceLine() any { return device.BuildLine(a.plugins.Line()) }
 
 func (a *App) DeviceSounds() any { return device.Sounds }
 
@@ -423,18 +394,7 @@ func (a *App) DeviceBeep(notes [][2]int, volume int) error {
 	return a.device.Beep(notes, volume)
 }
 
-func (a *App) MQTTStatus() any { return a.mqtt.Status() }
-
-func (a *App) PluginAction(ctx context.Context, act model.Action) error {
-	return a.plugins.Do(ctx, act)
-}
-
-var (
-	_ lights.Bus        = (*mqtt.Client)(nil)
-	_ aircon.Remote     = (*device.Manager)(nil)
-	_ screen.Device     = (*device.Manager)(nil)
-	_ device.PageSource = (*plugins.Host)(nil)
-)
+var _ device.LineSource = (*plugins.Host)(nil)
 
 func (a *App) Ingest(provider, kind string, body []byte) error {
 	a.mu.Lock()

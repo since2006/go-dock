@@ -23,15 +23,21 @@ type deviceStatus struct {
 	// Target is the firmware version that goes with this go-dock; empty for
 	// a development build.
 	Target string `json:"target,omitempty"`
-	// Upgradable: the device runs other firmware and can be updated over USB.
+	// Upgradable: the device runs other firmware and can be updated now:
+	// over the USB cable, or (Confirm) over WiFi once the user says yes on
+	// the screen.
 	Upgradable bool `json:"upgradable,omitempty"`
-	// Manual: the device runs older firmware that cannot be updated over
-	// USB yet; it needs flashing by hand once.
-	Manual bool `json:"manual,omitempty"`
+	Confirm    bool `json:"confirm,omitempty"`
+	// Current is the firmware the screen runs, as the USB cable or else the
+	// WiFi link reports it.
+	Current string `json:"current,omitempty"`
+	// Name is this computer's name as the screen gets it in hello: the
+	// title of its Agent page.
+	Name string `json:"name,omitempty"`
 }
 
 func (a *App) deviceStatus() deviceStatus {
-	st := deviceStatus{Status: a.device.Status()}
+	st := deviceStatus{Status: a.device.Status(), Name: device.CutName(deviceOptions(a.store.Get()).Name)}
 	file := os.Getenv(firmwareFileEnv)
 	switch {
 	case file != "":
@@ -44,13 +50,29 @@ func (a *App) deviceStatus() deviceStatus {
 	case !a.updater.Status().Dev:
 		st.Target = a.version
 	}
-	if st.Target == "" || st.Firmware == "" || st.Firmware == st.Target {
-		return st
-	}
-	if file != "" || update.Newer(st.Target, st.Firmware) || st.Incompatible {
-		st.Upgradable, st.Manual = st.OTA, !st.OTA
-	}
+	upgradeRoute(&st, file != "")
 	return st
+}
+
+// upgradeRoute says whether and how the screen can get st.Target: over the
+// USB cable when it is plugged in, else over WiFi. Any other firmware is
+// offered with a local image (local); otherwise only newer firmware, or
+// firmware that cannot talk to this go-dock.
+func upgradeRoute(st *deviceStatus, local bool) {
+	st.Current = st.USB.Firmware
+	if st.Current == "" {
+		st.Current = st.Firmware
+	}
+	if st.Target == "" || st.Current == "" || st.Current == st.Target {
+		return
+	}
+	switch {
+	case !(local || update.Newer(st.Target, st.Current) || st.Incompatible || st.USB.Incompatible):
+	case st.USB.State == device.StateReady:
+		st.Upgradable = true
+	case st.State == device.StateReady || st.Incompatible:
+		st.Upgradable, st.Confirm = true, true
+	}
 }
 
 // imageFileVersion reads the version from an app image's header.
@@ -79,8 +101,6 @@ func (a *App) ApplyFirmware() error {
 		return errors.New("go-dock 正在升级，请稍后再升级固件")
 	case st.Flash.Busy():
 		return errors.New("固件正在升级")
-	case st.Manual:
-		return errors.New("设备当前的固件不支持在线升级，请先用 USB 刷一次")
 	case !st.Upgradable:
 		return errors.New("没有可升级的固件")
 	}

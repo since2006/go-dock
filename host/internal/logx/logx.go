@@ -184,7 +184,7 @@ func appendAttr(b *strings.Builder, group string, a slog.Attr) {
 	}
 	v := a.Value.String()
 	if t := strings.TrimSpace(v); strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[") {
-		// JSON (an MQTT payload, say) reads better as is than quoted.
+		// JSON (a payload, say) reads better as is than quoted.
 		var c bytes.Buffer
 		if json.Compact(&c, []byte(t)) == nil {
 			fmt.Fprintf(b, " %s=%s", key, c.String())

@@ -21,9 +21,7 @@ const PROVIDER_NAME = { claude: "Claude", codex: "Codex" };
 
 let state = null;
 let previewPage = 0; // task page on the Agent page
-let previewFn = "agent"; // the page shown: "agent" or a function page id
 let scrTaskPages = 1;
-let scrDrag = null; // a card held on a movable page: {el, page, item, x, y, timer, lifted, target, stale}
 
 // ---------- formatting ----------
 
@@ -210,6 +208,7 @@ function renderDevicePill(dev) {
   const pill = $("#device-pill");
   const map = {
     disabled: ["设备：已禁用", ""],
+    unset: ["设备：未设置", "warn"],
     searching: ["设备：未连接", "warn"],
     connected: ["设备：未握手", "warn"],
     ready: ["设备：已连接", "ok"],
@@ -217,7 +216,7 @@ function renderDevicePill(dev) {
   const [text, cls] = map[dev && dev.state] || ["设备：—", ""];
   pill.textContent = text;
   pill.className = `pill ${cls}`;
-  pill.title = (dev && (dev.error || dev.port)) || "";
+  pill.title = (dev && (dev.error || dev.addr)) || "";
 }
 
 // ---------- device preview ----------
@@ -241,17 +240,8 @@ const SCR_ICONS = {
   running: '<path d="M12 3.5a8.5 8.5 0 1 1-8.5 8.5"/>',
   done: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
   idle: '<circle cx="12" cy="12" r="2.5"/>',
-  moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>', // also a function page icon
-  bulb: '<path d="M9 18h6"/><path d="M10 21h4"/><path d="M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.4 1.1 2.2h5c0-.8.4-1.6 1.1-2.2A6 6 0 0 0 12 3z"/>',
-  // Function page icons (item.icon), lines and arcs only, as the firmware draws them.
-  power: '<path d="M12 3v8"/><path d="M6.4 6.4a8 8 0 1 0 11.2 0"/>',
-  cool: '<path d="M12 2.5v19M3.8 7.3l16.4 9.4M3.8 16.7l16.4-9.4"/><path d="m9.5 4 2.5 2 2.5-2M9.5 20l2.5-2 2.5 2"/>',
-  heat: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
-  dry: '<path d="M12 3 6.8 11.5A6 6 0 1 0 17.2 11.5z"/>',
-  fan: '<path d="M3 8h9a2.5 2.5 0 1 0-2.5-2.5"/><path d="M3 12h15a2.5 2.5 0 1 1-2.5 2.5"/><path d="M3 16h7a2 2 0 1 1-2 2"/>',
-  auto: '<path d="M20 12a8 8 0 0 1-14 5.3"/><path d="M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v3.7h-3.7M6 21v-3.7h3.7"/>',
-  bell: '<path d="M6 14V9a6 6 0 0 1 12 0v5l2 2.5H4z"/><path d="M10 19.5a2 2 0 0 0 4 0"/>',
-  // The 性能 page.
+  moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>', // the empty task list
+  // Reading icons of the line (item.icon), lines and arcs only, as the firmware draws them.
   cpu: '<path d="M7 7h10v10H7z"/><path d="M10 10h4v4h-4z"/><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/>',
   gpu: '<path d="M2.5 6h19v11h-19z"/><circle cx="9" cy="11.5" r="3"/><path d="M15 9.5h3.5M15 13.5h3.5"/><path d="M5.5 17v3M9.5 17v3"/>',
   memory: '<path d="M3 7h18v9H3z"/><path d="M6.5 10h3v3h-3zM14.5 10h3v3h-3z"/><path d="M6 16v3M10 16v3M14 16v3M18 16v3"/>',
@@ -322,10 +312,10 @@ function scrMeter(label, w, provider, now) {
 const SCR_LIST_H = 258, SCR_MAIN = 126, SCR_SUB = 36, SCR_SUB_GAP = 4, SCR_GROUP_GAP = 6;
 
 // The line under the project line: what the session is doing, else the
-// assistant's latest text; older hosts only send text, which may be the
-// title. None leaves the project line alone, centred in the row.
+// assistant's latest text. None leaves the project line alone, centred in
+// the row.
 function scrText(s) {
-  return s.detail || s.msg || (s.text && s.text !== s.title ? s.text : "");
+  return s.detail || s.msg || "";
 }
 
 function scrGroupHeight(s) {
@@ -359,7 +349,7 @@ function scrGroup(s, now) {
       // Code's spinner) at the right end.
       el("div", { class: "l1" }, el("span", { class: "project" }, s.project || "—"),
         el("span", { class: `prov ${s.p}` }, PROVIDER_NAME[s.p] || s.p),
-        el("span", { class: "end" }, el("span", { class: "label" }, s.label))),
+        el("span", { class: "end" }, el("span", { class: "label" }, STATE_LABEL[s.state] || s.state))),
       el("div", { class: "l2" }, el("span", { class: "sname" }, s.title || ""),
         el("span", { class: "end" },
           el("span", { class: "time mono" }, scrRowTime(s, now),
@@ -377,31 +367,31 @@ function scrGroup(s, now) {
   return el("div", { class: "scr-group" }, row, ...subs);
 }
 
-// The strip on top of every page: title and summary (or why the page cannot
-// be used now) on the left; page dots, link and clock on the right.
-function scrStrip(title, summary, now, dots, error) {
+// The strip on top: title and summary on the left; link and clock on the
+// right.
+function scrStrip(title, summary, now) {
   const clock = new Date(now * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
   return el("div", { class: "scr-strip" },
-    el("div", { class: "left" }, el("span", { class: "title" }, title),
-      error ? el("span", { class: "summary err" }, error) : el("span", { class: "summary" }, summary)),
-    el("div", { class: "right" }, dots, el("span", { class: `link ${hostConnected ? "" : "off"}` }), el("span", { class: "clock mono" }, clock)),
+    el("div", { class: "left" }, el("span", { class: "title" }, title), el("span", { class: "summary" }, summary)),
+    el("div", { class: "right" }, el("span", { class: `link ${hostConnected ? "" : "off"}` }), el("span", { class: "clock mono" }, clock)),
   );
 }
 
-// Horizontal page dots, the current one stretched; none for a single page.
-function scrDots(n, cur) {
-  if (n < 2) return null;
-  return el("span", { class: "scr-dots" }, ...Array.from({ length: n }, (_, i) => el("i", { class: i === cur ? "on" : "" })));
+// The Agent page's title: the name of the computer it shows, as go-dock
+// tells the screen in its hello.
+function scrHostName() {
+  return (state && state.device && state.device.name) || "Agent";
 }
 
-function scrAgentBody(frame, dots) {
+function scrAgentBody(frame) {
   const now = frame.now;
   const sessions = frame.sessions || [];
   const counts = frame.counts || {};
   const summary = SCR_ACTIVE.filter((k) => counts[k]).map((k) => `${STATE_LABEL[k]} ${counts[k]}`).join(" · ")
     || (sessions.length ? "全部完成" : "");
-  const strip = scrStrip("Agent", summary, now, dots);
+  const strip = scrStrip(scrHostName(), summary, now);
 
+  const line = lineItems();
   const usage = el("div", { class: "scr-usage" }, ...["claude", "codex"].map((p) => {
     const u = (frame.usage && frame.usage[p]) || {};
     return el("div", { class: "scr-urow" },
@@ -426,196 +416,86 @@ function scrAgentBody(frame, dots) {
       onclick: () => goTaskPage(1),
     }, ...pages.map((_, i) => el("i", { class: i === previewPage ? "on" : "" }))) : null,
   );
-  return [strip, usage, tasks];
+  return [strip, line.length ? scrLine(line) : null, usage, tasks];
 }
 
-// Function page layout, shared with the firmware (docs/protocol-v1.md §7.1):
-// under the strip a 564x380 area holds the items as cards in a grid.
-const SCR_PAGE_W = 564, SCR_PAGE_H = 380, SCR_CARD_GAP = 12;
+// The line above the usage, shared with the firmware (docs/protocol-v1.md
+// §7.1): the readings three at a time, each its icon, label and reading,
+// then a bar (or a note, like the upload), in its colour, amber or red when
+// its level says so. Up to three share the line evenly. More take turns in
+// groups of three on fixed columns: a group stays SCR_LINE_DWELL ms, then
+// the next slides in from the right over SCR_LINE_SLIDE ms, and after the
+// last the first comes round again. The turning follows the clock rather
+// than the redraws, so new readings never jolt it.
+const SCR_LINE_N = 3, SCR_LINE_DWELL = 6000, SCR_LINE_SLIDE = 500, SCR_LINE_GAP = 12;
+let scrLineIds = "", scrLineStart = 0, scrLineTicking = false;
 
-// Columns and rows for n cards: one row up to three, then 2x2 and 3x2.
-function scrGrid(n) {
-  if (n <= 3) return [Math.max(n, 1), 1];
-  return n === 4 ? [2, 2] : [3, 2];
+function lineItems() { return (state && state.line && state.line.items) || []; }
+
+// How far the line has turned at t, in groups: whole while a group stays,
+// eased in between while the next slides in.
+function scrLineOffset(groups, t) {
+  const period = SCR_LINE_DWELL + SCR_LINE_SLIDE;
+  const e = Math.max(0, t - scrLineStart);
+  const k = Math.floor(e / period) % groups, r = e % period;
+  if (r < SCR_LINE_DWELL) return k;
+  const x = (r - SCR_LINE_DWELL) / SCR_LINE_SLIDE;
+  return k + (x < 0.5 ? 4 * x * x * x : 1 - (-2 * x + 2) ** 3 / 2);
 }
 
-// A page with big meters is a dashboard: they share the top row, the other
-// items (at most four) the row below; without others the big ones fill the
-// page.
-const SCR_DASH_TOP = 236;
-
-function scrFnBody(page, now, dots) {
-  const items = page.items || [];
-  const big = items.filter((it) => it.big).slice(0, 2);
-  if (big.length) {
-    const rest = items.filter((it) => !it.big).slice(0, 4);
-    const top = rest.length ? SCR_DASH_TOP : SCR_PAGE_H;
-    const row = (list, h, card) => el("div", { class: "scr-dash-row", style: `height:${h}px;grid-template-columns:repeat(${list.length},minmax(0,1fr))` }, ...list.map(card));
-    return [scrStrip(page.title, page.summary || "", now, dots, page.error), el("div", { class: "scr-dash" },
-      row(big, top, (it) => scrMeterCard(page, it, "wide")),
-      rest.length ? row(rest, SCR_PAGE_H - top - SCR_CARD_GAP, (it) => (it.kind === "meter" ? scrMeterCard(page, it, "mini") : scrCard(page, it, false))) : null)];
-  }
-  const [cols, rows] = scrGrid(items.length);
-  const w = (SCR_PAGE_W - (cols - 1) * SCR_CARD_GAP) / cols;
-  const h = (SCR_PAGE_H - (rows - 1) * SCR_CARD_GAP) / rows;
-  const grid = items.length
-    ? el("div", { class: "scr-grid", style: `grid-template-columns:repeat(${cols},${w}px);grid-template-rows:repeat(${rows},${h}px)` },
-      ...items.map((it) => scrCard(page, it, rows === 1)))
-    : el("div", { class: "scr-empty" }, el("span", { class: "s" }, "这一页还没有内容"));
-  return [scrStrip(page.title, page.summary || "", now, dots, page.error), grid];
+function scrLineShift(groups, t) {
+  const o = scrLineOffset(groups, t);
+  return `translateX(calc(${-o * 100}% - ${o * SCR_LINE_GAP}px))`;
 }
 
-// A card: its icon (a lamp unless the item names another), label and
-// text. A switch shows on / off and toggles, or with buttons takes only
-// 开 and 关 (the one matching its state stands out); a select takes the
-// next option, coloured by its icon; a stepper is drawn by scrStepper.
-// Cards of kinds the screen does not know show their texts but take no
-// taps.
-function scrCard(page, it, big) {
-  if (it.kind === "stepper") return scrStepper(page, it, big);
-  if (it.kind === "meter") return scrMeterCard(page, it, big ? "big" : "");
-  const sw = it.kind === "switch";
-  const btns = sw && it.buttons;
-  const st = it.busy ? "busy" : !sw ? "plain" : it.on === true ? "on" : it.on === false ? "off" : "unknown";
-  const live = !it.disabled && hostConnected;
-  const icon = SCR_ICONS[it.icon] ? it.icon : "bulb";
-  const content = [
-    el("span", { class: "chip" }, scrIcon(icon, big ? 46 : btns ? 24 : 30, 2)),
-    el("span", { class: "label" }, it.label),
-    el("span", { class: "text" }, it.text),
-  ];
-  const cls = `scr-card ${st} icon-${icon} ${big ? "big" : ""} ${it.disabled ? "disabled" : ""}`;
-  if (btns) {
-    const button = (act, name, lit) => el("button", {
-      type: "button", class: `sw-btn ${act} ${lit ? "lit" : ""}`, disabled: live ? null : "",
-      onclick: () => previewTap(page.id, it, act),
-    }, name);
-    return el("div", { class: `${cls} with-btns` }, ...content, el("span", { class: "sw-btns" },
-      button("on", "开", !it.busy && it.on === true), button("off", "关", !it.busy && it.on === false)));
-  }
-  return el("button", {
-    type: "button", class: cls,
-    disabled: (sw || it.kind === "select") && live ? null : "",
-    onclick: () => previewTap(page.id, it, sw ? "toggle" : "next"),
-  }, ...content);
+function scrLine(items) {
+  const ids = items.map((it) => it.id).join(",");
+  if (ids !== scrLineIds) { scrLineIds = ids; scrLineStart = performance.now(); } // other readings: start over
+  const groups = Math.ceil(items.length / SCR_LINE_N);
+  const cols = groups > 1 ? SCR_LINE_N : items.length;
+  const group = (k) => el("div", { class: "scr-lgroup", style: `grid-template-columns:repeat(${cols},minmax(0,1fr))` },
+    ...items.slice(k * SCR_LINE_N, (k + 1) * SCR_LINE_N).map(scrReading));
+  if (groups < 2) return el("div", { class: "scr-line" }, group(0));
+  // The first group again after the last, for it to slide in from the right.
+  const track = el("div", { class: "track", "data-groups": groups, style: `transform:${scrLineShift(groups, performance.now())}` },
+    ...Array.from({ length: groups }, (_, k) => group(k)), group(0));
+  if (!scrLineTicking) { scrLineTicking = true; requestAnimationFrame(scrLineTick); }
+  return el("div", { class: "scr-line" }, track);
 }
 
-// A stepper card: the value between − and +, its label below; a button
-// at the end of the range is greyed.
-function scrStepper(page, it, big) {
-  const dead = it.disabled || !hostConnected;
-  const step = (act, sign, end) => el("button", {
-    type: "button", class: "step", disabled: dead || end ? "" : null, "aria-label": `${it.label}${sign}`,
-    onclick: () => previewTap(page.id, it, act),
-  }, sign);
-  return el("div", { class: `scr-card stepper ${big ? "big" : ""} ${it.disabled ? "disabled" : ""}` },
-    el("span", { class: "steps" }, step("dec", "−", it.at_min), el("span", { class: "value mono" }, it.text), step("inc", "+", it.at_max)),
-    el("span", { class: "label" }, it.label));
+// Moves the line on screen each frame while it turns; stops when no line
+// has more than one group.
+function scrLineTick() {
+  const track = $("#screen .scr-line .track");
+  if (!track) { scrLineTicking = false; return; }
+  const shift = scrLineShift(Number(track.dataset.groups), performance.now());
+  if (track.style.transform !== shift) track.style.transform = shift;
+  requestAnimationFrame(scrLineTick);
 }
 
-// A meter card takes no taps. size "wide" is a dashboard's big card: icon,
-// label and reading on top, the note and sub below, a chart of its series
-// and the legend of its rows. "mini" is a dashboard's small card: label,
-// reading, sub, then a line or a bar. Otherwise ("" or "big" for a single
-// row of cards): icon, label and sub on top, the reading, a line or a bar.
-// On a movable page the card can be dragged (scrDrag).
-function scrMeterCard(page, it, size) {
-  const icon = SCR_ICONS[it.icon] ? it.icon : "bulb";
-  const cls = `scr-card meter ${size} icon-${icon} ${it.level || ""} ${page.movable ? "movable" : ""}`;
-  const reading = el("span", { class: "reading" }, el("span", { class: "value mono" }, it.text), it.unit ? el("span", { class: "unit" }, it.unit) : null);
-  const sub = it.sub ? el("span", { class: "sub mono" }, it.sub) : null;
-  if (size === "wide") {
-    const series = (it.series || []).filter((s) => (s.hist || []).length > 1);
-    return el("div", { class: cls, "data-page": page.id, "data-item": it.id },
-      el("span", { class: "head" }, scrIcon(icon, 24, 2), el("span", { class: "label" }, it.label), reading),
-      el("span", { class: "note" }, el("span", { class: "n" }, it.note || ""), sub),
-      el("span", { class: "chart" }, series.length ? scrSpark(series) : null),
-      el("span", { class: "legend" }, ...(it.rows || []).map((r) => el("span", { class: "row" },
-        el("i", { style: `background:${SCR_COLORS[r.c] || "var(--c)"}` }), el("span", { class: "l" }, r.label), el("span", { class: "v mono" }, r.text)))));
-  }
-  const hist = (it.hist || []).map(Number);
-  let viz = null;
-  if (hist.length > 1) viz = scrSpark([{ hist }]);
-  else if (it.pct != null) viz = el("span", { class: "mbar" }, el("i", { style: `width:${Math.max(0, Math.min(100, Number(it.pct)))}%` }));
-  if (size === "mini") {
-    return el("div", { class: cls, "data-page": page.id, "data-item": it.id },
-      el("span", { class: "head" }, scrIcon(icon, 18, 2), el("span", { class: "label" }, it.label)), reading, sub, viz);
-  }
-  return el("div", { class: cls, "data-page": page.id, "data-item": it.id },
-    el("span", { class: "head" }, scrIcon(icon, size === "big" ? 28 : 22, 2), el("span", { class: "label" }, it.label), sub),
-    reading, viz);
-}
-
-// The colours a meter's series and rows name.
-const SCR_COLORS = { blue: "#5AA9FF", red: "#F2617A", teal: "#4FD1C5", green: "#3DD68C", orange: "#FF9F43", purple: "#C084FC", gray: "#5C5B57" };
-
-// A meter's chart: SCR_HIST readings fill the width, the newest at the
-// right edge. A single series without a colour is a line in the card's
-// colour over a faint area; named ones are solid areas, the first in
-// front, so a stack of running totals reads as bands.
-const SCR_HIST = 30;
-function scrSpark(series) {
-  let paths = "";
-  for (const s of [...series].reverse()) {
-    const hist = s.hist.map(Number);
-    const off = SCR_HIST - hist.length;
-    const pts = hist.map((v, i) => [((off + i) / (SCR_HIST - 1)) * 100, 38 - Math.max(0, Math.min(100, v)) * 0.36]
-      .map((n) => n.toFixed(2)).join(","));
-    const x0 = pts[0].split(",")[0], x1 = pts.at(-1).split(",")[0];
-    const area = `M${x0},40L${pts.join("L")}L${x1},40Z`;
-    paths += SCR_COLORS[s.c]
-      ? `<path class="band" fill="${SCR_COLORS[s.c]}" d="${area}"/>`
-      : `<path class="area" d="${area}"/><path class="line" d="M${pts.join("L")}" vector-effect="non-scaling-stroke"/>`;
-  }
-  const t = document.createElement("template");
-  t.innerHTML = `<svg class="spark" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true">${paths}</svg>`;
-  return t.content.firstChild;
-}
-
-function fnPages() { return (state && state.pages && state.pages.pages) || []; }
-
-// The pages left to right: Agent first, then the function pages in order.
-function previewIds() { return ["agent", ...fnPages().map((p) => p.id)]; }
-
-function goFn(delta) {
-  const ids = previewIds();
-  const i = Math.max(0, Math.min(ids.length - 1, ids.indexOf(previewFn) + delta));
-  if (ids[i] === previewFn) return;
-  previewFn = ids[i];
-  if (state) renderScreen(state.frame);
+function scrReading(it) {
+  const icon = SCR_ICONS[it.icon] ? it.icon : null;
+  const pct = it.pct == null ? null : Math.max(0, Math.min(100, it.pct));
+  return el("div", { class: `seg icon-${icon || "none"} ${it.level || ""}` },
+    icon && scrIcon(icon, 20, 2),
+    el("span", { class: "l" }, it.label),
+    el("span", { class: "v mono" }, it.text, it.unit ? el("span", { class: "u" }, it.unit) : null),
+    pct === null
+      ? el("span", { class: "sub" }, it.sub || "")
+      : el("span", { class: "bar" }, el("span", { class: "fill", style: `width:${Math.max(pct, 2)}%` })));
 }
 
 function goTaskPage(delta) {
-  if (previewFn !== "agent" || scrTaskPages < 2) return;
+  if (scrTaskPages < 2) return;
   previewPage = (previewPage + delta + scrTaskPages) % scrTaskPages;
   if (state) renderScreen(state.frame);
 }
 
-async function previewTap(pageId, it, act) {
-  if (it.kind === "switch") {
-    it.busy = true; // until the host answers
-    renderScreen(state.frame);
-  }
-  try {
-    state.pages = await api(`/api/plugins/${pageId}/${it.id}`, { method: "POST", body: { act } });
-    showMsg("#preview-msg", "");
-  } catch (e) {
-    showMsg("#preview-msg", e.message, true);
-  }
-  render();
-}
-
 function renderScreen(frame) {
   const screen = $("#screen");
-  if (scrDrag) { scrDrag.stale = true; return; } // a card is held: redraw when it is let go
   if (!frame) { screen.replaceChildren(); return; }
-  const ids = previewIds();
-  if (!ids.includes(previewFn)) previewFn = "agent";
-  const cur = ids.indexOf(previewFn);
-  const page = fnPages().find((p) => p.id === previewFn);
-  const dots = scrDots(ids.length, cur);
-  const body = el("div", { class: `scr-body ${hostConnected ? "" : "dim"}` },
-    ...(page ? scrFnBody(page, frame.now, dots) : scrAgentBody(frame, dots)));
+  const lined = lineItems().length > 0;
+  const body = el("div", { class: `scr-body ${hostConnected ? "" : "dim"} ${lined ? "lined" : ""}` }, ...scrAgentBody(frame));
   const parts = [body];
   if (!hostConnected) {
     parts.push(el("div", { class: "scr-offline" }, el("div", { class: "card" },
@@ -625,22 +505,10 @@ function renderScreen(frame) {
   }
   screen.replaceChildren(...parts);
   fitScreen();
-
-  $("#fn-name").textContent = `${page ? page.title : "Agent"}  ${cur + 1} / ${ids.length}`;
-  $("#fn-prev").disabled = cur === 0;
-  $("#fn-next").disabled = cur === ids.length - 1;
 }
 
-$("#fn-prev").addEventListener("click", () => goFn(-1));
-$("#fn-next").addEventListener("click", () => goFn(1));
-document.addEventListener("keydown", (e) => {
-  if ($("#tab-preview").hidden || e.altKey || e.ctrlKey || e.metaKey || e.target.closest("input, select, textarea")) return;
-  if (e.key === "ArrowLeft") { e.preventDefault(); goFn(-1); }
-  if (e.key === "ArrowRight") { e.preventDefault(); goFn(1); }
-});
-
-// Swipes on the preview, as on the screen: left/right switches pages,
-// up/down turns task pages. A swipe never also taps a card.
+// Swipes up and down on the preview turn task pages, as on the screen. A
+// swipe never also taps the pager.
 {
   const screen = $("#screen");
   let start = null, swallow = false;
@@ -648,107 +516,27 @@ document.addEventListener("keydown", (e) => {
   screen.addEventListener("pointercancel", () => { start = null; });
   screen.addEventListener("pointerup", (e) => {
     if (!start) return;
-    if (scrDrag && scrDrag.lifted) { start = null; return; } // a card was dragged, not the page
     const s = Number(screen.style.getPropertyValue("--s")) || 1;
     const dx = (e.clientX - start.x) / s, dy = (e.clientY - start.y) / s;
     start = null;
     if (Math.max(Math.abs(dx), Math.abs(dy)) < 50) return; // a tap
     swallow = true;
     setTimeout(() => { swallow = false; });
-    if (Math.abs(dx) > Math.abs(dy)) goFn(dx < 0 ? 1 : -1);
-    else goTaskPage(dy < 0 ? 1 : -1);
+    if (Math.abs(dy) > Math.abs(dx)) goTaskPage(dy < 0 ? 1 : -1);
   });
   screen.addEventListener("click", (e) => { if (swallow) { e.preventDefault(); e.stopPropagation(); } }, true);
 }
 
-// Dragging cards on a movable page: drag one onto another and let go, and
-// the two trade places (act "swap"); letting go anywhere else puts it back.
-// A mouse picks a card up as soon as it moves. A finger, as on the screen,
-// holds it for SCR_HOLD ms first, since
-// moving earlier is a swipe between pages. As on the screen, an outline
-// fades in while it is held and turns white when it lifts. The screen does
-// not redraw while a card is held.
-const SCR_HOLD = 500;
-{
-  const screen = $("#screen");
-  const scale = () => Number(screen.style.getPropertyValue("--s")) || 1;
-  const end = (swap) => {
-    const d = scrDrag;
-    scrDrag = null;
-    clearTimeout(d.timer);
-    d.el.classList.remove("holding");
-    if (d.target) d.target.classList.remove("drop");
-    if (swap && d.target) {
-      previewSwap(d.page, d.item, d.target.dataset.item);
-    } else if (d.lifted || d.stale) {
-      renderScreen(state.frame);
-    }
-  };
-  const lift = (d) => {
-    d.lifted = true;
-    d.el.classList.remove("holding");
-    d.el.classList.add("lifted");
-  };
-  screen.addEventListener("pointerdown", (e) => {
-    const card = e.target.closest(".scr-card.movable");
-    if (!card || !hostConnected || scrDrag || e.button > 0) return;
-    const d = scrDrag = { el: card, page: card.dataset.page, item: card.dataset.item, x: e.clientX, y: e.clientY,
-      mouse: e.pointerType === "mouse", lifted: false, target: null, stale: false };
-    screen.setPointerCapture(e.pointerId); // keep the drag when the pointer leaves the screen
-    if (!d.mouse) {
-      card.classList.add("holding");
-      d.timer = setTimeout(() => lift(d), SCR_HOLD);
-    }
-  });
-  screen.addEventListener("pointermove", (e) => {
-    const d = scrDrag;
-    if (!d) return;
-    const dx = (e.clientX - d.x) / scale(), dy = (e.clientY - d.y) / scale();
-    if (!d.lifted) {
-      if (Math.hypot(dx, dy) <= 6) return;
-      if (!d.mouse) {
-        d.el.classList.remove("holding");
-        end(false); // a finger moving early swipes
-        return;
-      }
-      lift(d);
-    }
-    d.el.style.transform = `translate(${dx}px, ${dy}px)`;
-    d.el.style.pointerEvents = "none"; // to see the card under the finger
-    const under = document.elementFromPoint(e.clientX, e.clientY);
-    d.el.style.pointerEvents = "";
-    const t = under && under.closest(".scr-card.movable");
-    const target = t && t !== d.el ? t : null;
-    if (target !== d.target) {
-      if (d.target) d.target.classList.remove("drop");
-      if (target) target.classList.add("drop");
-      d.target = target;
-    }
-  });
-  screen.addEventListener("pointerup", () => { if (scrDrag) end(scrDrag.lifted); });
-  screen.addEventListener("pointercancel", () => { if (scrDrag) end(false); });
-  screen.addEventListener("contextmenu", (e) => { if (scrDrag) e.preventDefault(); }); // a long press on touch screens
-}
-
-async function previewSwap(pageId, item, to) {
-  try {
-    state.pages = await api(`/api/plugins/${pageId}/${item}`, { method: "POST", body: { act: "swap", to } });
-    showMsg("#preview-msg", "");
-  } catch (e) {
-    showMsg("#preview-msg", e.message, true);
-  }
-  render();
-}
-
 function renderDeviceDetail(dev) {
   const dl = $("#device-detail");
-  const fw = el("span", {}, dev.firmware || "—");
+  const fw = el("span", {}, dev.current || dev.firmware || "—");
   if (FLASH_BUSY.includes(dev.flash && dev.flash.state)) fw.append(" · 正在升级");
-  else if (dev.upgradable) fw.append(" ", el("button", { class: "btn small", onclick: applyFirmware }, `升级到 ${dev.target}`));
-  else if (dev.manual) fw.append(" · 需要用 USB 刷一次才能在线升级");
+  else if (dev.upgradable) fw.append(" ", el("button", { class: "btn small", onclick: applyFirmware }, `升级到 ${dev.target}`), dev.confirm ? " · 经 WiFi，需在屏幕上确认" : "");
+  const usb = dev.usb || {};
   const rows = [
-    ["状态", { disabled: "已禁用", searching: "查找中", connected: "已打开串口，等待设备握手", ready: "已连接" }[dev.state] || dev.state],
-    ["串口", dev.port || "—"],
+    ["WiFi", { disabled: "已禁用", unset: "还没设置屏幕地址", searching: "正在连接", connected: "已连上，等待握手", ready: "已连接" }[dev.state] || dev.state],
+    ["屏幕地址", dev.addr || "—"],
+    ["USB 线", { disabled: "已禁用", searching: "未插", connected: "已插上，等待握手", ready: `已插上（${usb.port}）` }[usb.state] || usb.state || "—"],
     ["固件", fw],
     ["分辨率", dev.width ? `${dev.width}×${dev.height}` : "—"],
     ["已发送", `${dev.sent || 0} 帧`],
@@ -756,6 +544,7 @@ function renderDeviceDetail(dev) {
     ["最后收到", ago(dev.last_heard)],
   ];
   if (dev.error) rows.push(["错误", dev.error]);
+  if (usb.error) rows.push(["USB 错误", usb.error]);
   dl.replaceChildren(...rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
 }
 
@@ -774,9 +563,10 @@ function render() {
   renderSessions(state.snapshot);
   renderDevicePill(state.device);
   renderDeviceDetail(state.device || {});
+  renderWiFi(state.device || {});
   renderScreen(state.frame);
   $("#frame-json").textContent = JSON.stringify(state.frame, null, 2);
-  $("#pages-json").textContent = JSON.stringify(state.pages, null, 2);
+  $("#line-json").textContent = JSON.stringify(state.line, null, 2);
   renderPluginsLive();
 }
 
@@ -856,8 +646,7 @@ async function applyUpdate() {
 
 // ---------- device firmware ----------
 
-const FLASH_BUSY = ["downloading", "preparing", "sending", "restarting"];
-const FIRMWARE_HELP = "https://github.com/since2006/go-dock/blob/main/firmware/README.md#方式一直接烧录发布的固件";
+const FLASH_BUSY = ["downloading", "confirming", "preparing", "sending", "restarting"];
 let firmwareClosed = null; // the finished update whose banner was closed
 
 function firmwareDismissed(key) { try { return localStorage.getItem("dismissFirmware") === key; } catch { return false; } }
@@ -878,15 +667,18 @@ function renderFirmwareBanner(dev) {
   const msg = (...c) => el("span", { class: "msg" }, ...c);
   let parts = null;
   let cls = "banner";
+  const wifi = f.via === "wifi";
   if (f.state === "downloading") {
     parts = [msg(`正在下载固件 ${dev.target || ""}…`)];
+  } else if (f.state === "confirming") {
+    parts = [msg(`请在屏幕上点「升级」，确认升级到 ${f.version}（60 秒内不确认就取消）`)];
   } else if (f.state === "preparing") {
     parts = [msg(`正在准备升级固件 ${f.version}，设备在擦除存储，约需 10 秒…`)];
   } else if (f.state === "sending") {
     const pct = f.total ? Math.floor((f.sent * 100) / f.total) : 0;
-    parts = [msg(`正在升级固件 ${f.version}：${pct}%，请勿拔 USB 线`)];
+    parts = [msg(`正在升级固件 ${f.version}：${pct}%，${wifi ? "请勿给屏幕断电" : "请勿拔 USB 线"}`)];
   } else if (f.state === "restarting") {
-    parts = [msg("固件已写入，设备正在重启…")];
+    parts = [msg(wifi ? "固件已写入，屏幕正在重启并重新连接 WiFi…" : "固件已写入，设备正在重启…")];
   } else if (finished && firmwareClosed !== finished) {
     const close = el("button", { class: "btn ghost", onclick: () => { firmwareClosed = finished; render(); } }, "关闭");
     if (f.state === "done") {
@@ -897,15 +689,9 @@ function renderFirmwareBanner(dev) {
     }
   } else if (dev.upgradable && !firmwareDismissed(dev.target)) {
     parts = [
-      msg(`设备固件可以升级到 ${dev.target}（当前 ${dev.firmware}）`),
+      msg(`设备固件可以升级到 ${dev.target}（当前 ${dev.current}）`),
       el("button", { class: "btn primary", onclick: applyFirmware }, "升级固件"),
       firmwareLater(dev.target),
-    ];
-  } else if (dev.manual && !firmwareDismissed(`manual:${dev.target}`)) {
-    parts = [
-      msg(`设备固件 ${dev.firmware} 还不支持在线升级，需要用 USB 刷一次新固件，以后就能在这里升级`),
-      el("a", { href: FIRMWARE_HELP, target: "_blank", rel: "noopener" }, "刷写说明"),
-      firmwareLater(`manual:${dev.target}`),
     ];
   }
   box.hidden = !parts;
@@ -914,7 +700,10 @@ function renderFirmwareBanner(dev) {
 
 async function applyFirmware() {
   const dev = (state && state.device) || {};
-  if (!confirm(`把设备固件升级到 ${dev.target}？大约需要 1 分钟，屏幕会显示进度，期间不要拔 USB 线。`)) return;
+  const ask = dev.confirm
+    ? `通过 WiFi 把屏幕固件升级到 ${dev.target}？屏幕上会先弹出确认，点「升级」后开始，大约需要 1–2 分钟，期间不要给屏幕断电。`
+    : `把设备固件升级到 ${dev.target}？大约需要 1 分钟，屏幕会显示进度，期间不要拔 USB 线。`;
+  if (!confirm(ask)) return;
   firmwareClosed = null;
   try {
     const d = await api("/api/device/firmware", { method: "POST", body: {} });
@@ -1079,6 +868,116 @@ form.addEventListener("submit", async (ev) => {
   }
 });
 
+// ---------- screen WiFi ----------
+
+// The screen joins a WiFi network when told so over the USB cable; it then
+// reports its address and pairing code (state.device.usb.net), which the
+// settings below take.
+const wifiForm = $("#wifi-form");
+function renderWiFi(dev) {
+  const u = dev.usb || {};
+  const usb = u.state === "ready";
+  const n = u.net;
+  let text;
+  if (!usb) {
+    text = "用 USB 线连接屏幕后，可以在这里让屏幕连上 WiFi。";
+  } else if (!n || n.state === "off") {
+    text = "屏幕还没有连 WiFi。填好下面的信息发给屏幕。";
+  } else if (n.state === "connecting") {
+    text = `屏幕正在连接 WiFi「${n.ssid}」…`;
+  } else if (n.state === "failed") {
+    text = `屏幕连不上 WiFi「${n.ssid}」：${n.err || "原因不明"}`;
+  } else {
+    text = `屏幕已连上 WiFi「${n.ssid}」，地址 ${wifiAddr(n)}${n.fixed ? "（固定 IP）" : ""}，配对码 ${n.code}。`;
+  }
+  $("#wifi-status").textContent = text;
+  // Offered while the settings name another screen, or none.
+  const f = form.elements;
+  const other = n && (f["device.addr"].value.trim() !== wifiAddr(n) || f["device.code"].value.trim() !== n.code);
+  $("#wifi-use").hidden = !(usb && n && n.state === "connected" && n.ip && other);
+  $("#wifi-fields").disabled = !usb;
+}
+
+function wifiAddr(n) {
+  return n.port && n.port !== 47322 ? `${n.ip}:${n.port}` : n.ip;
+}
+
+function showWiFiStatic() {
+  $("#wifi-static").hidden = !wifiForm.elements.fixed.checked;
+}
+wifiForm.elements.fixed.addEventListener("change", showWiFiStatic);
+
+async function sendWiFi(body) {
+  try {
+    const dev = await api("/api/device/wifi", { method: "POST", body });
+    wifiForm.elements.pass.value = "";
+    showMsg("#wifi-msg", body.ssid ? "已发给屏幕，正在连接…" : "屏幕已关闭 WiFi");
+    if (state) { state.device = dev; render(); }
+  } catch (e) {
+    showMsg("#wifi-msg", e.message, true);
+  }
+}
+
+wifiForm.addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const f = wifiForm.elements;
+  if (!f.ssid.value.trim()) {
+    showMsg("#wifi-msg", "请填写 WiFi 名称", true);
+    return;
+  }
+  const body = { ssid: f.ssid.value.trim(), pass: f.pass.value };
+  if (f.fixed.checked) Object.assign(body, { ip: f.ip.value.trim(), mask: f.mask.value.trim(), gw: f.gw.value.trim() });
+  sendWiFi(body);
+});
+
+// The screen scans with its own radio, so the list holds what it can join:
+// 2.4 GHz networks in its range.
+function wifiSignal(rssi) {
+  return rssi >= -60 ? "信号强" : rssi >= -75 ? "信号中" : "信号弱";
+}
+
+$("#wifi-scan").addEventListener("click", async () => {
+  const box = $("#wifi-aps");
+  const btn = $("#wifi-scan");
+  btn.disabled = true;
+  box.replaceChildren(el("span", { class: "muted" }, "屏幕正在扫描，约需 3 秒…"));
+  try {
+    const { aps } = await api("/api/device/wifi/scan", { method: "POST", body: {} });
+    $("#wifi-ssids").replaceChildren(...aps.map((a) => el("option", { value: a.ssid })));
+    box.replaceChildren(...(aps.length ? aps.map((a) => el("button", {
+      type: "button", class: "btn ghost",
+      onclick: () => {
+        const f = wifiForm.elements;
+        f.ssid.value = a.ssid;
+        if (a.open) f.pass.value = "";
+        (a.open ? f.ssid : f.pass).focus();
+      },
+    }, `${a.ssid}  · ${wifiSignal(a.rssi)}（${a.rssi} dBm）· ${a.open ? "无密码" : "有密码"}`))
+      : [el("span", { class: "muted" }, "屏幕没有找到 WiFi（只能收到 2.4 GHz 的网络）")]));
+  } catch (e) {
+    box.replaceChildren(el("span", { class: "form-msg err" }, e.message));
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$("#wifi-off").addEventListener("click", () => {
+  if (confirm("让屏幕断开 WiFi 并忘掉 WiFi 设置？之后只能用 USB 连接。")) sendWiFi({ ssid: "" });
+});
+
+$("#wifi-switch").addEventListener("click", async () => {
+  const n = state && state.device && state.device.usb && state.device.usb.net;
+  if (!n) return;
+  try {
+    loadedConfig = await api("/api/config", { method: "POST", body: { device: { addr: wifiAddr(n), code: n.code } } });
+    fillForm(form, loadedConfig);
+    render();
+    showMsg("#wifi-msg", "已保存，go-dock 正通过 WiFi 连接屏幕；之后可以拔掉 USB 线（屏幕要另外供电）");
+  } catch (e) {
+    showMsg("#wifi-msg", e.message, true);
+  }
+});
+
 // Alert sounds come from the host, so the lists and the browser play the
 // same notes as the device. Each sound select names its custom notes field
 // (data-custom).
@@ -1137,10 +1036,7 @@ async function trySound(button) {
       return;
     }
     await api("/api/device/beep", { method: "POST", body });
-    const dev = (state && state.device) || {};
-    showMsg("#settings-msg", volume < 100 && !dev.volume
-      ? "已发到屏幕播放；屏幕固件较旧，按 100% 音量响，升级固件后音量才生效"
-      : "已发到屏幕播放；没接蜂鸣器时听不到");
+    showMsg("#settings-msg", "已发到屏幕播放；没接蜂鸣器时听不到");
   } catch (e) {
     showMsg("#settings-msg", e.message, true);
   }
@@ -1165,209 +1061,17 @@ $("#scan-ports").addEventListener("click", async () => {
 
 // ---------- plugins ----------
 
-const mqttForm = $("#mqtt-form");
-const lightsForm = $("#lights-form");
-const airconForm = $("#aircon-form");
 const perfForm = $("#perf-form");
-
-// Editable list rows: each field is [config key, label, placeholder, type].
-// Inputs use data-k, not name, so the dotted-name form helpers skip them;
-// data-id on the row is the id it was saved under, empty for a new one.
-function rowField(entry, [k, label, ph, type]) {
-  if (type === "checkbox") {
-    return el("label", { class: "check" }, el("input", { type: "checkbox", "data-k": k, checked: entry[k] ? "" : null }), label);
-  }
-  const saved = k === "id" && entry.saved;
-  return el("label", {}, label, el("input", {
-    "data-k": k, value: entry[k] || "", placeholder: ph, type: type || null,
-    readonly: saved ? "" : null, title: saved ? "保存后不能修改：插件用它引用这一项" : null,
-    autocomplete: type === "password" ? "new-password" : "off",
-  }));
-}
-
-function readRow(row) {
-  const out = {};
-  for (const input of row.querySelectorAll("[data-k]")) {
-    const k = input.dataset.k;
-    out[k] = input.type === "checkbox" ? input.checked : input.type === "password" ? input.value : input.value.trim();
-  }
-  return out;
-}
-
-// A fresh id like broker1 or light1 that no row uses yet.
-function nextID(list, prefix) {
-  const ids = new Set([...list.querySelectorAll('[data-k="id"]')].map((i) => i.value));
-  let n = 1;
-  while (ids.has(`${prefix}${n}`)) n++;
-  return `${prefix}${n}`;
-}
-
-// Broker fields, shown three to a row.
-const BROKER_FIELDS = [
-  ["name", "名称", "如：办公室"],
-  ["id", "ID", "小写字母、数字、- 或 _"],
-  ["url", "地址", "192.168.1.10:1883"],
-  ["username", "用户名", ""],
-  ["password", "密码", "", "password"],
-  ["client_id", "Client ID", "留空自动生成"],
-];
-
-// Light fields by config key; lightRow lays them out.
-const LIGHT_FIELDS = Object.fromEntries([
-  ["name", "名称", "如：办公室主灯"],
-  ["id", "ID", "小写字母、数字、- 或 _"],
-  ["command_topic", "命令主题", "如：office/light/set"],
-  ["payload_on", "开灯时发送", 'ON / {"state":"ON"}'],
-  ["payload_off", "关灯时发送", 'OFF / {"state":"OFF"}'],
-  ["state_topic", "状态主题（可选）", "灯回报状态的主题"],
-  ["state_path", "状态字段（可选）", "如 state、params.Onoff"],
-  ["state_on", "表示「开」的状态值", "见上方说明"],
-  ["state_off", "表示「关」的状态值", "见上方说明"],
-  ["query_topic", "查询主题（可选）", "如 office/light/get"],
-  ["query_payload", "查询时发送", '留空 / {"state":""}'],
-].map((f) => [f[0], f]));
-const LIGHT_QUERY_NOTE = "填了查询主题，每次连上 broker 都会发一次查询，让灯回报当前状态。";
-
-// fieldRow lays fields out in n equal columns; fewer fields leave the
-// rest empty, so a lone field lines up with the row above.
-function fieldRow(n, ...fields) {
-  return el("div", { class: "field-row", style: `--n:${n}` }, ...fields);
-}
-
-const savedBrokers = () => (loadedConfig && loadedConfig.mqtt && loadedConfig.mqtt.brokers) || [];
-const brokerLabel = (b) => (b.name || "").trim() || b.id;
 
 async function loadPlugins() {
   try {
     loadedConfig = await api("/api/config");
-    fillForm(lightsForm, loadedConfig);
-    fillForm(airconForm, loadedConfig);
     fillForm(perfForm, loadedConfig);
-    renderBrokerRows(savedBrokers());
-    renderLightRows(loadedConfig.plugins.lights.lights || []);
-    showMsg("#mqtt-msg", "");
-    showMsg("#lights-msg", "");
-    showMsg("#aircon-msg", "");
     showMsg("#perf-msg", "");
   } catch (e) {
-    showMsg("#lights-msg", e.message, true);
+    showMsg("#perf-msg", e.message, true);
   }
 }
-
-function brokerRow(b) {
-  const row = el("div", { class: "light-row", "data-id": b.saved ? b.id : "" },
-    el("div", { class: "head" },
-      el("b", {}, b.saved ? brokerLabel(b) : "新的 broker"),
-      el("span", { class: "pill live" }, b.saved ? "—" : "未保存"),
-      rowField(b, ["enabled", "启用", "", "checkbox"]),
-      el("button", { type: "button", class: "btn small danger", onclick: () => { row.remove(); updateAddButtons(); } }, "删除")),
-    el("div", { class: "grid three" }, ...BROKER_FIELDS.map((f) => rowField(b, f))),
-  );
-  return row;
-}
-
-function renderBrokerRows(list) {
-  $("#broker-list").replaceChildren(...list.map((b) => brokerRow({ ...b, saved: true })));
-  updateAddButtons();
-  renderPluginsLive();
-}
-
-// The broker a light uses. With one broker or none the choice is hidden
-// and an empty value means "the first broker"; with more every light names
-// its own, and a broker that is gone stays visible so it can be changed.
-function fillBrokerSelect(sel, current) {
-  const bs = savedBrokers();
-  const known = bs.some((b) => b.id === current);
-  const hide = bs.length <= 1 && (current === "" || known);
-  const opts = hide ? [[current, ""]] : bs.map((b) => [b.id, brokerLabel(b)]);
-  if (!hide && current && !known) opts.push([current, `${current}（已删除）`]);
-  sel.replaceChildren(...opts.map(([v, t]) => el("option", { value: v }, t)));
-  sel.value = !hide && current === "" && bs.length ? bs[0].id : current;
-  sel.closest("label").hidden = hide;
-}
-
-function lightRow(l, saved) {
-  const field = (k) => rowField({ ...l, saved }, LIGHT_FIELDS[k]);
-  const pick = el("select", { "data-k": "broker" });
-  const row = el("div", { class: "light-row", "data-id": saved ? l.id : "" },
-    el("div", { class: "head" },
-      el("b", {}, l.name || "新的灯"),
-      el("span", { class: "pill live" }, saved ? "—" : "未保存"),
-      el("button", { type: "button", class: "btn small", "data-act": "on" }, "开"),
-      el("button", { type: "button", class: "btn small", "data-act": "off" }, "关"),
-      el("button", { type: "button", class: "btn small danger", onclick: () => { row.remove(); updateAddButtons(); } }, "删除")),
-    fieldRow(3, field("name"), field("id"), el("label", {}, "MQTT broker", pick)),
-    fieldRow(1, field("command_topic")),
-    fieldRow(2, field("payload_on"), field("payload_off")),
-    el("hr"),
-    fieldRow(1, field("state_topic")),
-    fieldRow(3, field("state_path"), field("state_on"), field("state_off")),
-    el("details", {}, el("summary", {}, "更多选项"),
-      el("div", { class: "rows" }, fieldRow(1, field("query_topic")), fieldRow(2, field("query_payload"))),
-      el("small", { class: "muted" }, LIGHT_QUERY_NOTE)),
-  );
-  fillBrokerSelect(pick, l.broker || "");
-  for (const b of row.querySelectorAll("[data-act]")) b.addEventListener("click", () => lightAct(row.dataset.id, b.dataset.act, b));
-  return row;
-}
-
-function renderLightRows(list) {
-  $("#lights-list").replaceChildren(...list.map((l) => lightRow(l, true)));
-  updateAddButtons();
-  renderPluginsLive();
-}
-
-function updateAddButtons() {
-  $("#add-broker").disabled = $("#broker-list").children.length >= 8;
-  $("#add-light").disabled = $("#lights-list").children.length >= 6;
-}
-
-$("#add-broker").addEventListener("click", () => {
-  $("#broker-list").append(brokerRow({ id: nextID($("#broker-list"), "broker"), enabled: true }));
-  updateAddButtons();
-  renderPluginsLive();
-});
-
-$("#add-light").addEventListener("click", () => {
-  $("#lights-list").append(lightRow({ id: nextID($("#lights-list"), "light") }, false));
-  updateAddButtons();
-  renderPluginsLive();
-});
-
-async function lightAct(id, act, btn) {
-  if (!id) return;
-  btn.disabled = true;
-  try {
-    state.pages = await api(`/api/plugins/lights/${id}`, { method: "POST", body: { act } });
-    showMsg("#lights-msg", "");
-  } catch (e) {
-    showMsg("#lights-msg", e.message, true);
-  }
-  render();
-}
-
-mqttForm.addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const brokers = [...$("#broker-list").children].map(readRow);
-  try {
-    loadedConfig = await api("/api/config", { method: "POST", body: { mqtt: { brokers } } });
-    renderBrokerRows(savedBrokers());
-    for (const sel of lightsForm.querySelectorAll('select[data-k="broker"]')) fillBrokerSelect(sel, sel.value);
-    showMsg("#mqtt-msg", "已保存");
-  } catch (e) {
-    showMsg("#mqtt-msg", `保存失败：${e.message}`, true);
-  }
-});
-
-$("#perf-reset").addEventListener("click", async () => {
-  try {
-    loadedConfig = await api("/api/config", { method: "POST", body: { plugins: { perf: { order: [] } } } });
-    showMsg("#perf-msg", "已恢复默认排列");
-  } catch (e) {
-    showMsg("#perf-msg", `恢复失败：${e.message}`, true);
-  }
-  render();
-});
 
 perfForm.addEventListener("submit", async (ev) => {
   ev.preventDefault();
@@ -1380,95 +1084,13 @@ perfForm.addEventListener("submit", async (ev) => {
   render();
 });
 
-airconForm.addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  try {
-    loadedConfig = await api("/api/config", { method: "POST", body: readForm(airconForm) });
-    showMsg("#aircon-msg", "已保存");
-  } catch (e) {
-    showMsg("#aircon-msg", `保存失败：${e.message}`, true);
-  }
-  render();
-});
-
-for (const b of airconForm.querySelectorAll("[data-ac]")) {
-  b.addEventListener("click", async () => {
-    const [item, act] = b.dataset.ac.split(":");
-    b.disabled = true;
-    try {
-      state.pages = await api(`/api/plugins/aircon/${item}`, { method: "POST", body: { act } });
-      showMsg("#aircon-msg", "");
-    } catch (e) {
-      showMsg("#aircon-msg", e.message, true);
-    }
-    render();
-  });
-}
-
-lightsForm.addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const body = readForm(lightsForm);
-  body.plugins.lights.lights = [...$("#lights-list").children].map(readRow);
-  try {
-    loadedConfig = await api("/api/config", { method: "POST", body });
-    renderLightRows(loadedConfig.plugins.lights.lights || []);
-    showMsg("#lights-msg", "已保存");
-  } catch (e) {
-    showMsg("#lights-msg", `保存失败：${e.message}`, true);
-  }
-});
-
-const MQTT_STATE = { disabled: ["未启用", ""], connecting: ["连接中…", "warn"], connected: ["已连接", "ok"], error: ["连接失败", "bad"] };
-const LIGHT_TEXTS_OK = ["已开", "已关", "未知", "切换中…"];
-
 // Live state only: the inputs are left alone so typing is never lost.
 function renderPluginsLive() {
   if (!state) return;
-  const brokers = Array.isArray(state.mqtt) ? state.mqtt : [];
-  const up = brokers.filter((b) => b.state === "connected").length;
-  $("#mqtt-summary").textContent = brokers.length ? `${up} / ${brokers.length} 个已连接` : "";
-  for (const row of $("#broker-list").children) {
-    const b = row.dataset.id ? brokers.find((x) => x.id === row.dataset.id) : null;
-    const live = row.querySelector(".live");
-    const [text, cls] = b ? MQTT_STATE[b.state] || ["—", ""] : ["未保存", ""];
-    live.textContent = b && b.state === "error" && b.error ? `${text}：${b.error}` : text;
-    live.className = `pill live ${cls}`;
-    live.title = b && b.client_id ? `client id：${b.client_id}` : "";
-  }
-
-  const page = fnPages().find((p) => p.id === "lights");
-  $("#lights-summary").textContent = page ? page.summary || "" : "";
-  for (const row of $("#lights-list").children) {
-    const it = page && row.dataset.id ? (page.items || []).find((i) => i.id === row.dataset.id) : null;
-    const live = row.querySelector(".live");
-    if (!row.dataset.id) {
-      live.textContent = "未保存";
-      live.className = "pill live";
-    } else if (!it) {
-      live.textContent = "未启用";
-      live.className = "pill live";
-    } else {
-      live.textContent = it.disabled ? (brokers.length ? "MQTT 未连接" : "没有配置 MQTT") : it.text;
-      live.className = `pill live ${it.disabled || !LIGHT_TEXTS_OK.includes(it.text) ? "bad" : it.busy || it.on === undefined ? "warn" : it.on ? "ok" : ""}`;
-    }
-    for (const b of row.querySelectorAll("[data-act]")) b.disabled = !it || it.disabled;
-  }
-
-  // The air conditioner: what the page says, and its buttons greyed as its
-  // items are (no infrared, temperature held in auto, fan held in dry).
-  const perf = fnPages().find((p) => p.id === "perf");
-  $("#perf-summary").textContent = perf ? perf.summary || "" : "未启用";
-
-  const ac = fnPages().find((p) => p.id === "aircon");
-  $("#aircon-summary").textContent = ac ? ac.summary || "" : "";
-  const acLive = $("#aircon-state");
-  acLive.textContent = !ac ? "未启用" : ac.error || ac.summary || "";
-  acLive.className = `pill live ${!ac ? "" : ac.error ? "bad" : (ac.items || []).some((i) => i.id === "power" && i.on) ? "ok" : ""}`;
-  for (const b of airconForm.querySelectorAll("[data-ac]")) {
-    const [id, act] = b.dataset.ac.split(":");
-    const it = ac && (ac.items || []).find((i) => i.id === id);
-    b.disabled = !it || it.disabled || (act === "dec" && it.at_min) || (act === "inc" && it.at_max);
-  }
+  const line = lineItems();
+  $("#perf-summary").textContent = line.length
+    ? line.map((it) => `${it.label} ${it.text}${it.unit || ""}`).join(" · ")
+    : (loadedConfig && loadedConfig.plugins && loadedConfig.plugins.perf && loadedConfig.plugins.perf.enabled ? "读取中…" : "未启用");
 }
 
 // ---------- logs ----------

@@ -144,8 +144,7 @@ func SoundByID(id string) Sound {
 type Beep struct {
 	T     string `json:"t"`
 	Notes []Note `json:"notes"`
-	// Vol is the volume in percent, left out for full volume. Firmware that
-	// announces "beep":2 plays it; older firmware plays everything at 100.
+	// Vol is the volume in percent, left out for full volume.
 	Vol int `json:"vol,omitempty"`
 }
 

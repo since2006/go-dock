@@ -1,9 +1,6 @@
 package device
 
-import (
-	"errors"
-	"time"
-)
+import "time"
 
 // Screen brightness (docs/protocol-v1.md §3.3): go-dock keeps the setting,
 // the screen decides when to dim (tasks, touch, the link going away) and
@@ -31,13 +28,4 @@ func EncodeSettings(o Options) []byte {
 // sameSettings reports whether a and b send the screen the same settings.
 func sameSettings(a, b Options) bool {
 	return a.Brightness == b.Brightness && a.DimBrightness == b.DimBrightness && a.DimAfter == b.DimAfter
-}
-
-// SettingsReady says why the screen cannot take brightness settings, or
-// nil. A screen that is not connected gets them when it connects.
-func (m *Manager) SettingsReady() error {
-	if st := m.Status(); st.State == StateReady && !st.Settings {
-		return errors.New("屏幕固件不支持调亮度，请先升级固件")
-	}
-	return nil
 }

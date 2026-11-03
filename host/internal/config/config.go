@@ -6,12 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -62,7 +59,6 @@ type Config struct {
 	Display DisplayConfig `json:"display"`
 	Log     LogConfig     `json:"log"`
 	Update  UpdateConfig  `json:"update"`
-	MQTT    MQTTConfig    `json:"mqtt"`
 	Plugins PluginsConfig `json:"plugins"`
 	// Pricing overrides the built-in USD prices per million tokens, keyed by
 	// model name prefix.
@@ -76,8 +72,16 @@ type WebConfig struct {
 
 type DeviceConfig struct {
 	Enabled bool `json:"enabled"`
-	// Port is "auto" or an explicit serial port path such as /dev/cu.usbmodem1101 or COM3.
+	// Addr ("ip" or "ip:port", port 47322 by default) and Code, the
+	// pairing code the screen shows, reach the screen over WiFi.
+	Addr string `json:"addr"`
+	Code string `json:"code"`
+	// Port is the USB cable that sets up the screen's WiFi and updates its
+	// firmware: "auto" or a serial port path such as /dev/cu.usbmodem1101
+	// or COM3.
 	Port string `json:"port"`
+	// Name is this computer's name on the screen; empty uses the hostname.
+	Name string `json:"name"`
 	// Beep sounds the buzzer wired to the screen when a task starts waiting
 	// for the user (approval or an answer); BeepSound picks the melody, an
 	// id from device.Sounds (unknown ids play the default) or "custom" for
@@ -101,13 +105,25 @@ type DeviceConfig struct {
 	Brightness    int      `json:"brightness"`
 	DimBrightness int      `json:"dim_brightness"`
 	DimAfter      Duration `json:"dim_after"`
-	// SettingsPage adds a 屏幕 page to change these and the beep on the
-	// screen itself.
-	SettingsPage bool `json:"settings_page"`
 }
 
+// deviceNameLen bounds DeviceConfig.Name, in runes.
+const deviceNameLen = 12
+
+var pairingCodeRE = regexp.MustCompile(`^[0-9]{6}$`)
+
 func (d DeviceConfig) validate() error {
+	// Both empty: no screen set up yet.
+	addr := strings.TrimSpace(d.Addr)
 	switch {
+	case addr == "" && d.Code != "":
+		return errors.New("请填写屏幕地址")
+	case addr != "" && !pairingCodeRE.MatchString(d.Code):
+		return errors.New("配对码是屏幕上显示的 6 位数字")
+	}
+	switch {
+	case utf8.RuneCountInString(strings.TrimSpace(d.Name)) > deviceNameLen:
+		return fmt.Errorf("本机名称最多 %d 个字", deviceNameLen)
 	case d.Brightness < 10 || d.Brightness > 100:
 		return errors.New("屏幕亮度需在 10%-100% 之间")
 	case d.DimBrightness < 0 || d.DimBrightness > 100:
@@ -155,151 +171,15 @@ type LogConfig struct {
 	Level string `json:"level"` // debug, info, warn, error
 }
 
-// MQTTConfig lists the brokers plugins can use; each keeps its own
-// connection and plugins refer to one by id.
-type MQTTConfig struct {
-	Brokers List[Broker] `json:"brokers"`
-}
-
-// MaxBrokers bounds the connections go-dock keeps open.
-const MaxBrokers = 8
-
-type Broker struct {
-	// ID is how plugins refer to the broker; the web UI fixes it once
-	// saved.
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"`
-	// URL is mqtt://host:1883, mqtts://host:8883, ws:// or wss://; a bare
-	// host[:port] means mqtt://.
-	URL      string `json:"url"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	// ClientID defaults to go-dock-<host>-<random>.
-	ClientID string `json:"client_id"`
-}
-
-// Label names the broker in messages: its name, else its id.
-func (b Broker) Label() string {
-	if n := strings.TrimSpace(b.Name); n != "" {
-		return n
-	}
-	return b.ID
-}
-
-// BrokerFor resolves a plugin's broker reference: an empty id means the
-// first broker. It returns "" when there is none.
-func (m MQTTConfig) BrokerFor(id string) string {
-	if id == "" && len(m.Brokers) > 0 {
-		return m.Brokers[0].ID
-	}
-	return id
-}
-
-// PluginsConfig holds one section per function-page plugin.
+// PluginsConfig holds one section per plugin of the Agent page's line.
 type PluginsConfig struct {
-	Lights LightsConfig `json:"lights"`
-	Aircon AirconConfig `json:"aircon"`
-	Perf   PerfConfig   `json:"perf"`
+	Perf PerfConfig `json:"perf"`
 }
 
-// PerfConfig is the 性能 page: the computer's CPU, GPU, memory, fans,
-// network and disk.
+// PerfConfig is 性能: the computer's CPU, GPU, memory, fans, network and
+// disk in the line.
 type PerfConfig struct {
 	Enabled bool `json:"enabled"`
-	// Order lists the cards by id, the first two big; the screen and the
-	// web preview reorder them by dragging. Unknown ids are skipped and
-	// missing ones follow in their usual order.
-	Order []string `json:"order,omitempty"`
-}
-
-func (p PerfConfig) validate() error {
-	seen := map[string]bool{}
-	for _, id := range p.Order {
-		if !pageID.MatchString(id) || seen[id] {
-			return fmt.Errorf("性能页的排列有误：%q", id)
-		}
-		seen[id] = true
-	}
-	return nil
-}
-
-var pageID = regexp.MustCompile(`^[a-z0-9_-]{1,16}$`)
-
-// AirconConfig is the air conditioner page: a Gree unit the screen
-// switches by infrared.
-type AirconConfig struct {
-	Enabled bool `json:"enabled"`
-	// Name is the page title, at most 8 characters.
-	Name string `json:"name"`
-	// Model is the Gree remote to imitate: yaw1f (most) or ybofb.
-	Model string `json:"model"`
-}
-
-func (a AirconConfig) validate() error {
-	if utf8.RuneCountInString(strings.TrimSpace(a.Name)) > 8 {
-		return errors.New("空调名称最多 8 个字")
-	}
-	switch a.Model {
-	case "", "yaw1f", "ybofb":
-	default:
-		return fmt.Errorf("不认识的格力遥控器型号 %q", a.Model)
-	}
-	return nil
-}
-
-type LightsConfig struct {
-	Enabled bool        `json:"enabled"`
-	Lights  List[Light] `json:"lights"`
-}
-
-// MaxLights is what the lights page fits on the screen.
-const MaxLights = 6
-
-// Light is one lamp switched over MQTT. Empty payloads mean "ON"/"OFF";
-// empty state values mean the payloads.
-type Light struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	// Broker is the id of the MQTT broker the lamp is on; empty means the
-	// first one.
-	Broker       string `json:"broker"`
-	CommandTopic string `json:"command_topic"`
-	PayloadOn    string `json:"payload_on"`
-	PayloadOff   string `json:"payload_off"`
-	// StateTopic reports the lamp's state; without one the last command
-	// sent counts as the state.
-	StateTopic string `json:"state_topic"`
-	// StatePath picks the state out of a JSON payload (gjson syntax, such
-	// as "state" or "POWER1"); empty compares the whole payload.
-	StatePath string `json:"state_path"`
-	StateOn   string `json:"state_on"`
-	StateOff  string `json:"state_off"`
-	// QueryTopic, if set, gets QueryPayload on every connect so the lamp
-	// reports its state.
-	QueryTopic   string `json:"query_topic"`
-	QueryPayload string `json:"query_payload"`
-}
-
-// List is a config array that replaces itself on decode instead of
-// decoding into the old elements, so a shorter list, or an entry without
-// some keys, keeps nothing from before. It is written as [] when empty.
-type List[T any] []T
-
-func (l *List[T]) UnmarshalJSON(b []byte) error {
-	var fresh []T
-	if err := json.Unmarshal(b, &fresh); err != nil {
-		return err
-	}
-	*l = fresh
-	return nil
-}
-
-func (l List[T]) MarshalJSON() ([]byte, error) {
-	if l == nil {
-		return []byte("[]"), nil
-	}
-	return json.Marshal([]T(l))
 }
 
 // Price is USD per million tokens.
@@ -316,7 +196,7 @@ func Default() Config {
 		Web: WebConfig{Listen: DefaultListen, OpenBrowser: true},
 		Device: DeviceConfig{
 			Enabled: true, Port: "auto", Beep: true, BeepSound: "chime", BeepDoneSound: "rise", Volume: 100,
-			Brightness: 80, DimBrightness: 20, DimAfter: Duration(5 * time.Minute), SettingsPage: true,
+			Brightness: 80, DimBrightness: 20, DimAfter: Duration(5 * time.Minute),
 		},
 		Claude: ClaudeConfig{Enabled: true},
 		Codex: CodexConfig{
@@ -329,13 +209,9 @@ func Default() Config {
 			StaleAfter:  Duration(12 * time.Hour),
 			MaxSessions: 12,
 		},
-		Log:    LogConfig{Level: "info"},
-		Update: UpdateConfig{AutoCheck: true},
-		MQTT:   MQTTConfig{Brokers: List[Broker]{}},
-		Plugins: PluginsConfig{
-			Lights: LightsConfig{Lights: List[Light]{}},
-			Aircon: AirconConfig{Name: "空调", Model: "yaw1f"},
-		},
+		Log:     LogConfig{Level: "info"},
+		Update:  UpdateConfig{AutoCheck: true},
+		Plugins: PluginsConfig{},
 	}
 }
 
@@ -345,9 +221,6 @@ func (c Config) Clone() Config {
 	if c.Pricing != nil {
 		c.Pricing = maps.Clone(c.Pricing)
 	}
-	c.MQTT.Brokers = slices.Clone(c.MQTT.Brokers)
-	c.Plugins.Lights.Lights = slices.Clone(c.Plugins.Lights.Lights)
-	c.Plugins.Perf.Order = slices.Clone(c.Plugins.Perf.Order)
 	return c
 }
 
@@ -376,129 +249,7 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("未知日志级别 %q", c.Log.Level)
 	}
-	if err := c.MQTT.validate(); err != nil {
-		return err
-	}
-	if err := c.Plugins.Lights.validate(c.MQTT); err != nil {
-		return err
-	}
-	if err := c.Plugins.Aircon.validate(); err != nil {
-		return err
-	}
-	return c.Plugins.Perf.validate()
-}
-
-// configID is what broker and light ids look like; the screen protocol
-// takes light ids as they are.
-var configID = regexp.MustCompile(`^[a-z0-9_-]{1,16}$`)
-
-func (m MQTTConfig) validate() error {
-	if len(m.Brokers) > MaxBrokers {
-		return fmt.Errorf("最多 %d 个 MQTT broker", MaxBrokers)
-	}
-	seen := map[string]bool{}
-	for i, b := range m.Brokers {
-		where := fmt.Sprintf("第 %d 个 broker", i+1)
-		switch {
-		case !configID.MatchString(b.ID):
-			return fmt.Errorf("%s的 id %q 只能用小写字母、数字、- 和 _，最长 16 位", where, b.ID)
-		case seen[b.ID]:
-			return fmt.Errorf("broker 的 id %q 重复", b.ID)
-		case utf8.RuneCountInString(b.Name) > 24:
-			return fmt.Errorf("%s的名称不能超过 24 个字", where)
-		case len(b.ClientID) > 64:
-			return fmt.Errorf("%s的 client id 不能超过 64 字节", where)
-		}
-		seen[b.ID] = true
-		if b.Enabled || strings.TrimSpace(b.URL) != "" {
-			if _, err := BrokerURL(b.URL); err != nil {
-				return fmt.Errorf("%s「%s」：%w", where, b.Label(), err)
-			}
-		}
-	}
 	return nil
-}
-
-func (l LightsConfig) validate(m MQTTConfig) error {
-	if len(l.Lights) > MaxLights {
-		return fmt.Errorf("最多 %d 盏灯", MaxLights)
-	}
-	seen := map[string]bool{}
-	for i, x := range l.Lights {
-		where := fmt.Sprintf("第 %d 盏灯", i+1)
-		switch {
-		case !configID.MatchString(x.ID):
-			return fmt.Errorf("%s的 id %q 只能用小写字母、数字、- 和 _，最长 16 位", where, x.ID)
-		case seen[x.ID]:
-			return fmt.Errorf("灯的 id %q 重复", x.ID)
-		case strings.TrimSpace(x.Name) == "":
-			return fmt.Errorf("%s缺少名称", where)
-		case utf8.RuneCountInString(x.Name) > 24:
-			return fmt.Errorf("%s的名称不能超过 24 个字", where)
-		case x.CommandTopic == "":
-			return fmt.Errorf("%s缺少命令主题", where)
-		case x.Broker != "" && !slices.ContainsFunc(m.Brokers, func(b Broker) bool { return b.ID == x.Broker }):
-			return fmt.Errorf("「%s」用的 MQTT broker %q 不存在（删除 broker 前先把用它的灯改到别的 broker）", x.Name, x.Broker)
-		}
-		seen[x.ID] = true
-		for _, t := range [][2]string{{"命令主题", x.CommandTopic}, {"状态主题", x.StateTopic}, {"查询主题", x.QueryTopic}} {
-			if strings.ContainsAny(t[1], "+#\x00") {
-				return fmt.Errorf("%s的%s不能包含通配符 + 或 #", where, t[0])
-			}
-			if len(t[1]) > 256 {
-				return fmt.Errorf("%s的%s太长", where, t[0])
-			}
-		}
-		for _, v := range []string{x.PayloadOn, x.PayloadOff, x.StatePath, x.StateOn, x.StateOff, x.QueryPayload} {
-			if len(v) > 256 {
-				return fmt.Errorf("%s的负载或状态值太长（最多 256 字节）", where)
-			}
-		}
-	}
-	return nil
-}
-
-// BrokerURL normalizes an MQTT broker address: a bare host[:port] means
-// mqtt://, and plain and TLS brokers get the default port when it is left
-// out.
-func BrokerURL(raw string) (string, error) {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return "", errors.New("broker 地址不能为空")
-	}
-	if !strings.Contains(s, "://") {
-		s = "mqtt://" + s
-	}
-	u, err := url.Parse(s)
-	if err != nil {
-		return "", fmt.Errorf("broker 地址格式不对: %w", err)
-	}
-	u.Scheme = strings.ToLower(u.Scheme)
-	port := ""
-	switch u.Scheme {
-	case "mqtt", "tcp":
-		port = "1883"
-	case "mqtts", "ssl", "tls":
-		port = "8883"
-	case "ws", "wss":
-	default:
-		return "", fmt.Errorf("broker 地址不支持 %s://，请用 mqtt://、mqtts://、ws:// 或 wss://", u.Scheme)
-	}
-	switch {
-	case u.User != nil:
-		return "", errors.New("broker 地址里不要写用户名和密码，请填在对应的输入框里")
-	case u.Hostname() == "":
-		return "", errors.New("broker 地址缺少主机名")
-	case port != "" && (strings.Trim(u.Path, "/") != "" || u.RawQuery != ""):
-		return "", errors.New("broker 地址只需要主机和端口，不能带路径")
-	}
-	if port != "" {
-		u.Path, u.RawPath = "", ""
-		if u.Port() == "" {
-			u.Host = net.JoinHostPort(u.Hostname(), port)
-		}
-	}
-	return u.String(), nil
 }
 
 // Dir returns the directory holding config.json and logs. GO_DOCK_HOME

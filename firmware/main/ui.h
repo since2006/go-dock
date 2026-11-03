@@ -1,5 +1,5 @@
-// The screen: the Agent page and the function pages to its right
-// (docs/protocol-v1.md §7.1).
+// The screen: the Agent page with the line of readings above the usage,
+// and the card over it (docs/protocol-v1.md §7.1).
 #pragma once
 
 #include <stdint.h>
@@ -12,7 +12,7 @@ void ui_create(void);
 void ui_poll(void);
 
 // Brightness the UI wants right now, 0-255. Call it before each
-// lv_timer_handler: a tap on a screen it left dim only wakes it up.
+// lv_timer_handler.
 uint8_t ui_brightness(void);
 
 // Called by the touch driver on every press; wakes a dimmed screen.

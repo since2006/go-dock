@@ -16,7 +16,6 @@ import (
 	"github.com/since2006/go-dock/host/internal/config"
 	"github.com/since2006/go-dock/host/internal/logx"
 	"github.com/since2006/go-dock/host/internal/model"
-	"github.com/since2006/go-dock/host/internal/plugins"
 	"github.com/since2006/go-dock/host/internal/providers"
 )
 
@@ -25,9 +24,9 @@ type fakeBackend struct {
 	ingests   []string
 	autostart bool
 	flashing  bool
-	actions   []model.Action
 	beeps     [][][2]int
 	volumes   []int
+	wifi      []WiFi
 }
 
 func (f *fakeBackend) Snapshot() model.Snapshot             { return model.Snapshot{} }
@@ -50,6 +49,19 @@ func (f *fakeBackend) DeviceStatus() any         { return map[string]string{"sta
 func (f *fakeBackend) DeviceFrame() any          { return nil }
 func (f *fakeBackend) DevicePorts() (any, error) { return []string{}, nil }
 func (f *fakeBackend) ReconnectDevice()          {}
+func (f *fakeBackend) DeviceWiFiScan(ctx context.Context) (any, error) {
+	if f.cfg.Device.Port == "none" {
+		return nil, errors.New("屏幕未连接")
+	}
+	return []map[string]any{{"ssid": "home", "rssi": -48}, {"ssid": "cafe", "rssi": -80, "open": true}}, nil
+}
+func (f *fakeBackend) DeviceWiFi(w WiFi) error {
+	if w.SSID == "busy" {
+		return errors.New("屏幕未连接")
+	}
+	f.wifi = append(f.wifi, w)
+	return nil
+}
 func (f *fakeBackend) ApplyFirmware() error {
 	if f.flashing {
 		return errors.New("固件正在升级")
@@ -65,8 +77,7 @@ func (f *fakeBackend) SetAutostart(on bool) error {
 	f.autostart = on
 	return nil
 }
-func (f *fakeBackend) DevicePages() any { return map[string]any{"t": "pages", "n": len(f.actions)} }
-func (f *fakeBackend) MQTTStatus() any  { return map[string]string{"state": "disabled"} }
+func (f *fakeBackend) DeviceLine() any { return map[string]any{"t": "line", "items": []any{}} }
 func (f *fakeBackend) DeviceSounds() any {
 	return []map[string]string{{"id": "chime", "name": "叮咚"}}
 }
@@ -88,20 +99,6 @@ func (f *fakeBackend) DeviceBeep(notes [][2]int, volume int) error {
 	}
 	f.beeps = append(f.beeps, notes)
 	f.volumes = append(f.volumes, volume)
-	return nil
-}
-func (f *fakeBackend) PluginAction(ctx context.Context, a model.Action) error {
-	switch {
-	case a.Page == "aircon" && a.Item == "temp" && (a.Act == model.ActInc || a.Act == model.ActDec):
-	case a.Page == "perf" && a.Act == model.ActSwap:
-	case a.Page != "lights" || a.Item != "main":
-		return plugins.ErrNotFound
-	case a.Act != model.ActOn && a.Act != model.ActOff && a.Act != model.ActToggle:
-		return plugins.ErrBadAct
-	case a.Act == model.ActOff:
-		return errors.New("MQTT 未连接")
-	}
-	f.actions = append(f.actions, a)
 	return nil
 }
 
@@ -181,88 +178,23 @@ func TestConfigSave(t *testing.T) {
 	}
 }
 
-func TestConfigSaveAircon(t *testing.T) {
+func TestConfigSavePerf(t *testing.T) {
 	b, h := newTestServer("127.0.0.1:47321")
 	host := "127.0.0.1:47321"
-	if w := do(h, "POST", host, "/api/config", "application/json", `{"plugins":{"aircon":{"enabled":true,"name":"会议室","model":"ybofb"}}}`); w.Code != http.StatusOK {
+	if w := do(h, "POST", host, "/api/config", "application/json", `{"plugins":{"perf":{"enabled":true}}}`); w.Code != http.StatusOK {
 		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}
-	if a := b.cfg.Plugins.Aircon; !a.Enabled || a.Name != "会议室" || a.Model != "ybofb" || b.cfg.Plugins.Lights.Lights == nil {
-		t.Fatalf("aircon %+v", b.cfg.Plugins)
-	}
-	if w := do(h, "POST", host, "/api/config", "application/json", `{"plugins":{"aircon":{"model":"nope"}}}`); w.Code != http.StatusBadRequest {
-		t.Fatalf("bad model: %d", w.Code)
-	}
-	// The stepper's acts reach the plugin as they are.
-	if w := do(h, "POST", host, "/api/plugins/aircon/temp", "application/json", `{"act":"inc"}`); w.Code != http.StatusOK {
-		t.Fatalf("inc: %d %s", w.Code, w.Body.String())
-	}
-	if n := len(b.actions); n != 1 || b.actions[0] != (model.Action{Page: "aircon", Item: "temp", Act: "inc"}) {
-		t.Fatalf("actions %+v", b.actions)
+	if !b.cfg.Plugins.Perf.Enabled {
+		t.Fatalf("perf %+v", b.cfg.Plugins)
 	}
 }
 
-func TestConfigSaveLights(t *testing.T) {
-	b, h := newTestServer("127.0.0.1:47321")
-	two := `{"plugins":{"lights":{"enabled":true,"lights":[
-		{"id":"main","name":"主灯","command_topic":"a/set","state_topic":"a/state","state_path":"state"},
-		{"id":"desk","name":"台灯","command_topic":"b/set"}]}}}`
-	if w := do(h, "POST", "127.0.0.1:47321", "/api/config", "application/json", two); w.Code != http.StatusOK {
-		t.Fatalf("save: %d %s", w.Code, w.Body.String())
-	}
-	// A shorter list whose first light omits keys replaces the whole list.
-	one := `{"plugins":{"lights":{"lights":[{"id":"desk","name":"台灯","command_topic":"b/set"}]}}}`
-	if w := do(h, "POST", "127.0.0.1:47321", "/api/config", "application/json", one); w.Code != http.StatusOK {
-		t.Fatalf("save: %d %s", w.Code, w.Body.String())
-	}
-	ls := b.cfg.Plugins.Lights
-	if !ls.Enabled || len(ls.Lights) != 1 || ls.Lights[0] != (config.Light{ID: "desk", Name: "台灯", CommandTopic: "b/set"}) {
-		t.Fatalf("lights %+v", ls)
-	}
-	bad := `{"plugins":{"lights":{"lights":[{"id":"Main","name":"x","command_topic":"a"}]}}}`
-	if w := do(h, "POST", "127.0.0.1:47321", "/api/config", "application/json", bad); w.Code != http.StatusBadRequest {
-		t.Fatalf("bad id: %d", w.Code)
-	}
-	if len(b.cfg.Plugins.Lights.Lights) != 1 || b.cfg.Plugins.Lights.Lights[0].ID != "desk" {
-		t.Fatalf("rejected save changed the config: %+v", b.cfg.Plugins.Lights)
-	}
-}
-
-func TestPluginAction(t *testing.T) {
-	b, h := newTestServer("127.0.0.1:47321")
+// The state carries the line the screen gets, for the preview.
+func TestStateLine(t *testing.T) {
+	_, h := newTestServer("127.0.0.1:47321")
 	host := "127.0.0.1:47321"
-	w := do(h, "POST", host, "/api/plugins/lights/main", "application/json", `{"act":"toggle"}`)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"n":1`) {
-		t.Fatalf("toggle: %d %s", w.Code, w.Body.String())
-	}
-	if len(b.actions) != 1 || b.actions[0] != (model.Action{Page: "lights", Item: "main", Act: "toggle"}) {
-		t.Fatalf("actions %+v", b.actions)
-	}
-	// A card dropped on another names it in to.
-	if w := do(h, "POST", host, "/api/plugins/perf/mem", "application/json", `{"act":"swap","to":"gpu"}`); w.Code != http.StatusOK {
-		t.Fatalf("swap: %d %s", w.Code, w.Body.String())
-	}
-	if b.actions[1] != (model.Action{Page: "perf", Item: "mem", Act: "swap", To: "gpu"}) {
-		t.Fatalf("swap action %+v", b.actions[1])
-	}
-	for _, tc := range []struct {
-		path, body string
-		code       int
-	}{
-		{"/api/plugins/lights/nope", `{"act":"on"}`, http.StatusNotFound},
-		{"/api/plugins/lights/main", `{"act":"dim"}`, http.StatusBadRequest},
-		{"/api/plugins/lights/main", `not json`, http.StatusBadRequest},
-		{"/api/plugins/lights/main", `{"act":"off"}`, http.StatusBadGateway},
-	} {
-		if w := do(h, "POST", host, tc.path, "application/json", tc.body); w.Code != tc.code {
-			t.Errorf("%s %s: %d, want %d", tc.path, tc.body, w.Code, tc.code)
-		}
-	}
-	if w := do(h, "POST", host, "/api/plugins/lights/main", "text/plain", `{"act":"on"}`); w.Code != http.StatusUnsupportedMediaType {
-		t.Fatalf("text/plain: %d", w.Code)
-	}
-	w = do(h, "GET", host, "/api/state", "", "")
-	if !strings.Contains(w.Body.String(), `"pages":{`) || !strings.Contains(w.Body.String(), `"mqtt":{"state":"disabled"}`) {
+	w := do(h, "GET", host, "/api/state", "", "")
+	if !strings.Contains(w.Body.String(), `"line":{"items":[],"t":"line"}`) || strings.Contains(w.Body.String(), `"pages"`) {
 		t.Fatalf("state: %s", w.Body.String())
 	}
 }
@@ -361,5 +293,40 @@ func TestShutdownEndsEventStreams(t *testing.T) {
 	}
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("shutdown took %v with an open event stream", d)
+	}
+}
+
+func TestWiFi(t *testing.T) {
+	b, h := newTestServer("127.0.0.1:47321")
+	host := "127.0.0.1:47321"
+	body := `{"ssid":"home","pass":"secret123","ip":"192.168.1.50","mask":"255.255.255.0","gw":"192.168.1.1"}`
+	if w := do(h, "POST", host, "/api/device/wifi", "application/json", body); w.Code != http.StatusOK || len(b.wifi) != 1 {
+		t.Fatalf("wifi: %d %s", w.Code, w.Body.String())
+	}
+	if got := b.wifi[0]; got != (WiFi{SSID: "home", Pass: "secret123", IP: "192.168.1.50", Mask: "255.255.255.0", GW: "192.168.1.1"}) {
+		t.Fatalf("passed %+v", got)
+	}
+	if w := do(h, "POST", host, "/api/device/wifi", "application/json", `{"ssid":"busy"}`); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "屏幕未连接") {
+		t.Fatalf("refused: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(h, "POST", host, "/api/device/wifi", "application/json", `nope`); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad body: %d", w.Code)
+	}
+	// Same guard as every other write: another site cannot set the WiFi.
+	if w := do(h, "POST", host, "/api/device/wifi", "application/json", body, "Sec-Fetch-Site", "cross-site"); w.Code != http.StatusForbidden || len(b.wifi) != 1 {
+		t.Fatalf("cross-site: %d", w.Code)
+	}
+}
+
+func TestWiFiScan(t *testing.T) {
+	b, h := newTestServer("127.0.0.1:47321")
+	host := "127.0.0.1:47321"
+	w := do(h, "POST", host, "/api/device/wifi/scan", "application/json", `{}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"aps":[{"rssi":-48,"ssid":"home"}`) {
+		t.Fatalf("scan: %d %s", w.Code, w.Body.String())
+	}
+	b.cfg.Device.Port = "none"
+	if w := do(h, "POST", host, "/api/device/wifi/scan", "application/json", `{}`); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "屏幕未连接") {
+		t.Fatalf("no screen: %d %s", w.Code, w.Body.String())
 	}
 }

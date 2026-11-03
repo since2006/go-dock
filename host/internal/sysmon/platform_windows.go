@@ -21,14 +21,14 @@ func newPlatform() platform {
 	return p
 }
 
-func (*win) fans(context.Context) []Fan { return nil }
+func (*win) fans(context.Context) []float64 { return nil }
 
 // memory: gopsutil's Used is what Task Manager shows as 正在使用.
 func (*win) memory(context.Context, *Memory) {}
 
-func (w *win) gpu(ctx context.Context) GPU {
+func (w *win) gpu(ctx context.Context) float64 {
 	if w.smi == "" {
-		return NoGPU
+		return -1
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -37,7 +37,7 @@ func (w *win) gpu(ctx context.Context) GPU {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 	out, err := cmd.Output()
 	if err != nil {
-		return NoGPU
+		return -1
 	}
 	return nvidiaSMI(out)
 }

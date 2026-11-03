@@ -20,7 +20,6 @@ import (
 	"github.com/since2006/go-dock/host/internal/ingest"
 	"github.com/since2006/go-dock/host/internal/logx"
 	"github.com/since2006/go-dock/host/internal/model"
-	"github.com/since2006/go-dock/host/internal/plugins"
 	"github.com/since2006/go-dock/host/internal/providers"
 )
 
@@ -37,9 +36,10 @@ type Backend interface {
 	Integration(name, action string) error
 	Ingest(provider, kind string, body []byte) error
 	DeviceStatus() any
+	// DeviceFrame and DeviceLine are the snapshot and line messages the
+	// device gets now, for the preview.
 	DeviceFrame() any
-	// DevicePages is the pages message the device gets now.
-	DevicePages() any
+	DeviceLine() any
 	DevicePorts() (any, error)
 	// DeviceSounds lists the built-in alert sounds. SoundNotes gives the
 	// notes of one, or of custom notes as written in the settings; DeviceBeep
@@ -48,6 +48,10 @@ type Backend interface {
 	DeviceSounds() any
 	SoundNotes(sound, custom string) ([][2]int, error)
 	DeviceBeep(notes [][2]int, volume int) error
+	// DeviceWiFi tells the screen, linked over USB, which WiFi to join;
+	// DeviceWiFiScan asks it which networks it sees.
+	DeviceWiFi(WiFi) error
+	DeviceWiFiScan(ctx context.Context) (any, error)
 	ReconnectDevice()
 	ApplyFirmware() error
 	UpdateStatus() any
@@ -55,10 +59,16 @@ type Backend interface {
 	ApplyUpdate() error
 	System() any
 	SetAutostart(enabled bool) error
-	MQTTStatus() any
-	// PluginAction handles a tap on a function page item, like the
-	// device's action message.
-	PluginAction(ctx context.Context, a model.Action) error
+}
+
+// WiFi is what the screen should join (POST /api/device/wifi): an empty
+// SSID turns its WiFi off, an empty IP takes an address by DHCP.
+type WiFi struct {
+	SSID string `json:"ssid"`
+	Pass string `json:"pass"`
+	IP   string `json:"ip"`
+	Mask string `json:"mask"`
+	GW   string `json:"gw"`
 }
 
 type Server struct {
@@ -90,19 +100,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/integrations", s.getIntegrations)
 	mux.HandleFunc("POST /api/integrations/{name}/{action}", s.postIntegration)
 	mux.HandleFunc("GET /api/device/ports", s.getPorts)
-	mux.HandleFunc("GET /api/device/frame", s.getFrame)
-	mux.HandleFunc("GET /api/device/pages", s.getPages)
 	mux.HandleFunc("GET /api/device/sounds", s.getSounds)
 	mux.HandleFunc("POST /api/device/beep", s.postBeep)
 	mux.HandleFunc("POST /api/device/notes", s.postNotes)
 	mux.HandleFunc("POST /api/device/reconnect", s.postReconnect)
+	mux.HandleFunc("POST /api/device/wifi", s.postWiFi)
+	mux.HandleFunc("POST /api/device/wifi/scan", s.postWiFiScan)
 	mux.HandleFunc("POST /api/device/firmware", s.postFirmware)
 	mux.HandleFunc("POST /api/ingest/{provider}/{kind}", s.postIngest)
 	mux.HandleFunc("GET /api/system", s.getSystem)
 	mux.HandleFunc("POST /api/autostart", s.postAutostart)
 	mux.HandleFunc("POST /api/update/check", s.postUpdateCheck)
 	mux.HandleFunc("POST /api/update/apply", s.postUpdateApply)
-	mux.HandleFunc("POST /api/plugins/{page}/{item}", s.postPluginAction)
 	return guard(s.listen, mux)
 }
 
@@ -189,8 +198,7 @@ type statePayload struct {
 	Snapshot model.Snapshot `json:"snapshot"`
 	Device   any            `json:"device"`
 	Frame    any            `json:"frame"`
-	Pages    any            `json:"pages"`
-	MQTT     any            `json:"mqtt"`
+	Line     any            `json:"line"`
 	Update   any            `json:"update"`
 }
 
@@ -200,8 +208,7 @@ func (s *Server) state() statePayload {
 		Snapshot: s.backend.Snapshot(),
 		Device:   s.backend.DeviceStatus(),
 		Frame:    s.backend.DeviceFrame(),
-		Pages:    s.backend.DevicePages(),
-		MQTT:     s.backend.MQTTStatus(),
+		Line:     s.backend.DeviceLine(),
 		Update:   s.backend.UpdateStatus(),
 	}
 }
@@ -266,10 +273,6 @@ func (s *Server) getPorts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ports)
 }
 
-func (s *Server) getFrame(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.backend.DeviceFrame())
-}
-
 func (s *Server) getSounds(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.backend.DeviceSounds())
 }
@@ -328,6 +331,34 @@ func (s *Server) postReconnect(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.backend.DeviceStatus())
 }
 
+// postWiFi passes the WiFi settings to the screen. The password goes
+// through once: it is neither logged nor kept.
+func (s *Server) postWiFi(w http.ResponseWriter, r *http.Request) {
+	var body WiFi
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.backend.DeviceWiFi(body); err != nil {
+		writeErr(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.backend.DeviceStatus())
+}
+
+// postWiFiScan answers with the networks the screen sees, after the few
+// seconds the scan takes.
+func (s *Server) postWiFiScan(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	aps, err := s.backend.DeviceWiFiScan(ctx)
+	if err != nil {
+		writeErr(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"aps": aps})
+}
+
 // postFirmware starts a firmware update; progress shows up in the device
 // status.
 func (s *Server) postFirmware(w http.ResponseWriter, r *http.Request) {
@@ -371,36 +402,6 @@ func (s *Server) postUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, s.backend.UpdateStatus())
-}
-
-func (s *Server) getPages(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.backend.DevicePages())
-}
-
-// postPluginAction takes {"act":"on|off|toggle"} and answers with the
-// pages message after the tap.
-func (s *Server) postPluginAction(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Act string `json:"act"`
-		To  string `json:"to"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	err := s.backend.PluginAction(ctx, model.Action{Page: r.PathValue("page"), Item: r.PathValue("item"), Act: body.Act, To: body.To})
-	switch {
-	case errors.Is(err, plugins.ErrNotFound):
-		writeErr(w, http.StatusNotFound, err)
-	case errors.Is(err, plugins.ErrBadAct):
-		writeErr(w, http.StatusBadRequest, err)
-	case err != nil:
-		writeErr(w, http.StatusBadGateway, err)
-	default:
-		writeJSON(w, http.StatusOK, s.backend.DevicePages())
-	}
 }
 
 // postIngest always answers with an empty body: hook runners may treat

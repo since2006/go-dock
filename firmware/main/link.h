@@ -1,35 +1,33 @@
-// USB link to go-dock: newline-delimited JSON over the native
-// USB-Serial/JTAG port (docs/protocol-v1.md).
+// Links to go-dock (docs/protocol-v1.md): newline-delimited JSON over TCP
+// on WiFi, which carries what the screen shows, and over the native
+// USB-Serial/JTAG port, which only sets up the WiFi and updates the
+// firmware. One go-dock at a time has the screen; what the screen sends
+// goes to it.
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "model.h"
 
 #define DOCK_PROTO 1
 
-// Installs the USB driver and starts the reader task.
+// Installs the USB driver and starts the USB and TCP tasks; the TCP one
+// waits for wlan_start.
 void link_start(void);
 
 // Copies the newest snapshot into out when it is newer than *version.
 // received_us is the esp_timer time it arrived.
 bool link_take_snapshot(dock_snapshot_t *out, uint32_t *version, int64_t *received_us);
 
-// Copies the newest function pages into out when they are newer than
+// Copies the newest line of readings into out when it is newer than
 // *version.
-bool link_take_pages(dock_pages_t *out, uint32_t *version);
+bool link_take_line(dock_line_t *out, uint32_t *version);
 
-// Tells the host the user tapped item on page; act is "toggle" for a
-// switch. Ids come from link_take_pages, which only passes plain ones.
-void link_send_action(const char *page, const char *item, const char *act);
-
-// Tells the host the user dragged item onto to on a movable page; the two
-// trade places.
-void link_send_swap(const char *page, const char *item, const char *to);
-
-// Tells the host what the infrared receiver picked up (raw µs timings).
-void link_send_ir(const uint16_t *raw, int count);
+// The name of the computer whose go-dock the screen shows ("" none yet),
+// as its hello says.
+void link_host_name(char *out, size_t n);
 
 // esp_timer time of the last protocol message from the host, 0 if none yet.
 int64_t link_last_rx_us(void);

@@ -4,7 +4,6 @@
 #include "beep.h"
 #include "display.h"
 #include "esp_timer.h"
-#include "ir.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "link.h"
@@ -12,6 +11,7 @@
 #include "ota.h"
 #include "settings.h"
 #include "ui.h"
+#include "wlan.h"
 
 #define STACK_CHECK_US (10 * 1000000LL)
 
@@ -20,7 +20,7 @@
 static const struct {
     const char *name;
     unsigned warn;
-} STACKS[] = {{"lvgl", 2048}, {"link", 1024}, {"beep", 512}, {"ir_tx", 512}, {"ir_rx", 512}};
+} STACKS[] = {{"lvgl", 2048}, {"link", 1024}, {"net", 1024}, {"beep", 512}};
 
 static void check_stacks(void)
 {
@@ -40,6 +40,9 @@ static void lvgl_task(void *arg)
 {
     display_init();
     ui_create();
+    // WiFi after the display: its DMA buffers need internal memory, which
+    // the WiFi driver would otherwise take.
+    wlan_start();
     uint8_t brightness = 0;
     int64_t checked = 0;
     for (;;) {
@@ -69,9 +72,8 @@ void app_main(void)
     settings_init();
     ota_init();
     beep_init();
-    ir_init();
     link_start();
     // LVGL draws nested objects recursively on this stack, with TinyTTF
-    // rasterizing glyphs at the bottom: the lights page needs about 8.5 KB.
+    // rasterizing glyphs at the bottom: a page of cards takes about 8.5 KB.
     xTaskCreatePinnedToCore(lvgl_task, "lvgl", 16384, NULL, 4, NULL, 1);
 }

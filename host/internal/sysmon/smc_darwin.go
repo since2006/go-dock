@@ -128,20 +128,19 @@ func (s *smc) read(key string) (float64, error) {
 	return smcNumber(info.keyInfo.dataType, out.bytes[:n])
 }
 
-// fans reads every fan's speed and maximum.
-func (s *smc) fans() ([]Fan, error) {
+// fans reads every fan's speed.
+func (s *smc) fans() ([]float64, error) {
 	n, err := s.read("FNum")
 	if err != nil {
 		return nil, err
 	}
-	var fans []Fan
+	var fans []float64
 	for i := range min(int(n), 8) {
 		rpm, err := s.read(fmt.Sprintf("F%dAc", i))
 		if err != nil {
 			return nil, err
 		}
-		top, _ := s.read(fmt.Sprintf("F%dMx", i))
-		fans = append(fans, Fan{RPM: max(rpm, 0), Max: max(top, 0)})
+		fans = append(fans, max(rpm, 0))
 	}
 	return fans, nil
 }
