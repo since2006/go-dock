@@ -216,7 +216,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .scr-line .seg.icon-gpu { --c: #C084FC; }
 .scr-line .seg.icon-memory { --c: #3DD68C; }
 .scr-line .seg.icon-rotor { --c: #4FD1C5; }
-.scr-line .seg.icon-net { --c: #FF9F43; }
+.scr-line .seg.icon-temp { --c: #F472B6; }
 .scr-line .seg.warn { --c: #FFB020; --v: #FFB020; }
 .scr-line .seg.crit { --c: #FF6B5E; --v: #FF6B5E; }
 .scr-line .seg svg { flex: none; }
@@ -328,8 +328,74 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .settings input[readonly] { background: var(--surface-2); color: var(--muted); }
 .form-msg { font-size: 13px; color: var(--muted); }
 .form-msg.err { color: var(--error); }
+.form-msg.ok { color: var(--running); }
 .ports { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .ports button { text-align: left; font-family: var(--mono); font-size: 12px; }
+
+/* Dialogs */
+.dialog {
+  width: min(440px, calc(100vw - 32px)); padding: 0;
+  border: 1px solid var(--border); border-radius: 14px;
+  background: var(--surface); color: var(--text);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .28);
+}
+.dialog::backdrop { background: rgba(0, 0, 0, .4); }
+.dlg-head { display: flex; align-items: center; gap: 12px; padding: 14px 16px 8px; }
+.dlg-head h2 { margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dlg-x {
+  font: inherit; font-size: 20px; line-height: 1; width: 28px; height: 28px; flex: none;
+  border: 0; border-radius: 8px; background: none; color: var(--muted); cursor: pointer;
+}
+.dlg-x:hover { background: var(--surface-2); color: var(--text); }
+.dlg-body { padding: 4px 16px 0; max-height: min(60vh, 440px); overflow: auto; display: grid; gap: 12px; }
+.dlg-foot { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; padding: 14px 16px 16px; }
+.dlg-foot .left { margin-right: auto; }
+.dlg-note { margin: 0; font-size: 13px; color: var(--muted); }
+.dlg-note.err { color: var(--error); }
+.dialog form { display: grid; gap: 12px; }
+
+/* WiFi list */
+.ap-list { display: flex; flex-direction: column; margin: 0 -8px; }
+.ap {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 8px;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+  border: 0; border-radius: 8px; background: none;
+}
+.ap:hover, .ap:focus-visible { background: var(--surface-2); outline: none; }
+.ap .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ap .tag { font-size: 12px; color: var(--running); }
+.ap .lock { width: 14px; height: 14px; color: var(--muted); flex: none; }
+.ap .lock.open { visibility: hidden; }
+.bars { display: inline-flex; align-items: flex-end; gap: 2px; width: 18px; height: 14px; flex: none; }
+.bars i { flex: 1; border-radius: 1px; background: var(--border); }
+.bars i:nth-child(1) { height: 30%; }
+.bars i:nth-child(2) { height: 55%; }
+.bars i:nth-child(3) { height: 80%; }
+.bars i:nth-child(4) { height: 100%; }
+.bars i.on { background: var(--text); }
+
+/* Waiting and outcomes */
+.wait { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
+.spinner {
+  width: 26px; height: 26px; flex: none; border-radius: 50%;
+  border: 3px solid var(--border); border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+.outcome { display: flex; gap: 12px; align-items: flex-start; padding: 4px 0; }
+.outcome .mark {
+  width: 34px; height: 34px; flex: none; border-radius: 50%;
+  display: grid; place-items: center; font-size: 18px; font-weight: 700; color: var(--surface);
+}
+.outcome.ok .mark { background: var(--running); }
+.outcome.err .mark { background: var(--error); }
+.outcome .what { font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
+.outcome .why { margin-top: 2px; overflow-wrap: anywhere; }
+.outcome.err .why { color: var(--error); }
+.facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0; font-size: 13px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; font-family: var(--mono); }
 
 /* Logs */
 .logs { font-family: var(--mono); font-size: 12px; max-height: 70vh; overflow: auto; }

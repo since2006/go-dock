@@ -15,8 +15,9 @@ import (
 // NetPort is the TCP port the screen listens on.
 const NetPort = 47322
 
-// NameLen bounds the computer name sent in hello, in runes.
-const NameLen = 12
+// NameLen bounds the computer name sent in hello, in runes; the firmware
+// keeps that many (link.h LINK_NAME_LEN) and cuts it on screen by width.
+const NameLen = 20
 
 var hostIDRE = regexp.MustCompile(`^[a-z0-9]{1,16}$`)
 
@@ -105,6 +106,17 @@ func (w *WiFiConfig) Check() error {
 	return nil
 }
 
+// answeredBy says whether msg is the net message that answers these
+// settings (§3.7): the screen took them and is on its way. Earlier news
+// about the WiFi as it was may arrive first; they name another network,
+// another state or another kind of address.
+func (w WiFiConfig) answeredBy(msg DeviceMsg) bool {
+	if w.SSID == "" {
+		return msg.State == "off"
+	}
+	return msg.State == "connecting" && msg.SSID == w.SSID && msg.Fixed == (w.IP != "")
+}
+
 // EncodeWiFi encodes the wifi message for a config already checked.
 func EncodeWiFi(w WiFiConfig) []byte {
 	line, _ := encodeLine(struct {
@@ -144,6 +156,9 @@ type NetStatus struct {
 	Code  string `json:"code,omitempty"`
 	Fixed bool   `json:"fixed,omitempty"` // a fixed IP rather than DHCP
 	Err   string `json:"err,omitempty"`
+	// Try is the number of the WiFi settings this go-dock sent that the
+	// screen is on (ConfigureWiFi); 0 for settings from before.
+	Try int `json:"try"`
 }
 
 // Addr is where go-dock reaches the screen, empty until it has an address.

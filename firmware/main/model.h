@@ -79,7 +79,7 @@ typedef enum {
     DOCK_ICON_GPU,
     DOCK_ICON_MEMORY,
     DOCK_ICON_ROTOR, // a fan's blades
-    DOCK_ICON_NET,
+    DOCK_ICON_TEMP, // a thermometer
     DOCK_ICON_DISK,
     DOCK_ICON_COUNT,
 } dock_icon_t;

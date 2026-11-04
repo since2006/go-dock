@@ -48,9 +48,10 @@ type Backend interface {
 	DeviceSounds() any
 	SoundNotes(sound, custom string) ([][2]int, error)
 	DeviceBeep(notes [][2]int, volume int) error
-	// DeviceWiFi tells the screen, linked over USB, which WiFi to join;
-	// DeviceWiFiScan asks it which networks it sees.
-	DeviceWiFi(WiFi) error
+	// DeviceWiFi tells the screen, linked over USB, which WiFi to join,
+	// and returns the number the device status gives the outcome (its
+	// usb.net.try); DeviceWiFiScan asks it which networks it sees.
+	DeviceWiFi(WiFi) (int, error)
 	DeviceWiFiScan(ctx context.Context) (any, error)
 	ReconnectDevice()
 	ApplyFirmware() error
@@ -339,11 +340,12 @@ func (s *Server) postWiFi(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.backend.DeviceWiFi(body); err != nil {
+	try, err := s.backend.DeviceWiFi(body)
+	if err != nil {
 		writeErr(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.backend.DeviceStatus())
+	writeJSON(w, http.StatusOK, map[string]any{"try": try, "device": s.backend.DeviceStatus()})
 }
 
 // postWiFiScan answers with the networks the screen sees, after the few

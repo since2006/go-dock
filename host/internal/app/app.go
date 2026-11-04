@@ -166,6 +166,7 @@ func hubOptions(c config.Config) hub.Options {
 
 func deviceOptions(c config.Config) device.Options {
 	name, id := hostIdentity()
+	def := config.Default().Device
 	if n := strings.TrimSpace(c.Device.Name); n != "" {
 		name = n
 	}
@@ -173,7 +174,8 @@ func deviceOptions(c config.Config) device.Options {
 		Enabled: c.Device.Enabled, Addr: strings.TrimSpace(c.Device.Addr), Code: c.Device.Code, Port: c.Device.Port,
 		Name: name, HostID: id, MaxSessions: c.Display.MaxSessions, ShowIdle: c.Display.ShowIdle,
 		Brightness: c.Device.Brightness, DimBrightness: c.Device.DimBrightness, DimAfter: c.Device.DimAfter.D(),
-		Volume: c.Device.Volume,
+		OwnSettings: c.Device.Brightness != def.Brightness || c.Device.DimBrightness != def.DimBrightness || c.Device.DimAfter != def.DimAfter,
+		Volume:      c.Device.Volume,
 	}
 	if c.Device.Beep && !c.Device.Mute {
 		o.BeepNotes = beepNotes(c.Device.BeepSound, c.Device.BeepCustom)
@@ -185,13 +187,17 @@ func deviceOptions(c config.Config) device.Options {
 }
 
 // hostIdentity is how this go-dock introduces itself to the screen: the
-// computer's name, and an id hashed from it and the config dir, so it stays
-// the same across restarts and two go-docks on one computer differ.
+// computer's name as its owner sees it (computerName), and an id hashed
+// from the hostname and the config dir, so it stays the same across
+// restarts and two go-docks on one computer differ.
 var hostIdentity = sync.OnceValues(func() (name, id string) {
 	host, _ := os.Hostname()
 	dir, _ := config.Dir()
 	sum := sha256.Sum256([]byte(host + "\x00" + dir))
-	name, _, _ = strings.Cut(host, ".") // Mac-mini.local
+	name = computerName()
+	if name == "" {
+		name, _, _ = strings.Cut(host, ".") // Mac-mini.local
+	}
 	if name == "" {
 		name = "go-dock"
 	}
@@ -301,7 +307,7 @@ func (a *App) ReconnectDevice()  { a.device.Reconnect() }
 
 func (a *App) DeviceWiFiScan(ctx context.Context) (any, error) { return a.device.ScanWiFi(ctx) }
 
-func (a *App) DeviceWiFi(w web.WiFi) error {
+func (a *App) DeviceWiFi(w web.WiFi) (int, error) {
 	return a.device.ConfigureWiFi(device.WiFiConfig{SSID: w.SSID, Pass: w.Pass, IP: w.IP, Mask: w.Mask, GW: w.GW})
 }
 func (a *App) DevicePorts() (any, error) { return device.ListPorts() }

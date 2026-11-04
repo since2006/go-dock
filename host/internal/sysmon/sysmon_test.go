@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/sensors"
 )
 
 func TestIoregGPU(t *testing.T) {
@@ -135,14 +136,43 @@ func TestSysfs(t *testing.T) {
 	}
 }
 
-func TestPhysicalNIC(t *testing.T) {
-	for name, want := range map[string]bool{
-		"en0": true, "eth0": true, "wlp3s0": true, "Wi-Fi": true, "Ethernet": true, "Local Area Connection": true,
-		"lo0": false, "lo": false, "utun3": false, "awdl0": false, "bridge100": false, "docker0": false,
-		"veth12ab": false, "tailscale0": false, "Loopback Pseudo-Interface 1": false, "vEthernet (WSL)": false,
-	} {
-		if got := physicalNIC(name); got != want {
-			t.Errorf("physicalNIC(%q) = %v", name, got)
+// The chip's temperature is the hottest die, whatever else the computer
+// reads.
+func TestChipTemp(t *testing.T) {
+	cases := []struct {
+		name string
+		ts   []sensors.TemperatureStat
+		want float64
+	}{
+		{"none", nil, 0},
+		{"apple m6", []sensors.TemperatureStat{
+			{SensorKey: "PMU tcal", Temperature: 51.8}, {SensorKey: "PMU tdev7", Temperature: 34.4},
+			{SensorKey: "NAND CH0 temp", Temperature: 32}, {SensorKey: "PMU tdie0", Temperature: 35.7},
+			{SensorKey: "PMU2 tdie1", Temperature: 31.3},
+		}, 35.7},
+		{"apple m1", []sensors.TemperatureStat{
+			{SensorKey: "gas gauge battery", Temperature: 30}, {SensorKey: "pACC MTR Temp Sensor2", Temperature: 48.2},
+			{SensorKey: "GPU MTR Temp Sensor1", Temperature: 52.1}, {SensorKey: "PMU tdie1", Temperature: 45},
+		}, 52.1},
+		{"intel mac", []sensors.TemperatureStat{
+			{SensorKey: "TA0P", Temperature: 28}, {SensorKey: "TC0D", Temperature: 0}, {SensorKey: "TC0P", Temperature: 61.5},
+			{SensorKey: "TG0P", Temperature: 70},
+		}, 61.5},
+		{"intel linux", []sensors.TemperatureStat{
+			{SensorKey: "acpitz", Temperature: 27.8}, {SensorKey: "nvme_composite", Temperature: 44},
+			{SensorKey: "coretemp_core_0", Temperature: 66}, {SensorKey: "coretemp_package_id_0", Temperature: 64},
+		}, 64},
+		{"amd linux", []sensors.TemperatureStat{
+			{SensorKey: "k10temp_tctl", Temperature: 77}, {SensorKey: "k10temp_tccd1", Temperature: 60},
+			{SensorKey: "amdgpu_edge", Temperature: 50},
+		}, 77},
+		{"raspberry pi", []sensors.TemperatureStat{{SensorKey: "cpu_thermal", Temperature: 48.3}}, 48.3},
+		{"only the case", []sensors.TemperatureStat{{SensorKey: "acpitz", Temperature: 27.8}}, 0},
+		{"broken sensor", []sensors.TemperatureStat{{SensorKey: "PMU tdie1", Temperature: 255}}, 0},
+	}
+	for _, c := range cases {
+		if got := chipTemp(c.ts); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
 	}
 }

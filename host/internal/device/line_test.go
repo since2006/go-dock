@@ -22,7 +22,7 @@ func TestBuildLine(t *testing.T) {
 		{ID: "cpu", Icon: model.IconCPU, Label: "CPU", Text: "28", Unit: "%", Pct: ptr(28), Level: model.LevelWarn},
 		{ID: "mem", Icon: "Not An Icon", Label: "内存占用率", Text: "123456789", Unit: "MB/s!", Pct: ptr(130), Level: "loud"},
 		{ID: "Bad ID", Label: "dropped"},
-		{ID: "net", Icon: model.IconNet, Label: "网络", Text: "22", Unit: "KB/s", Sub: "↑ 1.5M 和更多"},
+		{ID: "fan", Icon: model.IconRotor, Label: "风扇", Text: "2150", Unit: "rpm", Sub: "左右两个风扇都在转"},
 	}
 	for i := range maxReadings {
 		in = append(in, model.Reading{ID: "x" + string(rune('a'+i)), Label: "x", Text: "1"})
@@ -31,15 +31,15 @@ func TestBuildLine(t *testing.T) {
 	if f.T != "line" || len(f.Items) != maxReadings {
 		t.Fatalf("line %+v", f)
 	}
-	cpu, mem, net := f.Items[0], f.Items[1], f.Items[2]
+	cpu, mem, fan := f.Items[0], f.Items[1], f.Items[2]
 	if cpu.Icon != "cpu" || cpu.Level != "warn" || *cpu.Pct != 28 {
 		t.Fatalf("cpu %+v", cpu)
 	}
 	if mem.Icon != "" || mem.Level != "" || *mem.Pct != 100 || mem.Label != "内存占…" || mem.Text != "1234567…" || mem.Unit != "MB/…" {
 		t.Fatalf("mem %+v", mem)
 	}
-	if net.ID != "net" || net.Pct != nil || net.Sub != "↑ 1.5M …" {
-		t.Fatalf("net %+v", net)
+	if fan.ID != "fan" || fan.Icon != "rotor" || fan.Pct != nil || fan.Sub != "左右两个风扇都…" {
+		t.Fatalf("fan %+v", fan)
 	}
 	if empty := BuildLine(nil); empty.Items == nil {
 		t.Fatal("no readings must still send an empty list")

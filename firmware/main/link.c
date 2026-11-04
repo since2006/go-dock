@@ -16,17 +16,17 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "hosts.h"
 #include "lwip/sockets.h"
 #include "ota.h"
 #include "settings.h"
 #include "wlan.h"
 
 #define MAX_LINE 4096
-#define NET_CONNS 4                     // TCP links at once
-#define NET_HELLO_US (5 * 1000000LL)    // a TCP link must say hello with the pairing code by then
-#define NET_SILENT_US (20 * 1000000LL)  // a TCP link quiet this long is dropped
-#define NET_DENY_US (2 * 1000000LL)     // a link turned away is closed this much later
-#define HOST_GONE_US (15 * 1000000LL)   // the go-dock on the screen counts as gone after this
+#define NET_CONNS LINK_HOSTS           // TCP links at once, a go-dock each
+#define NET_HELLO_US (5 * 1000000LL)   // a TCP link must say hello with the pairing code by then
+#define NET_SILENT_US (20 * 1000000LL) // a TCP link quiet this long is dropped
+#define NET_DENY_US (2 * 1000000LL)    // a link turned away is closed this much later
 
 static const char *TAG = "link";
 
@@ -47,38 +47,39 @@ typedef struct {
     uint32_t peer;      // CONN_NET: its IPv4 address
     int64_t last_rx_us; // last message handled, 0 none yet
     int64_t close_us;   // CONN_NET: turned away, closed at this time (0: not)
-    char name[52];      // the computer's name (12 runes), from its hello
-    char id[17];        // and its id
+    char name[LINK_NAME_LEN]; // the computer's name, from its hello
+    char id[17];              // and its id
     char *line;
     size_t len;
     bool skipping; // inside a line longer than MAX_LINE
 } conn_t;
 
-static SemaphoreHandle_t s_rx_lock; // one message handled at a time; guards s_owner and the links
-static SemaphoreHandle_t s_tx_lock; // keeps lines whole; guards writes, fds and s_owner
-static SemaphoreHandle_t s_lock;    // guards s_shared, s_version, s_received_us, the line and s_host_name
+// What a go-dock on the network sent, kept by the slot of its link: the
+// screen shows one at a time (ui.c, hosts.c).
+typedef struct {
+    link_host_t info;     // under s_lock
+    dock_snapshot_t *snap; // its newest snapshot, under s_lock
+    dock_line_t *line;     // and line, under s_lock
+    uint32_t line_version; // under s_lock
+    int64_t received_us;   // when the snapshot came, under s_lock
+    host_marks_t marks;    // under s_rx_lock
+} host_t;
+
+static SemaphoreHandle_t s_rx_lock; // one message handled at a time; guards the links
+static SemaphoreHandle_t s_tx_lock; // keeps lines whole; guards writes and fds
+static SemaphoreHandle_t s_lock;    // guards the hosts and the counters below
 static conn_t s_usb;
 static conn_t s_net[NET_CONNS];
-// The go-dock whose state the screen shows, always on the network; only
-// its messages count. The first one keeps it until it goes quiet, unless
-// the same go-dock (same id) comes back on a new link. The USB cable only
-// sets up the WiFi and updates the firmware.
-static conn_t *s_owner;
+static host_t s_hosts[NET_CONNS]; // by the slot in s_net
+static uint32_t s_gen;            // the last link_host_t.gen handed out
+static uint32_t s_ver;            // the last version handed out, of a snapshot or a line
 // After a wrong pairing code, that address gets no new link before
 // s_net_wait_us; others, the real go-dock among them, still do.
 static int64_t s_net_wait_us;
 static uint32_t s_net_wait_peer;
-static dock_snapshot_t *s_shared;    // newest complete snapshot
-static dock_snapshot_t *s_scratch;   // parse target, under s_rx_lock
-static uint32_t s_version;
-static dock_line_t *s_line;         // newest line of readings
-static dock_line_t *s_line_scratch; // parse target, under s_rx_lock
-static uint32_t s_line_version;
-static char s_host_name[52]; // the name of the go-dock the screen shows, from its hello
-static int64_t s_received_us;
-static volatile int64_t s_last_rx_us;
-static volatile bool s_incompatible;
-static conn_t *s_ota_conn;  // the link the last update (or its question) came over, under s_rx_lock
+static dock_snapshot_t *s_scratch; // parse targets, under s_rx_lock
+static dock_line_t *s_line_scratch;
+static conn_t *s_ota_conn; // the link the last update (or its question) came over, under s_rx_lock
 
 static bool net_send(int fd, const char *buf, size_t n, int flags)
 {
@@ -114,21 +115,42 @@ static void send_to(conn_t *c, const char *json)
     xSemaphoreGive(s_tx_lock);
 }
 
-// send_host sends to the go-dock the screen shows, if any.
-static void send_host(const char *json)
+// send_hosts sends to every go-dock on the screen.
+static void send_hosts(const char *json)
 {
     xSemaphoreTake(s_tx_lock, portMAX_DELAY);
-    if (s_owner) {
-        conn_write(s_owner, json);
+    for (int i = 0; i < NET_CONNS; i++) {
+        conn_t *c = &s_net[i];
+        if (c->fd >= 0 && c->authed && !c->close_us) {
+            conn_write(c, json);
+        }
     }
     xSemaphoreGive(s_tx_lock);
 }
 
-static void set_owner(conn_t *c)
+static host_t *host_of(const conn_t *c)
 {
-    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
-    s_owner = c;
-    xSemaphoreGive(s_tx_lock);
+    return &s_hosts[c - s_net];
+}
+
+// host_drop takes c's go-dock off the screen; the caller holds s_rx_lock.
+static void host_drop(conn_t *c)
+{
+    if (c->kind != CONN_NET) {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    host_of(c)->info.gen = 0;
+    xSemaphoreGive(s_lock);
+}
+
+// host_heard notes that c's go-dock spoke; the caller holds s_rx_lock.
+static void host_heard(conn_t *c, int64_t now)
+{
+    c->last_rx_us = now;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    host_of(c)->info.last_rx_us = now;
+    xSemaphoreGive(s_lock);
 }
 
 static void send_hello(conn_t *c)
@@ -139,17 +161,8 @@ static void send_hello(conn_t *c)
     send_to(c, buf);
 }
 
-// set_host_name keeps the name of the go-dock the screen shows, for its
-// title.
-static void set_host_name(const char *name)
-{
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    snprintf(s_host_name, sizeof(s_host_name), "%s", name);
-    xSemaphoreGive(s_lock);
-}
-
-// send_log sends a log line to c, or to the go-dock on the screen when c
-// is NULL.
+// send_log sends a log line to c, or to every go-dock on the screen when
+// c is NULL.
 static void send_log(conn_t *c, const char *level, const char *msg)
 {
     ESP_LOGI(TAG, "%s", msg);
@@ -162,7 +175,7 @@ static void send_log(conn_t *c, const char *level, const char *msg)
         if (c) {
             send_to(c, line);
         } else {
-            send_host(line);
+            send_hosts(line);
         }
         cJSON_free(line);
     }
@@ -259,28 +272,13 @@ static void deny(conn_t *c, const char *msg, int64_t now)
     }
     cJSON_Delete(o);
     c->close_us = now + NET_DENY_US;
-    if (s_owner == c) {
-        set_owner(NULL);
-    }
+    host_drop(c);
     ESP_LOGI(TAG, "turned away %s: %s", c->name[0] ? c->name : "a go-dock", msg);
 }
 
 static bool conn_open(const conn_t *c)
 {
     return c->kind == CONN_USB || (c->fd >= 0 && !c->close_us && !c->broken);
-}
-
-// take_over gives the screen to c; the link it takes the screen from (the
-// same go-dock on a link it left behind) is turned away.
-static void take_over(conn_t *c, int64_t now)
-{
-    conn_t *o = s_owner;
-    if (o && o != c && conn_open(o)) {
-        deny(o, "这台电脑从新的连接连上了屏幕", now);
-    }
-    c->last_rx_us = now;
-    set_owner(c);
-    set_host_name(c->name);
 }
 
 static void copy_str(char *dst, size_t n, const cJSON *v)
@@ -411,7 +409,7 @@ static int name_index(const cJSON *v, const char *const *names, int n)
 // An icon this firmware does not know is none.
 static dock_icon_t parse_icon(const cJSON *v)
 {
-    static const char *const names[DOCK_ICON_COUNT - 1] = {"cpu", "gpu", "memory", "rotor", "net", "disk"};
+    static const char *const names[DOCK_ICON_COUNT - 1] = {"cpu", "gpu", "memory", "rotor", "temp", "disk"};
     return (dock_icon_t)(name_index(v, names, DOCK_ICON_COUNT - 1) + 1);
 }
 
@@ -454,8 +452,9 @@ static int64_t num_in(const cJSON *v, int64_t lo, int64_t hi, int64_t def)
     return n < lo ? lo : n > hi ? hi : n;
 }
 
-// settings: the screen's brightness; a field left out keeps its value.
-static void handle_settings(const cJSON *root)
+// settings: the screen's brightness, whichever go-dock sent it last; a
+// field left out keeps its value.
+static void handle_settings(conn_t *c, const cJSON *root)
 {
     settings_t s = settings_get();
     s.brightness = (uint8_t)num_in(cJSON_GetObjectItem(root, "brightness"), 10, 100, s.brightness);
@@ -464,12 +463,14 @@ static void handle_settings(const cJSON *root)
     if (!settings_set(s)) {
         return;
     }
+    char msg[100];
     if (s.dim_after) {
-        link_log("info", "屏幕亮度 %u%%，无任务 %lu 秒后降到 %u%%", s.brightness, (unsigned long)s.dim_after,
-                 s.dim_brightness);
+        snprintf(msg, sizeof(msg), "屏幕亮度 %u%%，无任务 %lu 秒后降到 %u%%", s.brightness,
+                 (unsigned long)s.dim_after, s.dim_brightness);
     } else {
-        link_log("info", "屏幕亮度 %u%%，不自动变暗", s.brightness);
+        snprintf(msg, sizeof(msg), "屏幕亮度 %u%%，不自动变暗", s.brightness);
     }
+    send_log(c, "info", msg);
 }
 
 // beep: {"notes":[[hz,ms],...],"vol":percent}; a frequency out of range
@@ -570,8 +571,8 @@ static void handle_ota(conn_t *c, const char *t, const cJSON *root)
 
 // net_ota carries on an update over WiFi once the user answered the
 // screen's question: yes erases and says ready, no or no answer fails it.
-// Meanwhile the link counts as heard from, so it is neither dropped nor
-// taken by another go-dock. Called by the net task, often.
+// Meanwhile the link counts as heard from, so it is not dropped. Called by
+// the net task, often.
 static void net_ota(int64_t now)
 {
     xSemaphoreTake(s_rx_lock, portMAX_DELAY);
@@ -591,7 +592,7 @@ static void net_ota(int64_t now)
             send_ota_error(c, a == -1 ? "已在屏幕上取消" : "屏幕上没有人确认，已取消");
         }
         if (ota_busy()) {
-            c->last_rx_us = s_last_rx_us = now;
+            host_heard(c, now);
         }
     }
     xSemaphoreGive(s_rx_lock);
@@ -614,8 +615,9 @@ static void handle_wifi(conn_t *c, const cJSON *root)
     send_net(c);
 }
 
-// net_hello checks a TCP link's first hello: the pairing code, then
-// whether the screen is free for it. Returns whether it now has the screen.
+// net_hello checks a TCP link's first hello: with the pairing code its
+// go-dock gets a page. The same go-dock (same id) on a link it left behind
+// is turned away. Returns whether it passed.
 static bool net_hello(conn_t *c, const cJSON *root, int64_t now)
 {
     const cJSON *code = cJSON_GetObjectItem(root, "code");
@@ -628,16 +630,21 @@ static bool net_hello(conn_t *c, const cJSON *root, int64_t now)
     c->authed = true;
     copy_str(c->name, sizeof(c->name), cJSON_GetObjectItem(root, "name"));
     copy_str(c->id, sizeof(c->id), cJSON_GetObjectItem(root, "id"));
-    const conn_t *o = s_owner;
-    bool same = o && c->id[0] && strcmp(o->id, c->id) == 0;
-    if (o && o != c && !same && conn_open(o) && o->last_rx_us && now - o->last_rx_us < HOST_GONE_US) {
-        char msg[120];
-        snprintf(msg, sizeof(msg), "屏幕正被「%s」使用", o->name[0] ? o->name : "另一台电脑");
-        deny(c, msg, now);
-        return false;
+    for (int i = 0; c->id[0] && i < NET_CONNS; i++) {
+        conn_t *o = &s_net[i];
+        if (o != c && o->authed && conn_open(o) && strcmp(o->id, c->id) == 0) {
+            deny(o, "这台电脑从新的连接连上了屏幕", now);
+        }
     }
-    ESP_LOGI(TAG, "%s has the screen over the network", c->name[0] ? c->name : "a go-dock");
-    take_over(c, now);
+    host_t *h = host_of(c);
+    h->marks.count = 0;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    h->info = (link_host_t){.gen = ++s_gen, .last_rx_us = now, .top = DOCK_STATE_COUNT};
+    snprintf(h->info.id, sizeof(h->info.id), "%s", c->id);
+    h->line->count = 0;
+    h->line_version = ++s_ver; // an empty line until it sends one
+    xSemaphoreGive(s_lock);
+    ESP_LOGI(TAG, "%s is on the screen", c->name[0] ? c->name : "a go-dock");
     return true;
 }
 
@@ -692,34 +699,34 @@ static void handle_line(conn_t *c, char *line)
             return;
         }
     }
-    if (c != s_owner) {
-        cJSON_Delete(root);
-        return;
-    }
-    c->last_rx_us = now;
-    s_last_rx_us = now;
+    host_t *h = host_of(c);
+    host_heard(c, now);
 
     if (strcmp(type, "hello") == 0) {
         int proto = (int)num(cJSON_GetObjectItem(root, "proto"));
-        s_incompatible = proto != DOCK_PROTO;
         copy_str(c->name, sizeof(c->name), cJSON_GetObjectItem(root, "name"));
-        copy_str(c->id, sizeof(c->id), cJSON_GetObjectItem(root, "id"));
-        set_host_name(c->name);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        h->info.incompatible = proto != DOCK_PROTO;
+        snprintf(h->info.name, sizeof(h->info.name), "%s", c->name);
+        xSemaphoreGive(s_lock);
         send_hello(c);
         ota_confirm(); // reached go-dock: a freshly updated image stays
-        if (s_incompatible) {
-            link_log("warn", "host speaks protocol %d, firmware speaks %d", proto, DOCK_PROTO);
+        if (proto != DOCK_PROTO) {
+            char msg[80];
+            snprintf(msg, sizeof(msg), "host speaks protocol %d, firmware speaks %d", proto, DOCK_PROTO);
+            send_log(c, "warn", msg);
         }
     } else if (strcmp(type, "snapshot") == 0) {
         ota_confirm();
         parse_snapshot(root, s_scratch);
         uint32_t seq = s_scratch->seq;
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        dock_snapshot_t *tmp = s_shared;
-        s_shared = s_scratch;
+        dock_snapshot_t *tmp = h->snap;
+        h->snap = s_scratch;
         s_scratch = tmp;
-        s_version++;
-        s_received_us = now;
+        h->info.version = ++s_ver;
+        h->received_us = now;
+        host_note(&h->info, &h->marks, h->snap, now);
         xSemaphoreGive(s_lock);
 
         char ack[48];
@@ -728,15 +735,15 @@ static void handle_line(conn_t *c, char *line)
     } else if (strcmp(type, "line") == 0) {
         parse_line(root, s_line_scratch);
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        dock_line_t *tmp = s_line;
-        s_line = s_line_scratch;
+        dock_line_t *tmp = h->line;
+        h->line = s_line_scratch;
         s_line_scratch = tmp;
-        s_line_version++;
+        h->line_version = ++s_ver;
         xSemaphoreGive(s_lock);
     } else if (strncmp(type, "ota_", 4) == 0) {
         handle_ota(c, type, root);
-    } else if (strcmp(type, "settings") == 0 && !s_incompatible) {
-        handle_settings(root);
+    } else if (strcmp(type, "settings") == 0 && !h->info.incompatible) {
+        handle_settings(c, root);
     } else if (strcmp(type, "beep") == 0) {
         handle_beep(root);
     }
@@ -881,11 +888,8 @@ static void net_close(conn_t *c)
         close(c->fd);
     }
     c->fd = -1;
-    if (s_owner == c) {
-        s_owner = NULL; // the screen shows "主机离线" in a while
-        s_incompatible = false; // that was about this go-dock
-    }
     xSemaphoreGive(s_tx_lock);
+    host_drop(c); // another page shows, or "主机离线" in a while
     if (s_ota_conn == c) {
         if (ota_busy()) {
             ota_abort("与 go-dock 的连接断开了");
@@ -961,10 +965,12 @@ void link_start(void)
     s_lock = xSemaphoreCreateMutex();
     s_tx_lock = xSemaphoreCreateMutex();
     s_rx_lock = xSemaphoreCreateMutex();
-    s_shared = heap_caps_calloc(1, sizeof(dock_snapshot_t), MALLOC_CAP_SPIRAM);
     s_scratch = heap_caps_calloc(1, sizeof(dock_snapshot_t), MALLOC_CAP_SPIRAM);
-    s_line = heap_caps_calloc(1, sizeof(dock_line_t), MALLOC_CAP_SPIRAM);
     s_line_scratch = heap_caps_calloc(1, sizeof(dock_line_t), MALLOC_CAP_SPIRAM);
+    for (int i = 0; i < NET_CONNS; i++) {
+        s_hosts[i].snap = heap_caps_calloc(1, sizeof(dock_snapshot_t), MALLOC_CAP_SPIRAM);
+        s_hosts[i].line = heap_caps_calloc(1, sizeof(dock_line_t), MALLOC_CAP_SPIRAM);
+    }
     s_usb = (conn_t){.kind = CONN_USB, .fd = -1, .line = heap_caps_malloc(MAX_LINE + 1, MALLOC_CAP_SPIRAM)};
     for (int i = 0; i < NET_CONNS; i++) {
         s_net[i] = (conn_t){.kind = CONN_NET, .fd = -1, .line = heap_caps_malloc(MAX_LINE + 1, MALLOC_CAP_SPIRAM)};
@@ -981,46 +987,40 @@ void link_start(void)
     xTaskCreatePinnedToCore(net_task, "net", 6144, NULL, 5, NULL, 0);
 }
 
-bool link_take_snapshot(dock_snapshot_t *out, uint32_t *version, int64_t *received_us)
+void link_hosts(link_host_t out[LINK_HOSTS])
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    for (int i = 0; i < LINK_HOSTS; i++) {
+        out[i] = s_hosts[i].info;
+    }
+    xSemaphoreGive(s_lock);
+}
+
+bool link_take_snapshot(int slot, uint32_t gen, dock_snapshot_t *out, uint32_t *version, int64_t *received_us)
 {
     bool fresh = false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_version != *version) {
-        memcpy(out, s_shared, sizeof(*out));
-        *version = s_version;
-        *received_us = s_received_us;
+    host_t *h = &s_hosts[slot];
+    if (gen && h->info.gen == gen && h->info.version && h->info.version != *version) {
+        memcpy(out, h->snap, sizeof(*out));
+        *version = h->info.version;
+        *received_us = h->received_us;
         fresh = true;
     }
     xSemaphoreGive(s_lock);
     return fresh;
 }
 
-bool link_take_line(dock_line_t *out, uint32_t *version)
+bool link_take_line(int slot, uint32_t gen, dock_line_t *out, uint32_t *version)
 {
     bool fresh = false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_line_version != *version) {
-        memcpy(out, s_line, sizeof(*out));
-        *version = s_line_version;
+    host_t *h = &s_hosts[slot];
+    if (gen && h->info.gen == gen && h->line_version != *version) {
+        memcpy(out, h->line, sizeof(*out));
+        *version = h->line_version;
         fresh = true;
     }
     xSemaphoreGive(s_lock);
     return fresh;
-}
-
-void link_host_name(char *out, size_t n)
-{
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    snprintf(out, n, "%s", s_host_name);
-    xSemaphoreGive(s_lock);
-}
-
-int64_t link_last_rx_us(void)
-{
-    return s_last_rx_us;
-}
-
-bool link_incompatible(void)
-{
-    return s_incompatible;
 }

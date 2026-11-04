@@ -1,18 +1,13 @@
 // Desktop renderer for the firmware UI: feeds main/ui.c sample snapshots
-// and writes what the 600x450 panel would show as PPM images.
+// and writes what the 600x450 panel would show as PPM images. ui.c is
+// included, so the checks can see whose page it shows.
 //
 //   dock_sim <out-dir>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "fonts.h"
-#include "link.h"
-#include "lvgl.h"
-#include "ota.h"
-#include "settings.h"
-#include "ui.h"
-#include "wlan.h"
+#include "../main/ui.c"
 
 #define W 600
 #define H 450
@@ -22,45 +17,69 @@
 // ---- stand-ins for the ESP-IDF pieces ui.c uses ----
 
 static int64_t s_now_us = 600 * SEC; // pretend the board has been up 10 min
-static dock_snapshot_t s_snap;
-static uint32_t s_ver;
-static int64_t s_rx_us, s_last_rx_us;
 
 int64_t esp_timer_get_time(void) { return s_now_us; }
 
-bool link_take_snapshot(dock_snapshot_t *out, uint32_t *version, int64_t *received_us)
+// Go-docks on the screen, by slot, as link.c keeps them. Each one not quiet
+// is heard from on every step, as their heartbeats would be.
+static struct {
+    link_host_t info;
+    host_marks_t marks;
+    dock_snapshot_t snap;
+    dock_line_t line;
+    uint32_t line_ver;
+    int64_t rx_us;
+    bool quiet;
+} s_fake[LINK_HOSTS];
+static uint32_t s_gen, s_ver;
+static int s_cur; // the go-dock send() and send_line() send from
+static dock_snapshot_t s_next; // what send() sends
+static dock_line_t s_next_line;     // and send_line()
+
+void link_hosts(link_host_t out[LINK_HOSTS])
 {
-    if (*version == s_ver) {
+    for (int i = 0; i < LINK_HOSTS; i++) {
+        out[i] = s_fake[i].info;
+    }
+}
+
+bool link_take_snapshot(int slot, uint32_t gen, dock_snapshot_t *out, uint32_t *version, int64_t *received_us)
+{
+    if (!gen || s_fake[slot].info.gen != gen || !s_fake[slot].info.version || s_fake[slot].info.version == *version) {
         return false;
     }
-    memcpy(out, &s_snap, sizeof(*out));
-    *version = s_ver;
-    *received_us = s_rx_us;
+    memcpy(out, &s_fake[slot].snap, sizeof(*out));
+    *version = s_fake[slot].info.version;
+    *received_us = s_fake[slot].rx_us;
     return true;
 }
 
-int64_t link_last_rx_us(void) { return s_last_rx_us; }
-bool link_incompatible(void) { return false; }
+bool link_take_line(int slot, uint32_t gen, dock_line_t *out, uint32_t *version)
+{
+    if (!gen || s_fake[slot].info.gen != gen || s_fake[slot].line_ver == *version) {
+        return false;
+    }
+    memcpy(out, &s_fake[slot].line, sizeof(*out));
+    *version = s_fake[slot].line_ver;
+    return true;
+}
+
+// join: a go-dock says hello on the link in slot, which send() then uses.
+static void join(int slot, const char *id, const char *name)
+{
+    memset(&s_fake[slot], 0, sizeof(s_fake[slot]));
+    s_fake[slot].info = (link_host_t){.gen = ++s_gen, .last_rx_us = s_now_us, .top = DOCK_STATE_COUNT};
+    snprintf(s_fake[slot].info.id, sizeof(s_fake[slot].info.id), "%s", id);
+    snprintf(s_fake[slot].info.name, sizeof(s_fake[slot].info.name), "%s", name);
+    s_fake[slot].line_ver = ++s_ver;
+    s_cur = slot;
+}
+
+static void leave(int slot) { s_fake[slot].info.gen = 0; }
 
 static wlan_status_t s_wifi;
 wlan_status_t wlan_status(void) { return s_wifi; }
 const char *wlan_code(void) { return "482916"; }
-
-static dock_line_t s_line;
-static uint32_t s_line_ver;
-
-bool link_take_line(dock_line_t *out, uint32_t *version)
-{
-    if (*version == s_line_ver) {
-        return false;
-    }
-    memcpy(out, &s_line, sizeof(*out));
-    *version = s_line_ver;
-    return true;
-}
-
-static char s_host[52];
-void link_host_name(char *out, size_t n) { snprintf(out, n, "%s", s_host); }
 
 static settings_t s_settings = {.brightness = 80, .dim_brightness = 20, .dim_after = 300};
 
@@ -171,6 +190,11 @@ static uint32_t tick(void) { return (uint32_t)(s_now_us / 1000); }
 static void step(void)
 {
     s_now_us += 50000;
+    for (int i = 0; i < LINK_HOSTS; i++) {
+        if (s_fake[i].info.gen && !s_fake[i].quiet) {
+            s_fake[i].info.last_rx_us = s_now_us;
+        }
+    }
     ui_poll();
     ui_brightness();
     lv_timer_handler();
@@ -239,16 +263,16 @@ static const int TZ = 8 * 3600;
 
 static void add(dock_state_t st, dock_provider_t p, const char *project, int ago)
 {
-    dock_session_t *s = &s_snap.sessions[s_snap.count++];
+    dock_session_t *s = &s_next.sessions[s_next.count++];
     snprintf(s->id, sizeof(s->id), "%s:%s", p == DOCK_CLAUDE ? "claude" : "codex", project);
     s->provider = p;
     s->state = st;
     snprintf(s->project, sizeof(s->project), "%s", project);
     s->since = NOW - ago;
-    s_snap.counts[st]++;
+    s_next.counts[st]++;
 }
 
-static dock_session_t *last(void) { return &s_snap.sessions[s_snap.count - 1]; }
+static dock_session_t *last(void) { return &s_next.sessions[s_next.count - 1]; }
 static void title(const char *t) { snprintf(last()->title, sizeof(last()->title), "%s", t); }
 static void detail(const char *t) { snprintf(last()->detail, sizeof(last()->detail), "%s", t); }
 static void msg(const char *t) { snprintf(last()->msg, sizeof(last()->msg), "%s", t); }
@@ -282,20 +306,22 @@ static void window(dock_window_t *w, float pct, int resets_in)
 
 static void send(void)
 {
-    s_snap.seq++;
-    s_snap.now = NOW;
-    s_snap.tz_offset = TZ;
-    s_ver++;
-    s_rx_us = s_last_rx_us = s_now_us;
+    s_next.seq++;
+    s_next.now = NOW;
+    s_next.tz_offset = TZ;
+    memcpy(&s_fake[s_cur].snap, &s_next, sizeof(s_next));
+    s_fake[s_cur].info.version = ++s_ver;
+    s_fake[s_cur].rx_us = s_fake[s_cur].info.last_rx_us = s_now_us;
+    host_note(&s_fake[s_cur].info, &s_fake[s_cur].marks, &s_next, s_now_us);
 }
 
-static void reset(void) { memset(&s_snap, 0, sizeof(s_snap)); }
+static void reset(void) { memset(&s_next, 0, sizeof(s_next)); }
 
 // A reading of the line, as the perf plugin sends it; pct -1 for none.
 static void reading(dock_icon_t icon, const char *id, const char *label, const char *text, const char *unit, int pct,
                     const char *sub, dock_level_t level)
 {
-    dock_reading_t *r = &s_line.items[s_line.count++];
+    dock_reading_t *r = &s_next_line.items[s_next_line.count++];
     memset(r, 0, sizeof(*r));
     r->icon = icon;
     snprintf(r->id, sizeof(r->id), "%s", id);
@@ -307,22 +333,208 @@ static void reading(dock_icon_t icon, const char *id, const char *label, const c
     r->level = level;
 }
 
-// A Mac's six readings: CPU, GPU, memory, then fans, network and disk.
+// A Mac's six readings: CPU, GPU, memory, then fans, the chip's
+// temperature and disk.
 static void mac_line(const char *cpu)
 {
-    memset(&s_line, 0, sizeof(s_line));
+    memset(&s_next_line, 0, sizeof(s_next_line));
     reading(DOCK_ICON_CPU, "cpu", "CPU", cpu, "%", atoi(cpu), "", DOCK_LEVEL_OK);
     reading(DOCK_ICON_GPU, "gpu", "GPU", "57", "%", 57, "", DOCK_LEVEL_OK);
     reading(DOCK_ICON_MEMORY, "mem", "内存", "56", "%", 56, "", DOCK_LEVEL_OK);
     reading(DOCK_ICON_ROTOR, "fan", "风扇", "1000", "rpm", -1, "", DOCK_LEVEL_OK);
-    reading(DOCK_ICON_NET, "net", "网络", "4.6", "K", -1, "↑36K", DOCK_LEVEL_OK);
+    reading(DOCK_ICON_TEMP, "temp", "温度", "46", "°C", -1, "", DOCK_LEVEL_OK);
     reading(DOCK_ICON_DISK, "disk", "磁盘", "40", "%", 40, "", DOCK_LEVEL_OK);
 }
 
 static void send_line(void)
 {
-    s_line_ver++;
-    s_last_rx_us = s_now_us;
+    memcpy(&s_fake[s_cur].line, &s_next_line, sizeof(s_next_line));
+    s_fake[s_cur].line_ver = ++s_ver;
+    s_fake[s_cur].info.last_rx_us = s_now_us;
+}
+
+// A Mac mini's page: one task running, its readings above the usage.
+static void mini_page_on(int slot)
+{
+    s_cur = slot;
+    reset();
+    window(&s_next.usage[DOCK_CLAUDE].five_hour, 41, 4 * 3600 + 33 * 60);
+    window(&s_next.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 14 * 3600);
+    add(DOCK_RUNNING, DOCK_CLAUDE, "go-dock", 300);
+    title("多台电脑轮流显示");
+    detail("Edit: firmware/main/hosts.c");
+    send();
+    mac_line("38");
+    send_line();
+}
+
+static void mini_page(void) { mini_page_on(0); }
+
+// Several computers share the screen, a page each (hosts.c): news on one
+// not shown takes over once the page shown was up 30 s, after 5 s when it
+// waits for the user; without news the pages with tasks take turns every
+// minute. Touching holds the page, swiping turns it, past the last
+// computer to the connection page.
+static void two_computers(const char *out)
+{
+    s_fake[0].quiet = false;
+    s_now_us += 60 * SEC; // nobody touched the screen for a while
+    mini_page();
+    run(1 * SEC);
+    check(s_shown == 0 && s_order_n == 1, "one computer, its page");
+
+    // A MacBook comes on with an empty page: nothing new, the page stays,
+    // a dot each after the name.
+    join(1, "b2", "User 的 MacBook Pro");
+    reset();
+    window(&s_next.usage[DOCK_CLAUDE].five_hour, 12, 2 * 3600);
+    send();
+    s_cur = 0;
+    run(1 * SEC);
+    check(s_shown == 0 && s_order_n == 2, "an empty page is no news");
+    save(out, "17-two-computers");
+
+    // A task starts there: the Mac mini's page was up long enough.
+    s_cur = 1;
+    add(DOCK_RUNNING, DOCK_CODEX, "web-app", 5);
+    title("修复登录页样式");
+    detail("Bash: npm test");
+    send();
+    run(1 * SEC);
+    check(s_shown == 1 && strcmp(s_shown_name, "User 的 MacBook Pro") == 0, "news elsewhere takes over");
+    save(out, "18-other-computer");
+
+    // A task done on the Mac mini waits until this page was up 30 s.
+    mini_page();
+    s_next.sessions[0].state = DOCK_DONE;
+    s_next.counts[DOCK_RUNNING] = 0;
+    s_next.counts[DOCK_DONE] = 1;
+    s_next.sessions[0].since = NOW;
+    send();
+    run(20 * SEC);
+    check(s_shown == 1, "not before 30 s");
+    run(11 * SEC);
+    check(s_shown == 0, "after 30 s");
+
+    // A question on the MacBook, nothing waiting here: 5 s, and its dot
+    // shows the colour meanwhile.
+    s_cur = 1;
+    reset();
+    window(&s_next.usage[DOCK_CLAUDE].five_hour, 12, 2 * 3600);
+    add(DOCK_APPROVAL, DOCK_CODEX, "web-app", 2);
+    detail("Bash: rm -rf node_modules");
+    send();
+    run(3 * SEC);
+    check(s_shown == 0, "even a question waits 5 s");
+    save(out, "19-question-elsewhere");
+    check(ui_brightness() == FULL, "a question on another computer keeps the screen lit");
+    run(3 * SEC);
+    check(s_shown == 1, "a question takes over after 5 s");
+
+    // Touching holds the page: news on the Mac mini waits.
+    tap(300, 300);
+    mini_page();
+    run(35 * SEC - 1 * SEC);
+    check(s_shown == 1, "held while touched");
+    // Swiping right turns to the computer before, left to the next; after
+    // the last one comes the connection page, then the first again.
+    s_wifi = (wlan_status_t){.state = WLAN_CONNECTED, .ssid = "home-2.4G", .ip = "192.168.31.50", .fixed = true};
+    swipe(200, 300, 200, 0);
+    run(1 * SEC);
+    check(s_shown == 0 && !s_info, "swipe right: the computer before");
+    swipe(400, 300, -200, 0);
+    run(1 * SEC);
+    check(s_shown == 1 && !s_info, "swipe left: the next computer");
+    swipe(400, 300, -200, 0);
+    run(1 * SEC);
+    check(s_info, "after the last computer, the connection page");
+    check(strcmp(lv_label_get_text(ui.info_addr), "192.168.31.50") == 0 &&
+              strcmp(lv_label_get_text(ui.info_code), "482916") == 0,
+          "the connection page shows the address and the pairing code");
+    save(out, "21-connection");
+    swipe(400, 300, -200, 0);
+    run(1 * SEC);
+    check(s_shown == 0 && !s_info, "then the first computer again");
+    tap(40, 26); // the name
+    run(1 * SEC);
+    check(s_shown == 1 && !s_info, "tapping the name: the next page");
+    tap(40, 26);
+    run(1 * SEC);
+    check(s_info, "tapping it again: the connection page");
+    // It stays two minutes after the last touch, whatever happens meanwhile.
+    run(118 * SEC);
+    check(s_info, "the connection page stays while someone may read it");
+    run(2 * SEC);
+    check(!s_info && s_shown == 1, "then the computer's page again");
+    swipe(200, 300, 200, 0);
+    run(1 * SEC);
+    check(s_shown == 0, "swipe right: back to the Mac mini");
+
+    // The Mac mini's go-dock comes back on a new link: the same page.
+    s_fake[0].quiet = true;
+    join(2, "a1", "Mac mini");
+    leave(0);
+    mini_page_on(2);
+    run(1 * SEC);
+    check(s_shown == 2 && s_order_n == 2, "the same go-dock on a new link keeps its page");
+
+    // The page's go-dock goes: the other page at once.
+    leave(2);
+    run(1 * SEC);
+    check(s_shown == 1, "a page whose go-dock left gives way");
+
+    // A long name ends in "…" before the dots.
+    join(3, "c3", "一台名字特别特别长的电脑会被截断");
+    s_cur = 3;
+    reset();
+    add(DOCK_INPUT, DOCK_CLAUDE, "notes", 3);
+    detail("请选择要导出的格式");
+    send();
+    s_now_us += 60 * SEC;
+    run(6 * SEC);
+    check(s_shown == 3, "an input waiting takes over");
+    save(out, "20-long-name");
+
+    // With nothing new the pages take turns every minute: from one waiting
+    // for the user only to another that waits.
+    run(50 * SEC);
+    check(s_shown == 3, "a page stays a minute");
+    run(11 * SEC);
+    check(s_shown == 1 && !s_info, "then the next page's turn");
+    s_cur = 1; // the question answered: back to work, no news
+    reset();
+    add(DOCK_RUNNING, DOCK_CODEX, "web-app", 1);
+    send();
+    run(61 * SEC);
+    check(s_shown == 3, "a page that waits for the user has its turn");
+    run(61 * SEC);
+    check(s_shown == 3, "and gives way only to another that waits");
+
+    // A computer without tasks has no turn.
+    join(2, "d4", "空闲的电脑");
+    reset();
+    send();
+    s_cur = 3; // the input answered
+    reset();
+    add(DOCK_RUNNING, DOCK_CLAUDE, "notes", 1);
+    send();
+    run(1 * SEC); // the page was up a minute already
+    check(s_shown == 1, "turns skip a page without tasks");
+    run(61 * SEC);
+    check(s_shown == 3, "and come back");
+
+    // A computer joining while the connection page is up shows its page.
+    for (int i = 0; i < LINK_HOSTS && !s_info; i++) {
+        tap(40, 26);
+        run(1 * SEC);
+    }
+    check(s_info, "the connection page");
+    join(0, "e5", "新加的电脑");
+    reset();
+    send();
+    run(1 * SEC);
+    check(!s_info && s_shown == 0, "a computer that joins shows its page");
+    s_wifi = (wlan_status_t){.state = WLAN_OFF};
 }
 
 int main(int argc, char **argv)
@@ -355,13 +567,14 @@ int main(int argc, char **argv)
     s_wifi = (wlan_status_t){.state = WLAN_OFF};
 
     // Everyday mix, two pages of tasks.
+    join(0, "a1", "");
     reset();
-    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 62, 4 * 3600 + 33 * 60);
-    window(&s_snap.usage[DOCK_CLAUDE].seven_day, 31, 4 * 86400 + 14 * 3600);
-    s_snap.usage[DOCK_CLAUDE].today_tokens = 1840000;
-    window(&s_snap.usage[DOCK_CODEX].five_hour, 28, 3 * 3600 + 5 * 60);
-    window(&s_snap.usage[DOCK_CODEX].seven_day, 12, 5 * 86400);
-    s_snap.usage[DOCK_CODEX].today_tokens = 402000;
+    window(&s_next.usage[DOCK_CLAUDE].five_hour, 62, 4 * 3600 + 33 * 60);
+    window(&s_next.usage[DOCK_CLAUDE].seven_day, 31, 4 * 86400 + 14 * 3600);
+    s_next.usage[DOCK_CLAUDE].today_tokens = 1840000;
+    window(&s_next.usage[DOCK_CODEX].five_hour, 28, 3 * 3600 + 5 * 60);
+    window(&s_next.usage[DOCK_CODEX].seven_day, 12, 5 * 86400);
+    s_next.usage[DOCK_CODEX].today_tokens = 402000;
     add(DOCK_APPROVAL, DOCK_CLAUDE, "go-dock", 42);
     agent(DOCK_APPROVAL, "Explore", "Bash: cat ~/.ssh/config", 18);
     agent(DOCK_RUNNING, "Explore", "Explore host tree toolbar & store", 186);
@@ -385,12 +598,12 @@ int main(int argc, char **argv)
 
     // Near the limit, with an error; Codex shows the widest usage texts.
     reset();
-    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 94, 38 * 60);
-    window(&s_snap.usage[DOCK_CLAUDE].seven_day, 71, 2 * 86400);
-    s_snap.usage[DOCK_CLAUDE].today_tokens = 3620000;
-    window(&s_snap.usage[DOCK_CODEX].five_hour, 100, 4 * 3600 + 33 * 60);
-    window(&s_snap.usage[DOCK_CODEX].seven_day, 100, 4 * 86400 + 14 * 3600);
-    s_snap.usage[DOCK_CODEX].today_tokens = 12300000;
+    window(&s_next.usage[DOCK_CLAUDE].five_hour, 94, 38 * 60);
+    window(&s_next.usage[DOCK_CLAUDE].seven_day, 71, 2 * 86400);
+    s_next.usage[DOCK_CLAUDE].today_tokens = 3620000;
+    window(&s_next.usage[DOCK_CODEX].five_hour, 100, 4 * 3600 + 33 * 60);
+    window(&s_next.usage[DOCK_CODEX].seven_day, 100, 4 * 86400 + 14 * 3600);
+    s_next.usage[DOCK_CODEX].today_tokens = 12300000;
     add(DOCK_ERROR, DOCK_CLAUDE, "go-dock", 62);
     detail("额度已用完，0:38 后恢复");
     add(DOCK_APPROVAL, DOCK_CODEX, "api-svc", 15);
@@ -405,17 +618,17 @@ int main(int argc, char **argv)
 
     // Nothing running.
     reset();
-    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 8, 4 * 3600 + 41 * 60);
-    window(&s_snap.usage[DOCK_CLAUDE].seven_day, 22, 4 * 86400);
-    s_snap.usage[DOCK_CLAUDE].today_tokens = 96000;
+    window(&s_next.usage[DOCK_CLAUDE].five_hour, 8, 4 * 3600 + 41 * 60);
+    window(&s_next.usage[DOCK_CLAUDE].seven_day, 22, 4 * 86400);
+    s_next.usage[DOCK_CLAUDE].today_tokens = 96000;
     send();
     run(2 * SEC);
     save(out, "3-empty");
 
     // Main turn ended while background subagents still work.
     reset();
-    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 41, 3 * 3600 + 20 * 60);
-    window(&s_snap.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 15 * 3600);
+    window(&s_next.usage[DOCK_CLAUDE].five_hour, 41, 3 * 3600 + 20 * 60);
+    window(&s_next.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 15 * 3600);
     add(DOCK_RUNNING, DOCK_CLAUDE, "host-app", 18);
     title("规划 host 端工具栏");
     msg("派两个 Explore 子任务分别查看工具栏和表格组件。");
@@ -431,8 +644,8 @@ int main(int argc, char **argv)
     // Under the project line what the session is doing, else the
     // assistant's latest text.
     reset();
-    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 41, 4 * 3600 + 33 * 60);
-    window(&s_snap.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 14 * 3600);
+    window(&s_next.usage[DOCK_CLAUDE].five_hour, 41, 4 * 3600 + 33 * 60);
+    window(&s_next.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 14 * 3600);
     add(DOCK_RUNNING, DOCK_CLAUDE, "shellrs", 114);
     title("detail");
     msg("先把两张截图的像素颜色取出来，对比 ShellRS 的配色和渲染。");
@@ -451,8 +664,8 @@ int main(int argc, char **argv)
     // Two sessions fill a page; swiping up shows the next two. Symbols
     // beyond GB2312's hanzi (§, •, –, ≥, ✓) have glyphs.
     reset();
-    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 41, 4 * 3600 + 33 * 60);
-    window(&s_snap.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 14 * 3600);
+    window(&s_next.usage[DOCK_CLAUDE].five_hour, 41, 4 * 3600 + 33 * 60);
+    window(&s_next.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 14 * 3600);
     add(DOCK_RUNNING, DOCK_CLAUDE, "go-dock", 95);
     title("硬件刷机");
     turn(95, 6500);
@@ -474,8 +687,8 @@ int main(int argc, char **argv)
     // Turn clock and output tokens on the second line: running counts on
     // from turn_secs, approval holds it; a row with no text is centred.
     reset();
-    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 41, 4 * 3600 + 33 * 60);
-    window(&s_snap.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 14 * 3600);
+    window(&s_next.usage[DOCK_CLAUDE].five_hour, 41, 4 * 3600 + 33 * 60);
+    window(&s_next.usage[DOCK_CLAUDE].seven_day, 18, 4 * 86400 + 14 * 3600);
     add(DOCK_APPROVAL, DOCK_CLAUDE, "api-svc", 15);
     turn(42, 1200);
     detail("Bash: rm -rf dist");
@@ -492,11 +705,11 @@ int main(int argc, char **argv)
     // The line of readings above the usage, three at most: they share it
     // evenly, the usage card tightens and the tasks stay where they were.
     // The strip is titled with the computer's name.
-    snprintf(s_host, sizeof(s_host), "Mac mini");
-    memset(&s_line, 0, sizeof(s_line));
+    snprintf(s_fake[0].info.name, sizeof(s_fake[0].info.name), "Mac mini");
+    memset(&s_next_line, 0, sizeof(s_next_line));
     reading(DOCK_ICON_CPU, "cpu", "CPU", "95", "%", 95, "", DOCK_LEVEL_CRIT);
     reading(DOCK_ICON_MEMORY, "mem", "内存", "88", "%", 88, "", DOCK_LEVEL_WARN);
-    reading(DOCK_ICON_NET, "net", "网络", "820", "K", -1, "↑1.5M", DOCK_LEVEL_OK);
+    reading(DOCK_ICON_TEMP, "temp", "温度", "72", "°C", -1, "", DOCK_LEVEL_OK);
     send();
     send_line();
     run(1 * SEC);
@@ -520,18 +733,18 @@ int main(int argc, char **argv)
     save(out, "14-line-again"); // after the last group, the first slides in again
 
     // Five on a computer without fans: the second group has two.
-    memset(&s_line, 0, sizeof(s_line));
+    memset(&s_next_line, 0, sizeof(s_next_line));
     reading(DOCK_ICON_CPU, "cpu", "CPU", "100", "%", 100, "", DOCK_LEVEL_CRIT);
     reading(DOCK_ICON_GPU, "gpu", "GPU", "78", "%", 78, "", DOCK_LEVEL_WARN);
     reading(DOCK_ICON_MEMORY, "mem", "内存", "41", "%", 41, "", DOCK_LEVEL_OK);
-    reading(DOCK_ICON_NET, "net", "网络", "12", "M", -1, "↑820K", DOCK_LEVEL_OK);
+    reading(DOCK_ICON_TEMP, "temp", "温度", "88", "°C", -1, "", DOCK_LEVEL_WARN);
     reading(DOCK_ICON_DISK, "disk", "磁盘", "97", "%", 97, "", DOCK_LEVEL_CRIT);
     send_line();
     run(7 * SEC);
     save(out, "15-line-five");
 
     // The plugin turned off: the Agent page as before.
-    memset(&s_line, 0, sizeof(s_line));
+    memset(&s_next_line, 0, sizeof(s_next_line));
     send_line();
     run(1 * SEC);
     save(out, "16-line-gone");
@@ -605,11 +818,12 @@ int main(int argc, char **argv)
 
     // Host went away two minutes ago.
     reset();
-    window(&s_snap.usage[DOCK_CLAUDE].five_hour, 62, 2 * 3600);
+    window(&s_next.usage[DOCK_CLAUDE].five_hour, 62, 2 * 3600);
     add(DOCK_RUNNING, DOCK_CLAUDE, "go-dock", 30);
     detail("Edit: ui.c");
     send();
     run(1 * SEC);
+    s_fake[0].quiet = true;
     s_now_us += 120 * SEC;
     run(2 * SEC);
     save(out, "4-offline");
@@ -624,5 +838,8 @@ int main(int argc, char **argv)
     s_wifi = (wlan_status_t){.state = WLAN_OFF};
     s_settings.brightness = 10;
     check(ui_brightness() == 10 * 255 / 100, "away, never brighter than the brightness set");
+    s_settings.brightness = 80;
+
+    two_computers(out);
     return 0;
 }

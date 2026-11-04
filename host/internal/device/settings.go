@@ -1,6 +1,9 @@
 package device
 
-import "time"
+import (
+	"io"
+	"time"
+)
 
 // Screen brightness (docs/protocol-v1.md §3.3): go-dock keeps the setting,
 // the screen decides when to dim (tasks, touch, the link going away) and
@@ -23,6 +26,28 @@ func EncodeSettings(o Options) []byte {
 		DimAfter:      int(o.DimAfter / time.Second),
 	})
 	return line
+}
+
+// sendSettings sends the brightness settings: always when they just
+// changed, on connecting only when they are the user's own or changed
+// while the screen was away. The screen keeps what it got last, from
+// whichever computer.
+func (m *Manager) sendSettings(conn io.WriteCloser, changed bool) error {
+	m.mu.Lock()
+	o, due := m.opts, m.settingsDue
+	m.mu.Unlock()
+	if !changed && !due && !o.OwnSettings {
+		return nil
+	}
+	if err := m.write(conn, EncodeSettings(o)); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if sameSettings(m.opts, o) {
+		m.settingsDue = false
+	}
+	m.mu.Unlock()
+	return nil
 }
 
 // sameSettings reports whether a and b send the screen the same settings.

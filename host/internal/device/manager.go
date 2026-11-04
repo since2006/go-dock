@@ -43,6 +43,10 @@ type Options struct {
 	Brightness    int
 	DimBrightness int
 	DimAfter      time.Duration
+	// OwnSettings: the user changed the brightness from the defaults.
+	// Only then does connecting send them: several computers share the
+	// screen, and one left as it came must not undo another's choice.
+	OwnSettings bool
 }
 
 // SnapshotSource is what the manager mirrors to the device; *hub.Hub
@@ -128,13 +132,20 @@ type Manager struct {
 	usbFlash chan flashJob // an update for the USB loop
 	netFlash chan flashJob // and for the WiFi loop
 	beepReq  chan []byte   // the beep line of a sound to try out
-	wifiReq  chan []byte   // a wifi line, taken only by a USB link that can send it now
-	scanReq  chan []byte   // a wifi_scan line, likewise
-	scanRes  chan scanResult
-	scanMu   sync.Mutex // one scan at a time
-	// scanTimeout bounds a scan: handing the request over, then the answer.
-	scanTimeout time.Duration
-	settings    chan struct{} // the brightness settings changed
+	wifiReq  chan wifiReq  // WiFi settings, taken only by a USB link that can send them now
+	wifiMu   sync.Mutex    // one change of WiFi settings at a time
+	// wifiTry counts the WiFi settings the screen took (NetStatus.Try);
+	// only the USB loop touches it.
+	wifiTry int
+	scanReq chan []byte // a wifi_scan line, taken like wifiReq
+	scanRes chan scanResult
+	scanMu  sync.Mutex // one scan at a time
+	// wifiTimeout bounds a change of WiFi settings, scanTimeout a scan:
+	// handing the request over, then the answer.
+	wifiTimeout, scanTimeout time.Duration
+	settings                 chan struct{} // the brightness settings changed
+	// settingsDue: they changed since the screen last got them (under mu).
+	settingsDue bool
 	// waiting and active hold waitingTasks and activeTasks as of the last
 	// snapshot sent to a device that beeps; only the WiFi loop uses them.
 	// They outlive connections, so reconnecting does not beep again for
@@ -179,9 +190,10 @@ func NewManager(src SnapshotSource, opts Options, log *slog.Logger, onChange fun
 		usbFlash:     make(chan flashJob),
 		netFlash:     make(chan flashJob),
 		beepReq:      make(chan []byte, 1),
-		wifiReq:      make(chan []byte),
+		wifiReq:      make(chan wifiReq),
 		scanReq:      make(chan []byte),
 		scanRes:      make(chan scanResult, 1),
+		wifiTimeout:  5 * time.Second,
 		scanTimeout:  15 * time.Second,
 		settings:     make(chan struct{}, 1),
 		opts:         opts,
@@ -195,6 +207,9 @@ func (m *Manager) SetOptions(o Options) {
 	m.mu.Lock()
 	old := m.opts
 	m.opts = o
+	if !sameSettings(old, o) {
+		m.settingsDue = true
+	}
 	m.mu.Unlock()
 	if old.Enabled != o.Enabled || old.Addr != o.Addr || old.Code != o.Code || old.Name != o.Name || old.HostID != o.HostID {
 		poke(m.kick)
@@ -469,7 +484,7 @@ func (m *Manager) serveNet(ctx context.Context, addr string, conn io.ReadWriteCl
 				m.update(func(s *Status) {
 					s.State, s.Incompatible, s.Width, s.Height, s.Error = StateReady, false, msg.W, msg.H, ""
 				})
-				if err := m.write(conn, EncodeSettings(m.options())); err != nil {
+				if err := m.sendSettings(conn, false); err != nil {
 					return fail(err)
 				}
 				if err := push(true); err != nil {
@@ -514,7 +529,7 @@ func (m *Manager) serveNet(ctx context.Context, addr string, conn io.ReadWriteCl
 			}
 		case <-m.settings:
 			if ready {
-				if err := m.write(conn, EncodeSettings(m.options())); err != nil {
+				if err := m.sendSettings(conn, true); err != nil {
 					return fail(err)
 				}
 			}
@@ -627,14 +642,15 @@ func (m *Manager) serveUSB(ctx context.Context, name string, conn io.ReadWriteCl
 	// sends unasked (it restarted) gets ours in return: hearing go-dock is
 	// what keeps a freshly updated firmware, which rolls back otherwise.
 	ready, asked := false, false
-	// Set-up requests are taken only once the screen said hello: one the
-	// cable cannot carry now times out with its caller instead of vanishing.
-	whenReady := func(c chan []byte) chan []byte {
-		if ready {
-			return c
+	// join is the WiFi settings sent, until the screen answers them.
+	var join *wifiReq
+	answer := func(a wifiAnswer) {
+		if join != nil {
+			join.done <- a
+			join = nil
 		}
-		return nil
 	}
+	defer func() { answer(wifiAnswer{err: errors.New("USB 连接中断，请重新插好 USB 线再试")}) }()
 	fail := func(err error) time.Duration {
 		msg := fmt.Sprintf("%s: %v", name, err)
 		m.updateUSB(func(u *USBStatus) { u.Error = msg })
@@ -677,8 +693,15 @@ func (m *Manager) serveUSB(ctx context.Context, name string, conn io.ReadWriteCl
 					u.State, u.Firmware, u.Incompatible, u.Error = StateReady, msg.FW, msg.Proto != ProtoVersion, ""
 				})
 			case "net":
-				st := NetStatus{State: msg.State, SSID: msg.SSID, IP: msg.IP, Port: msg.Port, Code: msg.Code, Fixed: msg.Fixed, Err: msg.Err}
+				took := join != nil && join.cfg.answeredBy(msg)
+				if took {
+					m.wifiTry++
+				}
+				st := NetStatus{State: msg.State, SSID: msg.SSID, IP: msg.IP, Port: msg.Port, Code: msg.Code, Fixed: msg.Fixed, Err: msg.Err, Try: m.wifiTry}
 				m.updateUSB(func(u *USBStatus) { u.Net = &st })
+				if took {
+					answer(wifiAnswer{try: m.wifiTry})
+				}
 			case "wifi_list":
 				select {
 				case m.scanRes <- scanResult{aps: msg.APs, err: msg.Err}:
@@ -686,16 +709,23 @@ func (m *Manager) serveUSB(ctx context.Context, name string, conn io.ReadWriteCl
 				}
 			case "log":
 				m.log.Log(sctx, logx.ParseLevel(msg.Level), msg.Msg, "src", "device")
+				// Settings the screen will not take come back as a warning,
+				// ahead of the net message with the WiFi as it was (§3.7).
+				if msg.Level == "warn" {
+					answer(wifiAnswer{err: errors.New(msg.Msg)})
+				}
 			case "ack":
 			default:
 				m.log.Debug("忽略屏幕 USB 消息", "t", msg.T)
 			}
-		case line := <-whenReady(m.scanReq):
+		case line := <-whenReady(ready, m.scanReq):
 			if err := m.write(conn, line); err != nil {
 				return fail(err)
 			}
-		case line := <-whenReady(m.wifiReq):
-			if err := m.write(conn, line); err != nil {
+		case req := <-whenReady(ready, m.wifiReq):
+			answer(wifiAnswer{err: errors.New("屏幕没有回复")}) // its caller gave up
+			join = &req
+			if err := m.write(conn, EncodeWiFi(req.cfg)); err != nil {
 				return fail(err)
 			}
 		case <-hello.C:
@@ -723,21 +753,52 @@ func (m *Manager) serveUSB(ctx context.Context, name string, conn io.ReadWriteCl
 	}
 }
 
-// ConfigureWiFi tells the screen, on the USB cable, which WiFi to join.
-func (m *Manager) ConfigureWiFi(w WiFiConfig) error {
+// whenReady hands out c only once the screen said hello: a set-up request
+// the cable cannot carry now times out with its caller instead of
+// vanishing.
+func whenReady[T any](ready bool, c chan T) chan T {
+	if ready {
+		return c
+	}
+	return nil
+}
+
+type wifiReq struct {
+	cfg  WiFiConfig
+	done chan wifiAnswer // buffered: the loop never waits for its caller
+}
+
+type wifiAnswer struct {
+	try int
+	err error
+}
+
+// ConfigureWiFi tells the screen, on the USB cable, which WiFi to join,
+// and waits until it took the settings. It returns their number: how the
+// joining goes shows in Status().USB.Net once its Try is that number, so
+// news about the WiFi as it was are not taken for the outcome.
+func (m *Manager) ConfigureWiFi(w WiFiConfig) (int, error) {
 	if err := w.Check(); err != nil {
-		return err
+		return 0, err
 	}
+	m.wifiMu.Lock()
+	defer m.wifiMu.Unlock()
 	if err := m.wifiLinked(); err != nil {
-		return err
+		return 0, err
 	}
-	t := time.NewTimer(2 * time.Second)
+	req := wifiReq{cfg: w, done: make(chan wifiAnswer, 1)}
+	t := time.NewTimer(m.wifiTimeout)
 	defer t.Stop()
 	select {
-	case m.wifiReq <- EncodeWiFi(w):
-		return nil
+	case m.wifiReq <- req:
 	case <-t.C:
-		return errors.New("屏幕没有响应，请稍后再试")
+		return 0, errors.New("屏幕没有响应，请稍后再试")
+	}
+	select {
+	case a := <-req.done:
+		return a.try, a.err
+	case <-t.C:
+		return 0, errors.New("屏幕没有回复，请稍后再试")
 	}
 }
 

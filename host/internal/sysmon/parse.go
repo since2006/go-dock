@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/shirou/gopsutil/v4/sensors"
 )
 
 // The parsers below serve one platform each but are plain functions, so
@@ -130,4 +132,39 @@ func readNumber(path string) (float64, bool) {
 	}
 	v, err := strconv.ParseFloat(strings.TrimSpace(string(b)), 64)
 	return v, err == nil && v >= 0
+}
+
+// Sensor names (lower case, a part of them) that read the chip, most
+// specific first. A computer has many sensors; the chip's temperature is
+// the hottest of the first group that reads any.
+var chipSensors = [][]string{
+	// Apple silicon: the dies (PMU tdie*; on M1 and M2 also pACC, eACC,
+	// GPU and SOC MTR Temp Sensor*). AMD on Linux: k10temp's or zenpower's
+	// Tdie.
+	{"tdie", "mtr temp"},
+	{"tc0d", "tc0p"}, // Intel Macs (SMC): the CPU's diode, its proximity
+	{"coretemp_package", "x86_pkg_temp", "k10temp_tctl", "zenpower_tctl"}, // Linux: Intel's package, AMD's Tctl
+	{"coretemp_core", "cpu_thermal", "soc_thermal"},                       // Intel's cores; ARM boards
+}
+
+// chipTemp picks the chip's temperature among the sensors (gopsutil's
+// SensorTemperatures); 0 when none reads the chip. Calibration and
+// peripheral sensors (PMU tcal, tdev), the SSD and the battery are no part
+// of it.
+func chipTemp(ts []sensors.TemperatureStat) float64 {
+	for _, group := range chipSensors {
+		t := 0.0
+		for _, s := range ts {
+			k := strings.ToLower(s.SensorKey)
+			for _, g := range group {
+				if strings.Contains(k, g) && s.Temperature > 0 && s.Temperature < 150 {
+					t = max(t, s.Temperature)
+				}
+			}
+		}
+		if t > 0 {
+			return t
+		}
+	}
+	return 0
 }

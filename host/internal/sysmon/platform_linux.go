@@ -4,6 +4,8 @@ import (
 	"context"
 	"os/exec"
 	"time"
+
+	"github.com/shirou/gopsutil/v4/sensors"
 )
 
 type linux struct {
@@ -20,6 +22,12 @@ func (*linux) fans(context.Context) []float64 { return hwmonFans("/sys/class/hwm
 
 // memory: gopsutil's Used is MemTotal - MemAvailable, as free(1) counts.
 func (*linux) memory(context.Context, *Memory) {}
+
+// temp reads hwmon (or the thermal zones without it).
+func (*linux) temp(ctx context.Context) float64 {
+	ts, _ := sensors.TemperaturesWithContext(ctx) // a partial list may come with an error
+	return chipTemp(ts)
+}
 
 // gpu asks nvidia-smi for NVIDIA cards and reads sysfs for AMD ones.
 func (l *linux) gpu(ctx context.Context) float64 {

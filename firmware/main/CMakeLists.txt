@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS main.c display.c link.c ota.c ui.c fonts.c beep.c settings.c wlan.c
+    SRCS main.c display.c link.c hosts.c ota.c ui.c fonts.c beep.c settings.c wlan.c
     INCLUDE_DIRS .
     REQUIRES esp_driver_gpio esp_driver_i2c esp_driver_ledc esp_driver_spi esp_driver_usb_serial_jtag
              esp_lcd esp_timer esp_app_format app_update mbedtls nvs_flash

@@ -246,7 +246,7 @@ const SCR_ICONS = {
   gpu: '<path d="M2.5 6h19v11h-19z"/><circle cx="9" cy="11.5" r="3"/><path d="M15 9.5h3.5M15 13.5h3.5"/><path d="M5.5 17v3M9.5 17v3"/>',
   memory: '<path d="M3 7h18v9H3z"/><path d="M6.5 10h3v3h-3zM14.5 10h3v3h-3z"/><path d="M6 16v3M10 16v3M14 16v3M18 16v3"/>',
   rotor: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1.6"/><path d="M12 10.4A4 4 0 0 1 12 4A4 4 0 0 1 12 10.4"/><path d="M13.39 12.8A4 4 0 0 1 18.93 16A4 4 0 0 1 13.39 12.8"/><path d="M10.61 12.8A4 4 0 0 1 5.07 16A4 4 0 0 1 10.61 12.8"/>',
-  net: '<path d="M8 4v15M4.5 15.5 8 19l3.5-3.5"/><path d="M16 20V5M12.5 8.5 16 5l3.5 3.5"/>',
+  temp: '<path d="M12.5 13.76V5a2.5 2.5 0 0 0-5 0v8.76a4.5 4.5 0 1 0 5 0z"/><path d="M15.5 6h4M15.5 10.5h4"/>',
   disk: '<path d="M4 4.5h16v15H4z"/><path d="M4 14h16"/><circle cx="16.5" cy="16.75" r="1"/>',
   unplug: '<path d="M9 7V3M15 7V3"/><path d="M6 7h12v4a6 6 0 0 1-6 6 6 6 0 0 1-6-6z"/><path d="M12 17v4"/><path d="M3 3l18 18"/>',
 };
@@ -892,10 +892,9 @@ function renderWiFi(dev) {
   }
   $("#wifi-status").textContent = text;
   // Offered while the settings name another screen, or none.
-  const f = form.elements;
-  const other = n && (f["device.addr"].value.trim() !== wifiAddr(n) || f["device.code"].value.trim() !== n.code);
-  $("#wifi-use").hidden = !(usb && n && n.state === "connected" && n.ip && other);
+  $("#wifi-use").hidden = !(usb && n && n.state === "connected" && n.ip && !screenInSettings(n));
   $("#wifi-fields").disabled = !usb;
+  drawJoin();
 }
 
 function wifiAddr(n) {
@@ -907,12 +906,14 @@ function showWiFiStatic() {
 }
 wifiForm.elements.fixed.addEventListener("change", showWiFiStatic);
 
-async function sendWiFi(body) {
+// Turning the WiFi off needs no dialog: the status line above shows it.
+async function wifiOff() {
   try {
-    const dev = await api("/api/device/wifi", { method: "POST", body });
-    wifiForm.elements.pass.value = "";
-    showMsg("#wifi-msg", body.ssid ? "已发给屏幕，正在连接…" : "屏幕已关闭 WiFi");
-    if (state) { state.device = dev; render(); }
+    const { device } = await api("/api/device/wifi", { method: "POST", body: { ssid: "" } });
+    wifiJoin = null;
+    joinText = "";
+    showMsg("#wifi-msg", "屏幕已关闭 WiFi");
+    if (state) { state.device = device; render(); }
   } catch (e) {
     showMsg("#wifi-msg", e.message, true);
   }
@@ -921,62 +922,288 @@ async function sendWiFi(body) {
 wifiForm.addEventListener("submit", (ev) => {
   ev.preventDefault();
   const f = wifiForm.elements;
-  if (!f.ssid.value.trim()) {
-    showMsg("#wifi-msg", "请填写 WiFi 名称", true);
+  const ssid = f.ssid.value.trim();
+  if (!ssid) {
+    showMsg("#wifi-msg", "请填写 WiFi 名称，或点「扫描并选择」", true);
     return;
   }
-  const body = { ssid: f.ssid.value.trim(), pass: f.pass.value };
-  if (f.fixed.checked) Object.assign(body, { ip: f.ip.value.trim(), mask: f.mask.value.trim(), gw: f.gw.value.trim() });
-  sendWiFi(body);
-});
-
-// The screen scans with its own radio, so the list holds what it can join:
-// 2.4 GHz networks in its range.
-function wifiSignal(rssi) {
-  return rssi >= -60 ? "信号强" : rssi >= -75 ? "信号中" : "信号弱";
-}
-
-$("#wifi-scan").addEventListener("click", async () => {
-  const box = $("#wifi-aps");
-  const btn = $("#wifi-scan");
-  btn.disabled = true;
-  box.replaceChildren(el("span", { class: "muted" }, "屏幕正在扫描，约需 3 秒…"));
-  try {
-    const { aps } = await api("/api/device/wifi/scan", { method: "POST", body: {} });
-    $("#wifi-ssids").replaceChildren(...aps.map((a) => el("option", { value: a.ssid })));
-    box.replaceChildren(...(aps.length ? aps.map((a) => el("button", {
-      type: "button", class: "btn ghost",
-      onclick: () => {
-        const f = wifiForm.elements;
-        f.ssid.value = a.ssid;
-        if (a.open) f.pass.value = "";
-        (a.open ? f.ssid : f.pass).focus();
-      },
-    }, `${a.ssid}  · ${wifiSignal(a.rssi)}（${a.rssi} dBm）· ${a.open ? "无密码" : "有密码"}`))
-      : [el("span", { class: "muted" }, "屏幕没有找到 WiFi（只能收到 2.4 GHz 的网络）")]));
-  } catch (e) {
-    box.replaceChildren(el("span", { class: "form-msg err" }, e.message));
-  } finally {
-    btn.disabled = false;
-  }
+  joinWiFi({ ssid, open: !f.pass.value }, f.pass.value);
 });
 
 $("#wifi-off").addEventListener("click", () => {
-  if (confirm("让屏幕断开 WiFi 并忘掉 WiFi 设置？之后只能用 USB 连接。")) sendWiFi({ ssid: "" });
+  if (confirm("让屏幕断开 WiFi 并忘掉 WiFi 设置？之后只能用 USB 连接。")) wifiOff();
 });
+
+// The settings name this screen: go-dock reaches it over WiFi.
+function screenInSettings(n) {
+  const f = form.elements;
+  return f["device.addr"].value.trim() === wifiAddr(n) && f["device.code"].value.trim() === n.code;
+}
+
+async function useScreen(n) {
+  loadedConfig = await api("/api/config", { method: "POST", body: { device: { addr: wifiAddr(n), code: n.code } } });
+  fillForm(form, loadedConfig);
+  render();
+}
 
 $("#wifi-switch").addEventListener("click", async () => {
   const n = state && state.device && state.device.usb && state.device.usb.net;
   if (!n) return;
   try {
-    loadedConfig = await api("/api/config", { method: "POST", body: { device: { addr: wifiAddr(n), code: n.code } } });
-    fillForm(form, loadedConfig);
-    render();
+    await useScreen(n);
     showMsg("#wifi-msg", "已保存，go-dock 正通过 WiFi 连接屏幕；之后可以拔掉 USB 线（屏幕要另外供电）");
   } catch (e) {
     showMsg("#wifi-msg", e.message, true);
   }
 });
+
+// ---------- WiFi dialog ----------
+
+// The dialog walks through picking a network the screen sees (list),
+// its password (pass) and the joining (join). The screen scans with its
+// own radio, so the list holds what it can join: 2.4 GHz networks in its
+// range.
+const wifiDlg = $("#wifi-dialog");
+let dlg = { view: "list" };
+let scanSeq = 0;
+// wifiJoin is the last settings sent: the network (ap), phase (sending,
+// refused or sent), the try number whose outcome usb.net reports, and
+// when. joinText is what the form last said about it.
+let wifiJoin = null;
+let joinText = "";
+const SLOW_JOIN_MS = 30000;
+
+wifiDlg.addEventListener("click", (ev) => { if (ev.target === wifiDlg) wifiDlg.close(); });
+wifiDlg.addEventListener("close", () => { dlg = { view: "list" }; scanSeq++; });
+$("#wifi-dlg-close").addEventListener("click", () => wifiDlg.close());
+$("#wifi-scan").addEventListener("click", () => { openDialog(); scan(); });
+
+function openDialog() {
+  if (!wifiDlg.open) wifiDlg.showModal();
+}
+
+function show(view, extra = {}) {
+  dlg = { ...dlg, ...extra, view };
+  drawDialog();
+}
+
+async function scan() {
+  const seq = ++scanSeq;
+  show("list", { scanning: true, scanErr: "" });
+  try {
+    const { aps } = await api("/api/device/wifi/scan", { method: "POST", body: {} });
+    if (seq === scanSeq) show("list", { scanning: false, aps });
+  } catch (e) {
+    if (seq === scanSeq) show("list", { scanning: false, scanErr: e.message });
+  }
+}
+
+function pick(ap) {
+  wifiForm.elements.ssid.value = ap.ssid;
+  show("pass", { ap, passErr: "", passVal: "" });
+}
+
+async function joinWiFi(ap, pass) {
+  const f = wifiForm.elements;
+  const body = { ssid: ap.ssid, pass };
+  if (f.fixed.checked) Object.assign(body, { ip: f.ip.value.trim(), mask: f.mask.value.trim(), gw: f.gw.value.trim() });
+  wifiJoin = { ap, phase: "sending" };
+  openDialog();
+  show("join", { ap, used: false, useErr: "" });
+  try {
+    const { try: n, device } = await api("/api/device/wifi", { method: "POST", body });
+    f.pass.value = "";
+    wifiJoin = { ap, phase: "sent", try: n, at: Date.now() };
+    setTimeout(drawJoin, SLOW_JOIN_MS + 100);
+    if (state) { state.device = device; render(); }
+  } catch (e) {
+    wifiJoin = { ap, phase: "refused", err: e.message };
+  }
+  drawJoin();
+}
+
+// joinOutcome reads how the last settings sent are doing: sending,
+// refused, connecting (slow after a while), ok, failed, or unknown when the
+// cable is gone or newer settings took over.
+function joinOutcome() {
+  const j = wifiJoin;
+  if (!j) return null;
+  if (j.phase !== "sent") return { kind: j.phase, err: j.err };
+  const u = (state && state.device && state.device.usb) || {};
+  const n = u.net;
+  if (u.state !== "ready" || !n) return { kind: "unknown", why: "USB 线断开了，看不到连接结果。插回 USB 线后，这里会显示屏幕的 WiFi 状态。" };
+  if (n.try > j.try) return { kind: "unknown", why: "屏幕已经改用了别的 WiFi 设置。" };
+  if (n.try === j.try && n.state === "connected") return { kind: "ok", n };
+  if (n.try === j.try && n.state === "failed") return { kind: "failed", n };
+  return { kind: "connecting", slow: Date.now() - j.at > SLOW_JOIN_MS };
+}
+
+// drawJoin shows the outcome under the form, and in the dialog while it
+// is on the join view.
+function drawJoin() {
+  const o = joinOutcome();
+  if (o) {
+    const name = `「${wifiJoin.ap.ssid}」`;
+    const [text, cls] = {
+      sending: ["正在发给屏幕…", ""],
+      refused: [o.err, "err"],
+      connecting: [`屏幕正在连接 WiFi${name}…`, ""],
+      ok: [`屏幕已连上 WiFi${name}`, "ok"],
+      failed: [`屏幕连不上 WiFi${name}：${(o.n && o.n.err) || "原因不明"}`, "err"],
+      unknown: [o.why, ""],
+    }[o.kind];
+    // Only news: other messages stay until the outcome changes.
+    if (text !== joinText) {
+      joinText = text;
+      showMsg("#wifi-msg", text, cls === "err");
+      if (cls === "ok") $("#wifi-msg").classList.add("ok");
+    }
+  }
+  // State news come every few seconds; redrawing for nothing new would
+  // restart the spinner and take the focus.
+  if (wifiDlg.open && dlg.view === "join" && joinKey() !== dlg.key) drawDialog();
+}
+
+function joinKey() {
+  const o = joinOutcome();
+  return JSON.stringify([o, dlg.used, dlg.useErr, o && o.n ? screenInSettings(o.n) : null]);
+}
+
+function wifiSignal(rssi) {
+  return rssi >= -60 ? "信号强" : rssi >= -75 ? "信号中" : "信号弱";
+}
+
+function bars(rssi) {
+  const on = rssi >= -55 ? 4 : rssi >= -67 ? 3 : rssi >= -78 ? 2 : 1;
+  return el("span", { class: "bars", "aria-hidden": "true" }, [1, 2, 3, 4].map((i) => el("i", { class: i <= on ? "on" : "" })));
+}
+
+function lockIcon(open) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("class", open ? "lock open" : "lock");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<rect x="3" y="7" width="10" height="7" rx="1.5" fill="currentColor"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.6"/>';
+  return svg;
+}
+
+const waiting = (text, sub) => el("div", { class: "wait" }, el("div", { class: "spinner" }), el("div", {}, el("div", {}, text), sub ? el("div", { class: "dlg-note" }, sub) : null));
+
+function outcome(ok, what, why) {
+  return el("div", { class: `outcome ${ok ? "ok" : "err"}`, role: "status" },
+    el("div", { class: "mark", "aria-hidden": "true" }, ok ? "✓" : "✕"),
+    el("div", {}, el("div", { class: "what" }, what), why ? el("div", { class: "why" }, why) : null));
+}
+
+// Back to the list, scanning first when the network was typed in.
+const back = () => (dlg.aps ? show("list") : scan());
+
+const btn = (label, onclick, cls = "") => el("button", { type: "button", class: `btn ${cls}`, onclick }, label);
+
+function drawDialog() {
+  const body = [], foot = [];
+  let title = "选择 WiFi";
+  const n = state && state.device && state.device.usb && state.device.usb.net;
+  if (dlg.view === "list") {
+    if (dlg.scanning) {
+      body.push(waiting("屏幕正在扫描附近的 WiFi…", "大约需要 3 秒"));
+    } else if (dlg.scanErr) {
+      body.push(outcome(false, "扫描失败", dlg.scanErr));
+    } else if (!dlg.aps || !dlg.aps.length) {
+      body.push(el("p", { class: "dlg-note" }, "屏幕没有找到 WiFi。屏幕只能连 2.4 GHz 的网络，只有 5 GHz 的 WiFi 不会列出来；离路由器太远也收不到。"));
+    } else {
+      body.push(el("div", { class: "ap-list" }, dlg.aps.map((a) => {
+        const here = n && n.state === "connected" && n.ssid === a.ssid;
+        return el("button", { type: "button", class: "ap", title: `${wifiSignal(a.rssi)}（${a.rssi} dBm）· ${a.open ? "无密码" : "有密码"}`, onclick: () => pick(a) },
+          bars(a.rssi), el("span", { class: "name" }, a.ssid), here ? el("span", { class: "tag" }, "已连接") : null, lockIcon(a.open));
+      })));
+    }
+    foot.push(btn("手动输入", () => { wifiDlg.close(); wifiForm.elements.ssid.focus(); }, "ghost left"));
+    if (!dlg.scanning) foot.push(btn("重新扫描", scan, "ghost"));
+    foot.push(btn("取消", () => wifiDlg.close()));
+  } else if (dlg.view === "pass") {
+    const ap = dlg.ap;
+    title = `连接「${ap.ssid}」`;
+    const f = wifiForm.elements;
+    const addr = f.fixed.checked ? `使用固定 IP ${f.ip.value.trim() || "（未填写）"}，可以在页面上的「固定 IP」里修改。` : "地址由路由器自动分配（DHCP）。";
+    const pass = el("input", { name: "pass", type: "password", maxlength: "63", autocomplete: "new-password", spellcheck: "false" });
+    pass.value = dlg.passVal || "";
+    const fm = el("form", { onsubmit: (ev) => {
+      ev.preventDefault();
+      const p = pass.value;
+      if (!ap.open && p.length < 8) {
+        show("pass", { passErr: p ? "WiFi 密码至少 8 个字符" : "请输入 WiFi 密码", passVal: p });
+        return;
+      }
+      joinWiFi(ap, ap.open ? "" : p);
+    } });
+    if (ap.open) {
+      fm.append(el("p", { class: "dlg-note" }, "这个 WiFi 没有密码，任何人都能连上。"));
+    } else {
+      fm.append(el("label", {}, "WiFi 密码", pass),
+        el("label", { class: "check" }, el("input", { type: "checkbox", onchange: (ev) => { pass.type = ev.target.checked ? "text" : "password"; } }), " 显示密码"));
+    }
+    if (dlg.passErr) fm.append(el("p", { class: "dlg-note err", role: "alert" }, dlg.passErr));
+    fm.append(el("p", { class: "dlg-note" }, addr, ap.open ? "" : "密码只发给屏幕保存，go-dock 不记录。"));
+    body.push(fm);
+    const go = btn("连接", () => fm.requestSubmit(), "primary");
+    foot.push(btn("返回", back, "ghost left"), go);
+    requestAnimationFrame(() => (ap.open ? go : pass).focus());
+  } else {
+    const o = joinOutcome() || { kind: "sending" };
+    const ap = dlg.ap || (wifiJoin && wifiJoin.ap);
+    title = `连接「${ap.ssid}」`;
+    const retry = () => show("pass", { ap, passErr: "", passVal: "" });
+    dlg.key = joinKey();
+    if (o.kind === "sending") {
+      body.push(waiting("正在把设置发给屏幕…"));
+    } else if (o.kind === "refused") {
+      body.push(outcome(false, "屏幕没有接受这个设置", o.err));
+      foot.push(btn("返回", ap.open ? back : retry, "ghost left"), btn("关闭", () => wifiDlg.close()));
+    } else if (o.kind === "connecting") {
+      body.push(waiting(`屏幕正在连接「${ap.ssid}」…`, o.slow
+        ? "30 秒了还没连上，屏幕仍在尝试。可能是信号太弱，或者路由器没有给屏幕分配地址。"
+        : "通常需要 5–15 秒"));
+      foot.push(btn("关闭", () => wifiDlg.close()));
+    } else if (o.kind === "ok") {
+      const facts = el("dl", { class: "facts" },
+        el("dt", {}, "地址"), el("dd", {}, wifiAddr(o.n) + (o.n.fixed ? "（固定 IP）" : "")),
+        el("dt", {}, "配对码"), el("dd", {}, o.n.code));
+      body.push(outcome(true, `已连上「${ap.ssid}」`), facts);
+      if (screenInSettings(o.n)) {
+        body.push(el("p", { class: "dlg-note" }, dlg.used
+          ? "已保存，go-dock 正通过 WiFi 连接屏幕。之后可以拔掉 USB 线（屏幕要另外供电）。"
+          : "go-dock 的设置里已经是这块屏幕，会自动通过 WiFi 连接它。"));
+        foot.push(btn("完成", () => wifiDlg.close(), "primary"));
+      } else {
+        body.push(el("p", { class: "dlg-note" }, "让 go-dock 通过 WiFi 显示到这块屏幕上，需要把它的地址和配对码填进设置。"));
+        if (dlg.useErr) body.push(el("p", { class: "dlg-note err", role: "alert" }, dlg.useErr));
+        const use = btn("使用这块屏幕", async () => {
+          use.disabled = true;
+          try {
+            await useScreen(o.n);
+            show("join", { used: true, useErr: "" });
+          } catch (e) {
+            show("join", { useErr: e.message });
+          }
+        }, "primary");
+        foot.push(btn("以后再说", () => wifiDlg.close(), "ghost"), use);
+      }
+    } else if (o.kind === "failed") {
+      body.push(outcome(false, `连不上「${ap.ssid}」`, (o.n && o.n.err) || "原因不明"),
+        el("p", { class: "dlg-note" }, "屏幕会每隔几秒自动重试，连上后这里会更新。"));
+      if (!ap.open) foot.push(btn("重新输入密码", retry, "ghost"));
+      foot.unshift(btn("选择其他 WiFi", scan, "ghost left"));
+      foot.push(btn("关闭", () => wifiDlg.close()));
+    } else {
+      body.push(el("p", { class: "dlg-note" }, o.why));
+      foot.push(btn("关闭", () => wifiDlg.close()));
+    }
+  }
+  $("#wifi-dlg-title").textContent = title;
+  $("#wifi-dlg-body").replaceChildren(...body);
+  $("#wifi-dlg-foot").replaceChildren(...foot);
+}
 
 // Alert sounds come from the host, so the lists and the browser play the
 // same notes as the device. Each sound select names its custom notes field

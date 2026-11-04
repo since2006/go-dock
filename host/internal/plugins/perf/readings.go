@@ -22,7 +22,9 @@ func readings(s sysmon.Sample) []model.Reading {
 	if len(s.Fans) > 0 {
 		out = append(out, fan(s.Fans))
 	}
-	out = append(out, network(s))
+	if s.Temp > 0 {
+		out = append(out, temp(s.Temp))
+	}
 	if s.Disk.Total > 0 {
 		out = append(out, disk(s.Disk))
 	}
@@ -64,16 +66,10 @@ func fan(fans []float64) model.Reading {
 	return r
 }
 
-// network is the download speed, the upload beside it: 5.5K ↑85K (the
-// icon's arrows say they are speeds).
-func network(s sysmon.Sample) model.Reading {
-	r := model.Reading{ID: "net", Icon: model.IconNet, Label: "网络", Text: "—"}
-	if s.Rx >= 0 {
-		r.Text, r.Unit = rate(s.Rx)
-		v, u := rate(s.Tx)
-		r.Sub = "↑" + v + u[:1]
-	}
-	return r
+// temp is the chip's temperature. Like the fan it has no bar: a percent
+// of what would mean nothing.
+func temp(c float64) model.Reading {
+	return model.Reading{ID: "temp", Icon: model.IconTemp, Label: "温度", Text: round(c), Unit: "°C", Level: level(c, 85, 95)}
 }
 
 // disk is how full the system disk is.
@@ -98,23 +94,4 @@ func level(v, warn, crit float64) string {
 		return model.LevelWarn
 	}
 	return ""
-}
-
-// short prints at most three digits: 0.4, 9.5, 12, 820.
-func short(v float64) string {
-	if v < 9.95 {
-		return strconv.FormatFloat(v, 'f', 1, 64)
-	}
-	return round(v)
-}
-
-// rate splits a speed in bytes per second into a number and its unit,
-// short to fit the line: K, M, G (per second).
-func rate(b float64) (string, string) {
-	units := []string{"K", "M", "G"}
-	v, i := b/1024, 0
-	for v >= 999.5 && i < len(units)-1 {
-		v, i = v/1024, i+1
-	}
-	return short(v), units[i]
 }

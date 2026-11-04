@@ -9,8 +9,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Windows has no standard way to read fans; NVIDIA cards report through
-// nvidia-smi, which their driver installs.
+// Windows has no standard way to read fans or the chip's temperature (the
+// ACPI thermal zones need an administrator and read the case, if anything);
+// NVIDIA cards report through nvidia-smi, which their driver installs.
 type win struct {
 	smi string
 }
@@ -22,6 +23,7 @@ func newPlatform() platform {
 }
 
 func (*win) fans(context.Context) []float64 { return nil }
+func (*win) temp(context.Context) float64   { return 0 }
 
 // memory: gopsutil's Used is what Task Manager shows as 正在使用.
 func (*win) memory(context.Context, *Memory) {}

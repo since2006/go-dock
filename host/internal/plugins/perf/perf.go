@@ -1,7 +1,7 @@
-// Package perf adds the computer's CPU, GPU, memory, fans, network and
-// disk to the Agent page's line, read every two seconds while it is on.
-// What the computer cannot report (a GPU's load on some, fans on Windows)
-// is left out.
+// Package perf adds the computer's CPU, GPU, memory, fans, the chip's
+// temperature and disk to the Agent page's line, read every two seconds
+// while it is on. What the computer cannot report (a GPU's load on some,
+// fans and the temperature on Windows) is left out.
 package perf
 
 import (
@@ -62,7 +62,7 @@ func (p *Plugin) SetOptions(o Options) {
 }
 
 // Run reads while it is on, until ctx ends. The first reading after it is
-// turned on only starts the counts (CPU time, network and disk bytes).
+// turned on only starts the count of CPU time.
 func (p *Plugin) Run(ctx context.Context) {
 	var r Reader
 	t := time.NewTicker(Every)

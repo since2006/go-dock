@@ -18,8 +18,7 @@ var mac = sysmon.Sample{
 	Mem:  sysmon.Memory{Usage: sysmon.Usage{Used: 20 * giB, Total: 36 * giB}, Pressure: 1},
 	Disk: sysmon.Usage{Used: 900 * giB, Total: 1000 * giB},
 	Fans: []float64{0, 0},
-	Rx:   5.5 * 1024,
-	Tx:   1.5 * 1024 * 1024,
+	Temp: 45.6,
 }
 
 func enabled() *Plugin {
@@ -50,7 +49,7 @@ func reading(t *testing.T, rs []model.Reading, id string) model.Reading {
 }
 
 // A Mac reports everything: six readings in line order, a bar on each but
-// the network, which shows the upload instead.
+// the fan and the temperature.
 func TestReadings(t *testing.T) {
 	p := enabled()
 	if rs := p.Readings(); rs != nil {
@@ -63,7 +62,7 @@ func TestReadings(t *testing.T) {
 		{ID: "gpu", Icon: model.IconGPU, Label: "GPU", Text: "57", Unit: "%", Pct: ptr(57)},
 		{ID: "mem", Icon: model.IconMemory, Label: "内存", Text: "56", Unit: "%", Pct: ptr(56)},
 		{ID: "fan", Icon: model.IconRotor, Label: "风扇", Text: "停转"},
-		{ID: "net", Icon: model.IconNet, Label: "网络", Text: "5.5", Unit: "K", Sub: "↑1.5M"},
+		{ID: "temp", Icon: model.IconTemp, Label: "温度", Text: "46", Unit: "°C"},
 		{ID: "disk", Icon: model.IconDisk, Label: "磁盘", Text: "90", Unit: "%", Pct: ptr(90), Level: model.LevelWarn},
 	}
 	if !reflect.DeepEqual(rs, want) {
@@ -78,18 +77,14 @@ func TestReadings(t *testing.T) {
 	}
 }
 
-// What a computer cannot report is left out; the network stays, unknown.
+// What a computer cannot report is left out.
 func TestReadingsMissing(t *testing.T) {
 	p := enabled()
 	s := mac
-	s.GPU, s.Fans, s.Rx, s.Tx, s.Disk = -1, nil, -1, -1, sysmon.Usage{}
+	s.GPU, s.Fans, s.Temp, s.Disk = -1, nil, 0, sysmon.Usage{}
 	p.add(s)
-	rs := p.Readings()
-	if got, want := ids(rs), []string{"cpu", "mem", "net"}; !reflect.DeepEqual(got, want) {
+	if got, want := ids(p.Readings()), []string{"cpu", "mem"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("readings %v, want %v", got, want)
-	}
-	if net := reading(t, rs, "net"); net.Text != "—" || net.Unit != "" || net.Sub != "" {
-		t.Fatalf("net before a rate = %+v", net)
 	}
 }
 
@@ -124,9 +119,16 @@ func TestLevels(t *testing.T) {
 	s.CPU, s.GPU, s.Disk = 95, 75, sysmon.Usage{Used: 50 * giB, Total: 100 * giB}
 	p.add(s)
 	rs := p.Readings()
-	for id, want := range map[string]string{"cpu": model.LevelCrit, "gpu": model.LevelWarn, "disk": "", "net": "", "fan": ""} {
+	for id, want := range map[string]string{"cpu": model.LevelCrit, "gpu": model.LevelWarn, "disk": "", "temp": "", "fan": ""} {
 		if got := reading(t, rs, id).Level; got != want {
 			t.Errorf("%s level = %q, want %q", id, got, want)
+		}
+	}
+	for c, want := range map[float64]string{84.4: "", 85: model.LevelWarn, 94.9: model.LevelWarn, 95: model.LevelCrit} {
+		s.Temp = c
+		p.add(s)
+		if got := reading(t, p.Readings(), "temp").Level; got != want {
+			t.Errorf("temp %v level = %q, want %q", c, got, want)
 		}
 	}
 }
@@ -157,7 +159,7 @@ func (f *fakeReader) Read(context.Context) sysmon.Sample {
 }
 
 // Run starts reading when it is turned on; the first reading only
-// starts the counts, and the next comes a whole Every later.
+// starts the CPU's count, and the next comes a whole Every later.
 func TestRun(t *testing.T) {
 	r := &fakeReader{reads: make(chan time.Time, 8)}
 	changed := make(chan struct{}, 8)
@@ -197,22 +199,6 @@ func TestRun(t *testing.T) {
 		case <-changed:
 		case <-deadline:
 			t.Fatal("second reading not shown")
-		}
-	}
-}
-
-func TestFormat(t *testing.T) {
-	rates := map[float64][2]string{
-		0:                {"0.0", "K"},
-		512:              {"0.5", "K"},
-		820 * 1024:       {"820", "K"},
-		999.6 * 1024:     {"1.0", "M"},
-		12.5 * (1 << 20): {"13", "M"},
-		3 * (1 << 30):    {"3.0", "G"},
-	}
-	for b, want := range rates {
-		if v, u := rate(b); v != want[0] || u != want[1] {
-			t.Errorf("rate(%v) = %s %s, want %s %s", b, v, u, want[0], want[1])
 		}
 	}
 }

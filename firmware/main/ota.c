@@ -32,7 +32,7 @@ static bool s_wifi;              // the update came over WiFi
 // The question before an update over WiFi; the UI task answers it.
 static size_t s_ask_size;
 static int64_t s_ask_until;
-static char s_from[52];
+static char s_from[LINK_NAME_LEN]; // the computer that asked
 static volatile int s_answer; // 1 yes, -1 no, 0 not yet
 
 static volatile ota_state_t s_state;

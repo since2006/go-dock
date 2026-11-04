@@ -107,8 +107,8 @@ type DeviceConfig struct {
 	DimAfter      Duration `json:"dim_after"`
 }
 
-// deviceNameLen bounds DeviceConfig.Name, in runes.
-const deviceNameLen = 12
+// deviceNameLen bounds DeviceConfig.Name, in runes: device.NameLen.
+const deviceNameLen = 20
 
 var pairingCodeRE = regexp.MustCompile(`^[0-9]{6}$`)
 

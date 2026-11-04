@@ -17,7 +17,7 @@ target_include_directories(lvgl PUBLIC ${LVGL_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(lvgl PUBLIC LV_CONF_INCLUDE_SIMPLE)
 target_compile_options(lvgl PRIVATE -w)
 
-add_executable(dock_sim sim.c ../main/ui.c)
+add_executable(dock_sim sim.c ../main/hosts.c) # sim.c includes ui.c
 target_include_directories(dock_sim PRIVATE stubs ../main)
 target_compile_definitions(dock_sim PRIVATE FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../main/fonts")
 target_link_libraries(dock_sim lvgl)

@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/sensors"
 	"golang.org/x/sys/unix"
 )
 
@@ -51,6 +52,13 @@ func (d *darwin) memory(ctx context.Context, m *Memory) {
 	if level, err := unix.SysctlUint32("kern.memorystatus_vm_pressure_level"); err == nil {
 		m.Pressure = int(level)
 	}
+}
+
+// temp reads the chip's sensors: on Apple silicon through the HID event
+// system, on Intel Macs from the SMC.
+func (*darwin) temp(ctx context.Context) float64 {
+	ts, _ := sensors.TemperaturesWithContext(ctx) // a partial list may come with an error
+	return chipTemp(ts)
 }
 
 // gpu reads the GPU's load from the IORegistry, where every GPU driver

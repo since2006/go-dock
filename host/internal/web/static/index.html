@@ -90,7 +90,7 @@
         </div>
         <fieldset>
           <label class="check"><input type="checkbox" name="plugins.perf.enabled"> 在屏幕上显示「性能」</label>
-          <small class="muted">显示运行 go-dock 的这台电脑的 CPU、GPU、内存、风扇、网络（下载，旁边是上传）和磁盘，每 2 秒读一次，只在开启时读取。一次显示三个，多的每 6 秒向左轮换一组；偏高时变琥珀色或红色。Mac 上内存和「活动监视器」的「已使用内存」一样算（App 内存 + 联动 + 被压缩），颜色跟着内存压力变。读不到的项不显示：Windows 读不到风扇，GPU 只支持 Mac 和 NVIDIA 显卡（Linux 上还有 AMD）。</small>
+          <small class="muted">显示运行 go-dock 的这台电脑的 CPU、GPU、内存、风扇、温度和磁盘，每 2 秒读一次，只在开启时读取。温度是芯片最热处的温度（Apple 芯片的 Mac 上是整块芯片，其他电脑是 CPU）。一次显示三个，多的每 6 秒向左轮换一组；偏高时变琥珀色或红色（温度从 85°C、95°C 起）。Mac 上内存和「活动监视器」的「已使用内存」一样算（App 内存 + 联动 + 被压缩），颜色跟着内存压力变。读不到的项不显示：Windows 读不到风扇和温度，GPU 只支持 Mac 和 NVIDIA 显卡（Linux 上还有 AMD）。</small>
         </fieldset>
         <div class="row end">
           <span class="form-msg" id="perf-msg" role="status"></span>
@@ -130,13 +130,11 @@
         <fieldset id="wifi-fields" disabled>
           <label>WiFi 名称
             <div class="row">
-              <input name="ssid" maxlength="32" spellcheck="false" placeholder="只支持 2.4 GHz" list="wifi-ssids">
-              <button type="button" class="btn ghost" id="wifi-scan">扫描</button>
+              <input name="ssid" maxlength="32" spellcheck="false" placeholder="只支持 2.4 GHz">
+              <button type="button" class="btn ghost" id="wifi-scan">扫描并选择</button>
             </div>
-            <datalist id="wifi-ssids"></datalist>
-            <small>点「扫描」列出屏幕能收到的 WiFi，点一下填入名称。</small>
+            <small>点「扫描并选择」列出屏幕能收到的 WiFi，选一个、输入密码就能连接；隐藏的 WiFi 直接填名称。</small>
           </label>
-          <div id="wifi-aps" class="ports"></div>
           <label>WiFi 密码<input name="pass" type="password" maxlength="63" autocomplete="new-password"><small>只发给屏幕保存，go-dock 不记录。没有密码的 WiFi 留空。</small></label>
           <label class="check"><input type="checkbox" name="fixed"> 固定 IP（推荐：路由器重启后地址不会变）</label>
           <div id="wifi-static" hidden>
@@ -155,9 +153,9 @@
         <fieldset>
           <legend>设备</legend>
           <label class="check"><input type="checkbox" name="device.enabled"> 启用屏幕</label>
-          <label>屏幕地址<input name="device.addr" placeholder="192.168.1.50" spellcheck="false"><small>屏幕通过 WiFi 接收数据。连上 WiFi 后屏幕卡片上显示地址和配对码；用 USB 线连着屏幕时，在上面「屏幕 WiFi」里点「使用这块屏幕」自动填好。端口默认 47322。</small></label>
+          <label>屏幕地址<input name="device.addr" placeholder="192.168.1.50" spellcheck="false"><small>屏幕通过 WiFi 接收数据。连上 WiFi 后，屏幕上左右滑到「连接信息」页可以看到地址和配对码（还没连电脑时就在屏幕中间的卡片上）；用 USB 线连着屏幕时，在上面「屏幕 WiFi」里点「使用这块屏幕」自动填好。端口默认 47322。</small></label>
           <label>配对码<input name="device.code" placeholder="屏幕上显示的 6 位数字" inputmode="numeric" maxlength="6" spellcheck="false"></label>
-          <label>本机名称<input name="device.name" maxlength="12" placeholder="留空用这台电脑的主机名"><small>屏幕用它区分电脑，比如「屏幕正被 MacBook 使用」，最多 12 个字。</small></label>
+          <label>本机名称<input name="device.name" maxlength="20" placeholder="留空用这台电脑的名称"><small>屏幕上这台电脑那一页的标题。几台电脑连着同一块屏幕时，每台一页，轮流显示，靠它区分，比如「User 的 Mac mini」。最多 20 个字，屏幕上放不下时以「…」截断。</small></label>
           <label>USB 串口（只用来设置屏幕 WiFi、升级固件）
             <div class="row">
               <input name="device.port" list="port-list" placeholder="auto">
@@ -308,6 +306,15 @@
       </div>
     </section>
   </main>
+
+  <dialog id="wifi-dialog" class="dialog settings" aria-labelledby="wifi-dlg-title">
+    <div class="dlg-head">
+      <h2 id="wifi-dlg-title">选择 WiFi</h2>
+      <button type="button" class="dlg-x" id="wifi-dlg-close" aria-label="关闭">×</button>
+    </div>
+    <div class="dlg-body" id="wifi-dlg-body"></div>
+    <div class="dlg-foot" id="wifi-dlg-foot"></div>
+  </dialog>
 
   <script src="app.js"></script>
 </body>

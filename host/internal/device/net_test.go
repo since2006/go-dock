@@ -88,10 +88,10 @@ func TestEncodeWiFi(t *testing.T) {
 
 func TestEncodeHello(t *testing.T) {
 	var h Hello
-	if err := json.Unmarshal(EncodeHello("一二三四五六七八九十甲乙丙", "0123456789abcdef", "123456"), &h); err != nil {
+	if err := json.Unmarshal(EncodeHello("一二三四五六七八九十甲乙丙丁戊己庚辛壬癸子", "0123456789abcdef", "123456"), &h); err != nil {
 		t.Fatal(err)
 	}
-	if h.T != "hello" || h.Proto != ProtoVersion || h.Name != "一二三四五六七八九十甲乙" || h.ID != "0123456789abcdef" || h.Code != "123456" {
+	if h.T != "hello" || h.Proto != ProtoVersion || h.Name != "一二三四五六七八九十甲乙丙丁戊己庚辛壬癸" || h.ID != "0123456789abcdef" || h.Code != "123456" {
 		t.Fatalf("hello = %+v", h)
 	}
 	h = Hello{}
@@ -191,7 +191,7 @@ func TestManagerNet(t *testing.T) {
 		t.Fatalf("status = %+v", st)
 	}
 	// WiFi is set up over the cable only, never over WiFi.
-	if err := m.ConfigureWiFi(WiFiConfig{SSID: "home", Pass: "12345678"}); err == nil || !strings.Contains(err.Error(), "USB") {
+	if _, err := m.ConfigureWiFi(WiFiConfig{SSID: "home", Pass: "12345678"}); err == nil || !strings.Contains(err.Error(), "USB") {
 		t.Fatalf("wifi without the cable: %v", err)
 	}
 	dev.send(t, `{"t":"net","state":"connected","ip":"192.168.1.50","code":"123456"}`)
@@ -343,36 +343,95 @@ func TestUSBAnswersUnaskedHello(t *testing.T) {
 
 func TestConfigureWiFi(t *testing.T) {
 	m, devices := newUSBTestManager(t, io.Discard)
-	if err := m.ConfigureWiFi(WiFiConfig{SSID: "home", Pass: "12345678"}); err == nil || !strings.Contains(err.Error(), "USB") {
+	if _, err := m.ConfigureWiFi(WiFiConfig{SSID: "home", Pass: "12345678"}); err == nil || !strings.Contains(err.Error(), "USB") {
 		t.Fatalf("before linking: %v", err)
 	}
 	_ = devices
 
 	var netNews atomic.Int32
 	m, dev, devices := usbScreen(t, func() { netNews.Add(1) })
-	before := netNews.Load()
-	if err := m.ConfigureWiFi(WiFiConfig{SSID: "home", Pass: "short"}); err == nil {
+	m.wifiTimeout = 300 * time.Millisecond
+	if _, err := m.ConfigureWiFi(WiFiConfig{SSID: "home", Pass: "short"}); err == nil {
 		t.Fatal("bad password passed")
 	}
-	if err := m.ConfigureWiFi(WiFiConfig{SSID: "home", Pass: "12345678", IP: "192.168.1.50"}); err != nil {
-		t.Fatal(err)
+	type result struct {
+		try int
+		err error
 	}
+	configure := func(w WiFiConfig) chan result {
+		ch := make(chan result, 1)
+		go func() {
+			try, err := m.ConfigureWiFi(w)
+			ch <- result{try, err}
+		}()
+		return ch
+	}
+
+	r := configure(WiFiConfig{SSID: "home", Pass: "12345678", IP: "192.168.1.50"})
 	w := dev.next(t, "wifi")
 	if w["ssid"] != "home" || w["pass"] != "12345678" || w["ip"] != "192.168.1.50" || w["mask"] != "255.255.255.0" {
 		t.Fatalf("wifi = %v", w)
 	}
-
+	// News the screen sent before it read the settings are no answer, even
+	// about the same network.
+	dev.send(t, `{"t":"net","state":"failed","ssid":"home","port":47322,"code":"123456","fixed":true,"err":"密码不对"}`)
+	waitFor(t, "old news", func() bool { n := m.Status().USB.Net; return n != nil && n.State == "failed" })
+	if n := m.Status().USB.Net; n.Try != 0 {
+		t.Fatalf("old news numbered %d", n.Try)
+	}
+	before := netNews.Load()
+	dev.send(t, `{"t":"net","state":"connecting","ssid":"home","port":47322,"code":"123456","fixed":true}`)
+	if got := <-r; got.err != nil || got.try != 1 {
+		t.Fatalf("configure = %+v", got)
+	}
+	// The status has the answer by the time the caller hears it.
+	if n := m.Status().USB.Net; n.State != "connecting" || n.Err != "" || n.Try != 1 {
+		t.Fatalf("net = %+v", n)
+	}
 	dev.send(t, `{"t":"net","state":"connected","ssid":"home","ip":"192.168.1.50","port":47322,"code":"123456","fixed":true}`)
-	waitFor(t, "net status", func() bool { return m.Status().USB.Net != nil })
-	if n := *m.Status().USB.Net; n != (NetStatus{State: "connected", SSID: "home", IP: "192.168.1.50", Port: 47322, Code: "123456", Fixed: true}) || n.Addr() != "192.168.1.50" {
+	waitFor(t, "joined", func() bool { return m.Status().USB.Net.State == "connected" })
+	if n := *m.Status().USB.Net; n != (NetStatus{State: "connected", SSID: "home", IP: "192.168.1.50", Port: 47322, Code: "123456", Fixed: true, Try: 1}) || n.Addr() != "192.168.1.50" {
 		t.Fatalf("net = %+v", n)
 	}
 	if netNews.Load() == before {
 		t.Fatal("web not told")
 	}
 
-	// Unplugged: what the screen said about its WiFi goes with it.
+	// Settings the screen will not take come back as a warning, then the
+	// WiFi as it was.
+	r = configure(WiFiConfig{SSID: "cafe"})
+	dev.next(t, "wifi")
+	dev.send(t, `{"t":"log","level":"warn","msg":"正在扫描 WiFi，请几秒后再试"}`)
+	dev.send(t, `{"t":"net","state":"connected","ssid":"home","ip":"192.168.1.50","port":47322,"code":"123456","fixed":true}`)
+	if got := <-r; got.err == nil || got.err.Error() != "正在扫描 WiFi，请几秒后再试" {
+		t.Fatalf("refused: %+v", got)
+	}
+
+	// No answer: the caller hears so.
+	r = configure(WiFiConfig{SSID: "cafe"})
+	dev.next(t, "wifi")
+	if got := <-r; got.err == nil || !strings.Contains(got.err.Error(), "没有回复") {
+		t.Fatalf("silent screen: %+v", got)
+	}
+
+	// WiFi off is answered by "off".
+	r = configure(WiFiConfig{})
+	if w := dev.next(t, "wifi"); w["ssid"] != "" {
+		t.Fatalf("off = %v", w)
+	}
+	dev.send(t, `{"t":"net","state":"off","port":47322,"code":"123456"}`)
+	if got := <-r; got.err != nil || got.try != 2 {
+		t.Fatalf("off: %+v", got)
+	}
+
+	// Unplugged while waiting: the caller hears so at once, and what the
+	// screen said about its WiFi goes with it.
+	r = configure(WiFiConfig{SSID: "home", Pass: "12345678"})
+	dev.next(t, "wifi")
 	dev.conn.Close()
+	if got := <-r; got.err == nil || !strings.Contains(got.err.Error(), "USB 连接中断") {
+		t.Fatalf("unplugged: %+v", got)
+	}
 	<-devices
 	waitFor(t, "forgotten", func() bool { u := m.Status().USB; return u.Net == nil && u.State != StateReady })
 }

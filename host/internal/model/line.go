@@ -8,7 +8,7 @@ type Reading struct {
 	Icon  string `json:"icon,omitempty"` // Icon* below; empty draws none
 	Label string `json:"label"`
 	Text  string `json:"text"`           // the reading: 37, 2150, 停转
-	Unit  string `json:"unit,omitempty"` // after it, smaller: %, rpm, KB/s
+	Unit  string `json:"unit,omitempty"` // after it, smaller: %, rpm, °C
 	Sub   string `json:"sub,omitempty"`  // shown instead of a bar: ↑ 1.5M
 	Pct   *int   `json:"pct,omitempty"`  // 0–100, a bar
 	// Level (Level*) colours a reading that needs attention.
@@ -27,6 +27,6 @@ const (
 	IconGPU    = "gpu"
 	IconMemory = "memory"
 	IconRotor  = "rotor" // a fan's blades
-	IconNet    = "net"
+	IconTemp   = "temp"  // a thermometer
 	IconDisk   = "disk"
 )

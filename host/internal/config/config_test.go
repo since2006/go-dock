@@ -179,7 +179,7 @@ func TestValidateDeviceScreen(t *testing.T) {
 		"address without code": func(d *DeviceConfig) { d.Code = "" },
 		"short code":           func(d *DeviceConfig) { d.Code = "12345" },
 		"letter code":          func(d *DeviceConfig) { d.Code = "12345a" },
-		"long name":            func(d *DeviceConfig) { d.Name = "一二三四五六七八九十甲乙丙" },
+		"long name":            func(d *DeviceConfig) { d.Name = "一二三四五六七八九十甲乙丙丁戊己庚辛壬癸子" },
 	} {
 		bad := ok.Clone()
 		f(&bad.Device)

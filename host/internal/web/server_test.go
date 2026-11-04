@@ -55,12 +55,12 @@ func (f *fakeBackend) DeviceWiFiScan(ctx context.Context) (any, error) {
 	}
 	return []map[string]any{{"ssid": "home", "rssi": -48}, {"ssid": "cafe", "rssi": -80, "open": true}}, nil
 }
-func (f *fakeBackend) DeviceWiFi(w WiFi) error {
+func (f *fakeBackend) DeviceWiFi(w WiFi) (int, error) {
 	if w.SSID == "busy" {
-		return errors.New("屏幕未连接")
+		return 0, errors.New("屏幕未连接")
 	}
 	f.wifi = append(f.wifi, w)
-	return nil
+	return len(f.wifi), nil
 }
 func (f *fakeBackend) ApplyFirmware() error {
 	if f.flashing {
@@ -300,7 +300,9 @@ func TestWiFi(t *testing.T) {
 	b, h := newTestServer("127.0.0.1:47321")
 	host := "127.0.0.1:47321"
 	body := `{"ssid":"home","pass":"secret123","ip":"192.168.1.50","mask":"255.255.255.0","gw":"192.168.1.1"}`
-	if w := do(h, "POST", host, "/api/device/wifi", "application/json", body); w.Code != http.StatusOK || len(b.wifi) != 1 {
+	// The answer numbers the try, for the page to wait on its outcome.
+	if w := do(h, "POST", host, "/api/device/wifi", "application/json", body); w.Code != http.StatusOK || len(b.wifi) != 1 ||
+		!strings.Contains(w.Body.String(), `"try":1`) || !strings.Contains(w.Body.String(), `"device":{"state":"disabled"}`) {
 		t.Fatalf("wifi: %d %s", w.Code, w.Body.String())
 	}
 	if got := b.wifi[0]; got != (WiFi{SSID: "home", Pass: "secret123", IP: "192.168.1.50", Mask: "255.255.255.0", GW: "192.168.1.1"}) {

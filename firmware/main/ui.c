@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "fonts.h"
+#include "hosts.h"
 #include "link.h"
 #include "lvgl.h"
 #include "model.h"
@@ -27,6 +28,8 @@
 
 #define OFFLINE_AFTER_US (15 * 1000000LL)
 #define TOUCH_WAKE_US (60 * 1000000LL)
+#define TITLE_MAX_W 300 // a longer computer name ends in "..."
+#define INFO_HOLD_US (120 * 1000000LL) // the connection page goes this long after the last touch
 #define SHIFT_EVERY_US (60 * 1000000LL)    // pixel shift against burn-in
 
 // Panel levels with go-dock away, never above the brightness set (settings.h).
@@ -125,6 +128,9 @@ static struct {
     lv_obj_t *root;    // shifted a few px now and then against burn-in
     lv_obj_t *content; // dimmed when the host is away
     lv_obj_t *title, *summary, *link_dot, *clock;
+    lv_obj_t *hosts, *hdots[LINK_HOSTS], *hinfo; // after the name: a dot per computer, a ring for the connection page
+    lv_obj_t *agent;                             // the Agent page under the strip: readings, usage, tasks
+    lv_obj_t *info, *info_addr, *info_code, *info_hint, *info_hosts, *info_wifi; // the connection page
     lv_obj_t *line, *lgroup[2]; // the readings, clipped to the line
     seg_t seg[2][READ_N];
     lv_obj_t *usage_card;
@@ -154,6 +160,31 @@ static int64_t s_touch_us;
 static int64_t s_active_us;
 static int64_t s_shift_us;
 static int s_shift;
+
+// Whose page is on screen (hosts.c picks it): the slot and the go-dock in
+// it, of which the screen keeps the name and last snapshot once it is gone.
+static link_host_t s_hosts[LINK_HOSTS];
+static int s_shown = -1;
+static uint32_t s_shown_gen;
+static char s_shown_id[17];
+static char s_shown_name[LINK_NAME_LEN];
+static int64_t s_shown_at;
+static int64_t s_shown_rx_us;         // when it was last heard from, 0 nobody yet
+static int64_t s_seen_us[LINK_HOSTS]; // when each slot's go-dock was last on screen
+static uint32_t s_seen_gen[LINK_HOSTS];
+static int s_order[LINK_HOSTS]; // the slots with a page, by id: the dots, swiping
+static int s_order_n;
+static bool s_attention; // some page has tasks that need the user
+static bool s_no_page;   // go-docks are linked, but none can show (another protocol)
+
+// The connection page (docs/protocol-v1.md §7.1, «连接信息页»): where another
+// computer reaches the screen. Only a swipe or a tap brings it up, never
+// the turns; it goes INFO_HOLD_US after the last touch, or when a computer
+// joins, showing that one's page. The computers' pages keep their place
+// under it (s_shown).
+static bool s_info;
+static int64_t s_info_at;
+static char s_info_ids[LINK_HOSTS][17]; // the computers on the screen when it came up
 
 static dock_line_t s_line;
 static uint32_t s_line_version;
@@ -378,11 +409,39 @@ static int page_of(int index)
 
 // The strip on top: the computer's name and the summary on the left; the
 // link dot and the clock on the right.
+static void turn_host(int delta);
+
+static void on_host_tap(lv_event_t *e)
+{
+    (void)e;
+    turn_host(1);
+}
+
 static void build_strip(lv_obj_t *p)
 {
-    ui.title = text(p, font_get(FONT_BOLD, 22), C_TEXT);
+    ui.title = line(p, font_get(FONT_BOLD, 22), C_TEXT, TITLE_MAX_W);
     lv_label_set_text(ui.title, "Agent");
     lv_obj_set_pos(ui.title, PAD_X, TOP);
+    lv_obj_add_flag(ui.title, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(ui.title, 12);
+    lv_obj_add_event_cb(ui.title, on_host_tap, LV_EVENT_CLICKED, NULL);
+
+    // A dot per computer after the name, then a ring for the connection
+    // page, the page shown drawn long; tapping them or the name shows the
+    // next.
+    ui.hosts = box(p, 0, 0, LV_SIZE_CONTENT, 6, 0, -1);
+    lv_obj_set_flex_flow(ui.hosts, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ui.hosts, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(ui.hosts, 5, 0);
+    lv_obj_add_flag(ui.hosts, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(ui.hosts, 16);
+    lv_obj_add_event_cb(ui.hosts, on_host_tap, LV_EVENT_CLICKED, NULL);
+    for (int i = 0; i < LINK_HOSTS; i++) {
+        ui.hdots[i] = box(ui.hosts, 0, 0, 6, 6, 0x3A3A3C, 3);
+    }
+    ui.hinfo = box(ui.hosts, 0, 0, 6, 6, 0xE9E9E5, 3);
+    lv_obj_set_style_border_color(ui.hinfo, lv_color_hex(0x75746F), 0);
+    lv_obj_add_flag(ui.hosts, LV_OBJ_FLAG_HIDDEN);
 
     ui.summary = line(p, font_get(FONT_REGULAR, 17), C_TEXT2, 360);
     lv_obj_align_to(ui.summary, ui.title, LV_ALIGN_OUT_RIGHT_BOTTOM, 12, -3);
@@ -550,16 +609,19 @@ static void on_pager(lv_event_t *e)
     render_rows();
 }
 
-// Up and down page through the tasks; there is no other page.
+// Up and down page through the tasks, left and right through the
+// computers and the connection page.
 static void on_gesture(lv_event_t *e)
 {
     (void)e;
     lv_indev_t *indev = lv_indev_active();
     lv_dir_t dir = lv_indev_get_gesture_dir(indev);
     lv_indev_wait_release(indev); // a swipe never also taps what it started on
-    if (dir == LV_DIR_TOP || dir == LV_DIR_BOTTOM) {
+    if ((dir == LV_DIR_TOP || dir == LV_DIR_BOTTOM) && !s_info) {
         go_page(dir == LV_DIR_TOP ? 1 : -1);
         render_rows();
+    } else if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
+        turn_host(dir == LV_DIR_LEFT ? 1 : -1);
     }
 }
 
@@ -686,9 +748,11 @@ static const stroke_t ICON_ROTOR[] = {
     ARC(150, 165, 40, 247, 353), ARC(174, 123, 40, 67, 173),
     ARC(66, 123, 40, 7, 113), ARC(90, 165, 40, 187, 293),
 };
-static const stroke_t ICON_NET[] = {
-    LINE(80, 40, 80, 190), LINE(45, 155, 80, 190), LINE(80, 190, 115, 155),
-    LINE(160, 200, 160, 50), LINE(125, 85, 160, 50), LINE(160, 50, 195, 85),
+// A thermometer: the tube with its round top, the bulb open where they
+// meet, and two marks beside it.
+static const stroke_t ICON_TEMP[] = {
+    LINE(125, 138, 125, 50), ARC(100, 50, 25, 180, 360), LINE(75, 50, 75, 138), ARC(100, 175, 45, 304, 236),
+    LINE(155, 60, 195, 60),  LINE(155, 105, 195, 105),
 };
 static const stroke_t ICON_DISK[] = {
     LINE(40, 45, 200, 45), LINE(200, 45, 200, 195), LINE(200, 195, 40, 195), LINE(40, 195, 40, 45),
@@ -702,14 +766,14 @@ static const struct {
 } ICONS[DOCK_ICON_COUNT] = {
     [DOCK_ICON_NONE] = {NULL, 0},          [DOCK_ICON_CPU] = STROKES(ICON_CPU),
     [DOCK_ICON_GPU] = STROKES(ICON_GPU),   [DOCK_ICON_MEMORY] = STROKES(ICON_MEMORY),
-    [DOCK_ICON_ROTOR] = STROKES(ICON_ROTOR), [DOCK_ICON_NET] = STROKES(ICON_NET),
+    [DOCK_ICON_ROTOR] = STROKES(ICON_ROTOR), [DOCK_ICON_TEMP] = STROKES(ICON_TEMP),
     [DOCK_ICON_DISK] = STROKES(ICON_DISK),
 };
 
 // A reading is coloured by its icon.
 static const uint32_t ICON_COLOR[DOCK_ICON_COUNT] = {
     [DOCK_ICON_NONE] = 0xBDBDB8,   [DOCK_ICON_CPU] = 0x5AA9FF,   [DOCK_ICON_GPU] = 0xC084FC,
-    [DOCK_ICON_MEMORY] = 0x3DD68C, [DOCK_ICON_ROTOR] = 0x4FD1C5, [DOCK_ICON_NET] = 0xFF9F43, [DOCK_ICON_DISK] = 0xBDBDB8,
+    [DOCK_ICON_MEMORY] = 0x3DD68C, [DOCK_ICON_ROTOR] = 0x4FD1C5, [DOCK_ICON_TEMP] = 0xF472B6, [DOCK_ICON_DISK] = 0xBDBDB8,
 };
 
 // Draws icon in a size px square at ox, oy, in obj's arc and line colours.
@@ -805,6 +869,38 @@ static void build_line(lv_obj_t *p)
     lv_obj_add_flag(ui.line, LV_OBJ_FLAG_HIDDEN);
 }
 
+// The connection page, in place of the Agent page under the strip: the
+// screen's address and pairing code large, what to do with them, then the
+// computers on the screen and its WiFi.
+static void build_info(lv_obj_t *p)
+{
+    const int w = SCR_W - 2 * PAD_X;
+    ui.info = box(p, 0, 0, SCR_W, SCR_H, 0, -1);
+    lv_obj_remove_flag(ui.info, LV_OBJ_FLAG_CLICKABLE); // over the strip: taps go through to the name
+    lv_obj_t *card = box(ui.info, PAD_X, 54, w, 238, C_CARD, 18);
+    lv_obj_t *l = text(card, font_get(FONT_REGULAR, 17), C_TEXT3);
+    lv_label_set_text(l, "屏幕地址");
+    lv_obj_set_pos(l, 24, 18);
+    ui.info_addr = text(card, font_get(FONT_MONO_BOLD, 52), C_TEXT);
+    lv_obj_set_pos(ui.info_addr, 24, 40);
+    l = text(card, font_get(FONT_REGULAR, 17), C_TEXT3);
+    lv_label_set_text(l, "配对码");
+    lv_obj_set_pos(l, 24, 124);
+    ui.info_code = text(card, font_get(FONT_MONO_BOLD, 52), C_GREEN);
+    lv_obj_set_style_text_letter_space(ui.info_code, 8, 0);
+    lv_obj_set_pos(ui.info_code, 24, 146);
+
+    // What to do with them, under the card; who is on the screen and its
+    // WiFi at the bottom.
+    ui.info_hint = line(ui.info, font_get(FONT_REGULAR, 18), C_TEXT2, w - 8);
+    lv_obj_set_pos(ui.info_hint, PAD_X + 4, 306);
+    ui.info_hosts = line(ui.info, font_get(FONT_REGULAR, 18), C_TEXT, w - 8);
+    lv_obj_set_pos(ui.info_hosts, PAD_X + 4, 372);
+    ui.info_wifi = line(ui.info, font_get(FONT_REGULAR, 16), C_TEXT4, w - 8);
+    lv_obj_set_pos(ui.info_wifi, PAD_X + 4, 404);
+    lv_obj_add_flag(ui.info, LV_OBJ_FLAG_HIDDEN);
+}
+
 void ui_create(void)
 {
     s_snap = heap_caps_calloc(1, sizeof(dock_snapshot_t), MALLOC_CAP_SPIRAM);
@@ -819,9 +915,12 @@ void ui_create(void)
     ui.root = box(scr, 0, 0, SCR_W, SCR_H, 0, -1);
     ui.content = box(ui.root, 0, 0, SCR_W, SCR_H, 0, -1);
     build_strip(ui.content);
-    build_line(ui.content);
-    build_usage(ui.content);
-    build_tasks(ui.content);
+    ui.agent = box(ui.content, 0, 0, SCR_W, SCR_H, 0, -1);
+    lv_obj_remove_flag(ui.agent, LV_OBJ_FLAG_CLICKABLE); // over the strip: taps go through to the name
+    build_line(ui.agent);
+    build_usage(ui.agent);
+    build_tasks(ui.agent);
+    build_info(ui.content);
     build_overlay(ui.root);
 
     int64_t now = esp_timer_get_time();
@@ -851,21 +950,6 @@ static void agent_summary(char *buf, size_t size)
     }
 }
 
-// The strip: the computer's name (from its go-dock's hello) and the
-// active tasks, the summary taking the room up to the link dot.
-static void render_strip(void)
-{
-    char buf[100], name[52];
-    agent_summary(buf, sizeof(buf));
-    link_host_name(name, sizeof(name));
-    set_text(ui.title, name[0] ? name : "Agent");
-    set_text(ui.summary, buf);
-    lv_obj_update_layout(ui.content);
-    lv_obj_align_to(ui.summary, ui.title, LV_ALIGN_OUT_RIGHT_BOTTOM, 12, -3);
-    int w = lv_obj_get_x(ui.link_dot) - 12 - lv_obj_get_x(ui.summary);
-    lv_obj_set_width(ui.summary, w > 1 ? w : 1);
-}
-
 static void show(lv_obj_t *o, bool on)
 {
     if (on) {
@@ -873,6 +957,56 @@ static void show(lv_obj_t *o, bool on)
     } else {
         lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+// The strip: the computer's name (from its go-dock's hello), the dots of
+// the pages, and the active tasks, the summary taking the room up to the
+// link dot. On the connection page its title, no summary.
+static void render_strip(void)
+{
+    char buf[100] = "";
+    const char *name = s_info ? "连接信息" : s_shown_name[0] ? s_shown_name : "Agent";
+    if (!s_info) {
+        agent_summary(buf, sizeof(buf));
+    }
+    lv_point_t size;
+    lv_text_get_size(&size, name, lv_obj_get_style_text_font(ui.title, 0), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    lv_obj_set_width(ui.title, size.x < TITLE_MAX_W ? size.x : TITLE_MAX_W);
+    set_text(ui.title, name);
+    set_text(ui.summary, buf);
+
+    // The dots show once there is another page: a computer's has the
+    // connection page beside it.
+    bool many = s_order_n > 0 || s_info;
+    show(ui.hosts, many);
+    lv_obj_set_width(ui.hinfo, s_info ? 18 : 6);
+    lv_obj_set_style_bg_opa(ui.hinfo, s_info ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ui.hinfo, s_info ? 0 : 1, 0);
+    for (int i = 0; many && i < LINK_HOSTS; i++) {
+        show(ui.hdots[i], i < s_order_n);
+        if (i >= s_order_n) {
+            continue;
+        }
+        // Another computer's dot takes the colour of what needs the user there.
+        const link_host_t *h = &s_hosts[s_order[i]];
+        bool on = !s_info && s_order[i] == s_shown;
+        uint32_t c = on ? 0xE9E9E5 : h->attention ? STATE[h->top].color : 0x3A3A3C;
+        lv_obj_set_width(ui.hdots[i], on ? 18 : 6);
+        lv_obj_set_style_bg_color(ui.hdots[i], lv_color_hex(c), 0);
+    }
+    lv_obj_update_layout(ui.content);
+    lv_obj_t *after = ui.title;
+    if (many) {
+        lv_obj_align_to(ui.hosts, ui.title, LV_ALIGN_OUT_RIGHT_MID, 12, 1);
+        after = ui.hosts;
+    }
+    lv_obj_align_to(ui.summary, after, many ? LV_ALIGN_OUT_RIGHT_MID : LV_ALIGN_OUT_RIGHT_BOTTOM, 12, many ? -1 : -3);
+    if (many) {
+        // On the title's baseline, like without the dots.
+        lv_obj_set_y(ui.summary, lv_obj_get_y(ui.title) + lv_obj_get_height(ui.title) - lv_obj_get_height(ui.summary) - 3);
+    }
+    int w = lv_obj_get_x(ui.link_dot) - 12 - lv_obj_get_x(ui.summary);
+    lv_obj_set_width(ui.summary, w > 1 ? w : 1);
 }
 
 // Lays out reading r in seg s at x, w wide: icon, label, the reading and
@@ -984,7 +1118,7 @@ static void tick_line(int64_t now_us)
 // start the turning over; the line coming or going relays the Agent page.
 static void take_line(int64_t now_us)
 {
-    if (!link_take_line(&s_line, &s_line_version)) {
+    if (s_shown < 0 || !link_take_line(s_shown, s_shown_gen, &s_line, &s_line_version)) {
         return;
     }
     char ids[sizeof(s_line_ids)] = "";
@@ -1236,7 +1370,7 @@ static bool wifi_hint(const wlan_status_t *w, char *sub, size_t subn, char *note
 // Shows why there is nothing current to display, or hides the card.
 static void render_overlay(int64_t now_us)
 {
-    int64_t last = link_last_rx_us();
+    int64_t last = s_shown_rx_us;
     const char *title = NULL, *icon = LV_SYMBOL_USB;
     uint32_t icon_color = C_RED;
     char sub[160] = "", note[128] = "", ver[112];
@@ -1283,7 +1417,9 @@ static void render_overlay(int64_t now_us)
             snprintf(note, sizeof(note), "仍在使用原来的固件");
             snprintf(ver, sizeof(ver), "固件 %s", ota_version());
         }
-    } else if (link_incompatible()) {
+    } else if (s_info) {
+        // The connection page says where to reach the screen itself.
+    } else if (s_no_page && (last == 0 || now_us - last > OFFLINE_AFTER_US)) {
         title = "版本不兼容";
         snprintf(sub, sizeof(sub), "请把 go-dock 和固件升级到同一版本");
     } else if (last == 0) {
@@ -1298,10 +1434,11 @@ static void render_overlay(int64_t now_us)
         title = "主机离线";
         icon = LV_SYMBOL_WIFI;
         int64_t sec = (now_us - last) / 1000000;
+        const char *from = s_shown_name[0] ? s_shown_name : "go-dock";
         if (sec < 120) {
-            snprintf(sub, sizeof(sub), "已 %d 秒没有收到 go-dock 的数据", (int)sec);
+            snprintf(sub, sizeof(sub), "已 %d 秒没有收到「%s」的数据", (int)sec, from);
         } else {
-            snprintf(sub, sizeof(sub), "已 %d 分钟没有收到 go-dock 的数据", (int)(sec / 60));
+            snprintf(sub, sizeof(sub), "已 %d 分钟没有收到「%s」的数据", (int)(sec / 60), from);
         }
         // A WiFi problem is the likely reason; else say how old the state is.
         if (wifi.state == WLAN_CONNECTING) {
@@ -1380,10 +1517,206 @@ void ui_touched(void)
     s_touch_us = esp_timer_get_time();
 }
 
+// show_host puts slot's page on screen, from its first task page; the
+// snapshot and line come on the next take.
+static void show_host(int slot, int64_t now_us)
+{
+    s_shown = slot;
+    s_shown_gen = s_hosts[slot].gen;
+    snprintf(s_shown_id, sizeof(s_shown_id), "%s", s_hosts[slot].id);
+    snprintf(s_shown_name, sizeof(s_shown_name), "%s", s_hosts[slot].name);
+    s_shown_at = s_seen_us[slot] = now_us;
+    s_version = s_line_version = 0;
+    s_page = 0;
+    s_first_id[0] = '\0';
+}
+
+// The connection page's texts: the address and pairing code, or why there
+// is no address; the computers on the screen; the WiFi and the firmware.
+static void render_info(void)
+{
+    if (!s_info) {
+        return;
+    }
+    wlan_status_t w = wlan_status();
+    bool up = w.state == WLAN_CONNECTED;
+    set_text(ui.info_addr, up ? w.ip : "—");
+    set_text(ui.info_code, wlan_code());
+
+    char buf[200];
+    switch (w.state) {
+    case WLAN_CONNECTED:
+        snprintf(buf, sizeof(buf), "在另一台电脑的 go-dock「设置 → 设备」里填上这两项");
+        break;
+    case WLAN_CONNECTING:
+        snprintf(buf, sizeof(buf), "正在连接 WiFi「%s」…", w.ssid);
+        break;
+    case WLAN_FAILED:
+        snprintf(buf, sizeof(buf), "WiFi「%s」连不上：%s", w.ssid, w.err);
+        break;
+    default:
+        snprintf(buf, sizeof(buf), "用 USB 连接电脑，在 go-dock 里设置屏幕 WiFi");
+        break;
+    }
+    set_text(ui.info_hint, buf);
+
+    size_t n = 0;
+    if (s_order_n == 0) {
+        n = snprintf(buf, sizeof(buf), "还没有电脑连着这块屏幕");
+    } else {
+        n = snprintf(buf, sizeof(buf), "已连接 %d 台：", s_order_n);
+    }
+    for (int i = 0; i < s_order_n && n < sizeof(buf); i++) {
+        n += snprintf(buf + n, sizeof(buf) - n, "%s%s", i ? "、" : "", s_hosts[s_order[i]].name);
+    }
+    set_text(ui.info_hosts, buf);
+
+    n = 0;
+    if (w.ssid[0]) {
+        n = snprintf(buf, sizeof(buf), "WiFi「%s」 · ", w.ssid);
+    }
+    if (up && n < sizeof(buf)) {
+        n += snprintf(buf + n, sizeof(buf) - n, "%s · ", w.fixed ? "固定 IP" : "IP 由路由器分配，可能会变");
+    }
+    if (n < sizeof(buf)) {
+        snprintf(buf + n, sizeof(buf) - n, "固件 %s", ota_version());
+    }
+    set_text(ui.info_wifi, buf);
+}
+
+// show_info puts the connection page on screen, noting who is on the
+// screen then, or takes it off for the computer page under it.
+static void show_info(bool on, int64_t now_us)
+{
+    if (on) {
+        s_info_at = now_us;
+        memset(s_info_ids, 0, sizeof(s_info_ids));
+        for (int i = 0; i < s_order_n; i++) {
+            snprintf(s_info_ids[i], sizeof(s_info_ids[i]), "%s", s_hosts[s_order[i]].id);
+        }
+    }
+    s_info = on;
+    show(ui.agent, !on);
+    show(ui.info, on);
+    render_info();
+    render_strip();
+}
+
+// turn_host shows the next page (delta 1) or the one before (-1), in the
+// order of the dots: the computers', then the connection page. With no
+// computer the card in the middle says where to reach the screen.
+static void turn_host(int delta)
+{
+    if (s_order_n == 0) {
+        return;
+    }
+    int n = s_order_n + 1, at = s_order_n;
+    for (int i = 0; !s_info && i < s_order_n; i++) {
+        if (s_order[i] == s_shown) {
+            at = i;
+        }
+    }
+    int next = ((at + delta) % n + n) % n;
+    int64_t now = esp_timer_get_time();
+    if (next == s_order_n) {
+        show_info(true, now);
+        return;
+    }
+    if (s_info) {
+        show_info(false, now);
+    }
+    show_host(s_order[next], now);
+    render_strip();
+}
+
+// follow_hosts reads who is on the screen and turns to another page when
+// hosts.c says so. A go-dock that came back on a new link keeps its page.
+static void follow_hosts(int64_t now_us)
+{
+    link_hosts(s_hosts);
+    for (int i = 0; i < LINK_HOSTS; i++) {
+        if (s_seen_gen[i] != s_hosts[i].gen) {
+            s_seen_gen[i] = s_hosts[i].gen;
+            s_seen_us[i] = 0;
+        }
+    }
+    if (s_shown >= 0 && s_hosts[s_shown].gen != s_shown_gen) {
+        int same = -1;
+        for (int i = 0; s_shown_id[0] && i < LINK_HOSTS; i++) {
+            if (s_hosts[i].gen && strcmp(s_hosts[i].id, s_shown_id) == 0) {
+                same = i;
+            }
+        }
+        s_shown = same;
+        if (same >= 0) {
+            s_shown_gen = s_hosts[same].gen;
+            s_version = s_line_version = 0;
+        }
+    }
+    if (s_info) {
+        // A computer that joined meanwhile shows that it did.
+        int joined = -1;
+        for (int i = 0; i < LINK_HOSTS; i++) {
+            if (!host_present(&s_hosts[i], now_us)) {
+                continue;
+            }
+            bool known = false;
+            for (int k = 0; k < LINK_HOSTS; k++) {
+                known = known || strcmp(s_info_ids[k], s_hosts[i].id) == 0;
+            }
+            if (!known) {
+                joined = i;
+            }
+        }
+        int64_t since = s_touch_us > s_info_at ? s_touch_us : s_info_at;
+        if (joined >= 0 || now_us - since >= INFO_HOLD_US) {
+            show_info(false, now_us);
+        }
+        if (joined >= 0) {
+            show_host(joined, now_us);
+        }
+    }
+    if (!s_info) {
+        int pick = host_pick(s_hosts, s_seen_us, s_shown, s_shown_at, s_touch_us, now_us);
+        if (pick >= 0 && pick != s_shown) {
+            show_host(pick, now_us);
+        }
+    }
+
+    s_order_n = 0;
+    s_attention = s_no_page = false;
+    for (int i = 0; i < LINK_HOSTS; i++) {
+        const link_host_t *h = &s_hosts[i];
+        s_no_page = s_no_page || (h->gen && h->incompatible);
+        if (!host_present(h, now_us)) {
+            continue;
+        }
+        int k = s_order_n++;
+        for (; k > 0 && strcmp(s_hosts[s_order[k - 1]].id, h->id) > 0; k--) {
+            s_order[k] = s_order[k - 1];
+        }
+        s_order[k] = i;
+        s_attention = s_attention || h->attention;
+        if (h->active) {
+            s_active_us = now_us;
+        }
+    }
+    s_no_page = s_no_page && s_order_n == 0;
+    if (s_shown >= 0) {
+        const link_host_t *h = &s_hosts[s_shown];
+        if (!s_info) {
+            s_seen_us[s_shown] = now_us;
+        }
+        s_shown_rx_us = h->last_rx_us;
+        snprintf(s_shown_name, sizeof(s_shown_name), "%s", h->name);
+    }
+}
+
 void ui_poll(void)
 {
     int64_t now_us = esp_timer_get_time();
-    bool fresh = link_take_snapshot(s_snap, &s_version, &s_rx_us);
+    follow_hosts(now_us);
+    bool fresh = s_shown >= 0 && link_take_snapshot(s_shown, s_shown_gen, s_snap, &s_version, &s_rx_us);
     if (fresh) {
         s_have = true;
         // Stay on the page that showed the same first task, if it is still there.
@@ -1396,12 +1729,6 @@ void ui_poll(void)
         }
         layout_pages();
         s_page = keep >= 0 ? page_of(keep) : (s_first_id[0] ? 0 : s_page);
-        for (int i = 0; i < s_snap->count; i++) {
-            if (is_active(s_snap->sessions[i].state)) {
-                s_active_us = now_us;
-                break;
-            }
-        }
         render_strip();
         render_rows();
     }
@@ -1422,6 +1749,8 @@ void ui_poll(void)
         int64_t now = host_now();
         render_usage(now);
         render_clock();
+        render_strip(); // the computers' dots
+        render_info();
         render_overlay(now_us);
         if (!fresh) {
             render_rows(); // elapsed times
@@ -1435,17 +1764,17 @@ static uint8_t brightness(void)
     settings_t st = settings_get();
     uint8_t full = full_level();
     int64_t now_us = esp_timer_get_time();
-    int64_t last = link_last_rx_us();
-    if (ota_status(NULL, NULL) != OTA_IDLE) {
-        return full;
+    int64_t last = s_shown_rx_us;
+    if (ota_status(NULL, NULL) != OTA_IDLE || s_info) {
+        return full; // an update, or someone reading the address
     }
     if (last == 0 || now_us - last > OFFLINE_AFTER_US) {
         bool long_gone = last == 0 ? now_us > 10 * 60 * 1000000LL : now_us - last > 10 * 60 * 1000000LL;
         uint8_t away = long_gone ? BRIGHT_ASLEEP : BRIGHT_OFFLINE;
         return now_us - s_touch_us < TOUCH_WAKE_US || away > full ? full : away;
     }
-    if (s_have && (s_snap->counts[DOCK_APPROVAL] || s_snap->counts[DOCK_INPUT] || s_snap->counts[DOCK_ERROR])) {
-        return full; // needs the user: never dim
+    if (s_attention) {
+        return full; // a computer needs the user: never dim
     }
     if (st.dim_after == 0 || now_us - s_touch_us < TOUCH_WAKE_US || now_us - s_active_us < st.dim_after * 1000000LL) {
         return full;
